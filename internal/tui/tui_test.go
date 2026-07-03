@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"bruce-go/internal/agent"
 	"bruce-go/internal/approval"
@@ -47,6 +48,15 @@ func TestInputFrameLineUsesSolidRule(t *testing.T) {
 	line := inputFrameLine(40)
 	if len([]rune(line)) != 40 || strings.Trim(line, "━") != "" {
 		t.Fatalf("line = %q", line)
+	}
+}
+
+func TestCursorStyleUsesGrayBackground(t *testing.T) {
+	if got := cursorCellStyle.GetBackground(); got != lipgloss.Color("#C0C0C0") {
+		t.Fatalf("cursor background = %v, want gray", got)
+	}
+	if got := cursorCellStyle.GetForeground(); got != lipgloss.Color("0") {
+		t.Fatalf("cursor foreground = %v, want black", got)
 	}
 }
 

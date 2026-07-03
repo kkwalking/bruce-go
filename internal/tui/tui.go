@@ -1235,7 +1235,7 @@ var (
 	userStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
 	mentionStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
 	imageStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
-	cursorCellStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("15"))
+	cursorCellStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("#C0C0C0")).Bold(true)
 )
 
 func empty(value, fallback string) string {
