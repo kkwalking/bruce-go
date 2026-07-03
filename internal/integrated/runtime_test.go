@@ -18,6 +18,9 @@ func TestRuntimeHandlesTaskAndSlashCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if rt.HITL.Enabled() {
+		t.Fatal("HITL should be disabled by default")
+	}
 	result := rt.Handle(context.Background(), "hello")
 	if result.Err != nil {
 		t.Fatal(result.Err)

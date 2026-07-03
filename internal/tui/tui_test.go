@@ -50,6 +50,12 @@ func TestInputFrameLineUsesSolidRule(t *testing.T) {
 	}
 }
 
+func TestTUIApprovalHandlerDefaultsDisabled(t *testing.T) {
+	if newTUIApprovalHandler().Enabled() {
+		t.Fatal("TUI HITL should be disabled by default")
+	}
+}
+
 func TestStreamingAssistantDeltasProduceSingleFinalMessage(t *testing.T) {
 	model := NewModel(context.Background(), testRuntime(t))
 	model.messages = nil
@@ -105,20 +111,66 @@ func TestApprovalDialogCompletesFromKeyInput(t *testing.T) {
 func TestRuntimeEventsUpdateSingleToolActivityLine(t *testing.T) {
 	model := NewModel(context.Background(), testRuntime(t))
 	model.messages = nil
-	call := llm.ToolCall{ID: "call-1", Function: llm.FunctionCall{Name: "write_file", Arguments: `{}`}}
+	call := llm.ToolCall{ID: "call-1", Function: llm.FunctionCall{Name: "write_file", Arguments: `{"path":"a.txt"}`}}
 	model.handleRuntimeEvent(event.NewToolCallStarted("run-1", call))
 	model.handleRuntimeEvent(event.NewToolCallCompleted("run-1", toolResult(call, "success")))
 	count := 0
 	for _, message := range model.messages {
 		if strings.Contains(message.text, "write_file") {
 			count++
-			if !strings.Contains(message.text, "完成") {
+			if !strings.Contains(message.text, "write_file[a.txt]") || !strings.Contains(message.text, "完成") {
 				t.Fatalf("message = %s", message.text)
 			}
 		}
 	}
 	if count != 1 {
 		t.Fatalf("messages = %+v", model.messages)
+	}
+}
+
+func TestToolActivityTextDisplaysBuiltinArguments(t *testing.T) {
+	tests := []struct {
+		name string
+		call llm.ToolCall
+		want string
+	}{
+		{
+			name: "read path",
+			call: llm.ToolCall{Function: llm.FunctionCall{Name: "read_file", Arguments: `{"path":"pom.xml"}`}},
+			want: "工具调用: read_file[pom.xml] (完成)",
+		},
+		{
+			name: "write path",
+			call: llm.ToolCall{Function: llm.FunctionCall{Name: "write_file", Arguments: `{"path":"internal/tui/tui.go","content":"..."}`}},
+			want: "工具调用: write_file[internal/tui/tui.go] (完成)",
+		},
+		{
+			name: "edit path",
+			call: llm.ToolCall{Function: llm.FunctionCall{Name: "edit_file", Arguments: `{"path":"README.md","old_text":"a","new_text":"b"}`}},
+			want: "工具调用: edit_file[README.md] (完成)",
+		},
+		{
+			name: "execute command",
+			call: llm.ToolCall{Function: llm.FunctionCall{Name: "execute_command", Arguments: `{"command":"find src -name \"*.java\" | sort | head -100"}`}},
+			want: `工具调用: execute_command[find src -name "*.java" | sort | head -100] (完成)`,
+		},
+		{
+			name: "mcp unchanged",
+			call: llm.ToolCall{Function: llm.FunctionCall{Name: "mcp__filesystem__read_file", Arguments: `{"path":"pom.xml"}`}},
+			want: "工具调用: mcp__filesystem__read_file (完成)",
+		},
+		{
+			name: "skill unchanged",
+			call: llm.ToolCall{Function: llm.FunctionCall{Name: "load_skill", Arguments: `{"name":"review"}`}},
+			want: "工具调用: load_skill (完成)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := toolActivityText(tt.call, "完成"); got != tt.want {
+				t.Fatalf("toolActivityText() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

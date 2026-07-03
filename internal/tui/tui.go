@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1051,10 +1052,35 @@ func toolActivityKey(runID string, call llm.ToolCall) string {
 }
 
 func toolName(call llm.ToolCall) string {
-	if call.Function.Name == "" {
+	name := call.Function.Name
+	if name == "" {
 		return "unknown"
 	}
-	return call.Function.Name
+	if summary := builtinToolSummary(name, call.Function.Arguments); summary != "" {
+		return name + "[" + summary + "]"
+	}
+	return name
+}
+
+func builtinToolSummary(name, rawArgs string) string {
+	argName := ""
+	switch name {
+	case "read_file", "write_file", "edit_file":
+		argName = "path"
+	case "execute_command":
+		argName = "command"
+	default:
+		return ""
+	}
+	var args map[string]any
+	if json.Unmarshal([]byte(rawArgs), &args) != nil {
+		return ""
+	}
+	value, ok := args[argName].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(value)
 }
 
 func mcpSummary(rt *integrated.Runtime) string {

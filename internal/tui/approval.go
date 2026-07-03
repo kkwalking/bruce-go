@@ -21,7 +21,7 @@ type tuiApprovalHandler struct {
 }
 
 func newTUIApprovalHandler() *tuiApprovalHandler {
-	return &tuiApprovalHandler{enabled: true}
+	return &tuiApprovalHandler{enabled: false}
 }
 
 func (h *tuiApprovalHandler) SetProgram(program *tea.Program) {

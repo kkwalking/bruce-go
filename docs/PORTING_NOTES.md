@@ -28,7 +28,7 @@
 - Go 版 TUI 是轻量 Bubble Tea 输入循环，核心命令和运行时可独立测试。
 - MCP Streamable HTTP 以 JSON-RPC HTTP POST 为主，并能解析简单 SSE `data:` 响应；复杂 server 特性后续可在 `internal/mcp` 扩展。
 - `/compact` 当前提供确定性本地摘要节点，自动压缩判断和 LLM 摘要能力在 `internal/session` 保留可测试接口。
-- HITL 默认使用 auto-approve handler，真实交互 handler 可在 TUI 层替换。
+- HITL 默认关闭，需要时可通过 `/hitl on` 打开；真实交互 handler 可在 TUI 层替换。
 
 ## 测试策略
 

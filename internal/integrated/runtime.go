@@ -104,7 +104,7 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		switcher = s
 	}
 
-	hitl := approval.NewAutoHandler(true, approval.Approve())
+	hitl := approval.NewAutoHandler(false, approval.Approve())
 	concurrency := runtime.DefaultConcurrency()
 	registry := tool.NewRegistry(workspace).WithHITL(hitl).WithConcurrency(concurrency)
 	webManager := web.NewManager(settings.WebSearch, nil)
