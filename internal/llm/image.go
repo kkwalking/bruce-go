@@ -35,7 +35,7 @@ type PreparedInput struct {
 type ClipboardReader func(ctx context.Context) ([]byte, string, error)
 
 func ParseImageReferences(ctx context.Context, input, workspaceRoot string, clipboard ClipboardReader) (PreparedInput, error) {
-	if !strings.Contains(input, "@image:") && !strings.Contains(input, "@clipboard") {
+	if !strings.Contains(input, "@image:") && !strings.Contains(input, "@clipboard") && !strings.Contains(input, "@img:") {
 		return PreparedInput{Text: input, Message: User(input)}, nil
 	}
 	var text strings.Builder
@@ -165,7 +165,11 @@ end run`
 }
 
 func readImageRef(input string, start int) (string, int, error) {
-	pos := start + len("@image:")
+	prefixLen := len("@image:")
+	if input[start:start+len("@img:")] == "@img:" {
+		prefixLen = len("@img:")
+	}
+	pos := start + prefixLen
 	if pos >= len(input) {
 		return "", 0, errors.New("@image: 后缺少图片路径")
 	}

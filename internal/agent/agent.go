@@ -21,6 +21,9 @@ const baseSystemPrompt = `你是 Bruce Coding Agent，一个智能编程助手�
 
 请用中文回复用户。`
 
+const maxRetries = 2
+
+
 type Agent struct {
 	Client        llm.ChatClient
 	Tools         *tool.Registry
@@ -62,6 +65,11 @@ func (a *Agent) Run(ctx context.Context, input llm.PreparedInput, taskContext st
 	if strings.TrimSpace(input.Message.Content) == "" && len(input.Message.ContentParts) == 0 {
 		return "请输入任务内容", nil
 	}
+	if input.Message.HasImages() && !a.Client.SupportsImages() {
+		msg := "当前模型 " + a.Client.ModelName() + " [" + a.Client.ProviderName() + "] 不支持图片，请切换到支持视觉的模型（如 glm-5v-turbo）"
+		a.emit(event.NewMessageCompleted(runID, llm.Assistant(msg), false))
+		return msg, nil
+	}
 	if runID == "" {
 		runID = event.NewRunID()
 	}
@@ -78,15 +86,21 @@ func (a *Agent) Run(ctx context.Context, input llm.PreparedInput, taskContext st
 	}
 	defer a.redactSkillToolResults()
 	a.appendDurable(runID, input.Message)
+	retryCount := 0
 	for i := 0; i < a.MaxIterations; i++ {
 		pruneImages(a.History)
 		a.emit(event.NewMessageStarted(runID, llm.RoleAssistant))
 		resp, err := a.Client.Chat(ctx, a.History, a.Tools.Definitions(), streamToEvents(a.Events, runID))
 		if err != nil {
+			if retryCount < maxRetries && isRetryable(err) {
+				retryCount++
+				continue
+			}
 			out := "网络错误: " + err.Error()
 			a.emit(event.NewMessageCompleted(runID, llm.Assistant(out), false))
 			return out, nil
 		}
+		retryCount = 0
 		if resp.HasToolCalls() {
 			assistant := llm.Message{
 				Role:             llm.RoleAssistant,
@@ -100,6 +114,7 @@ func (a *Agent) Run(ctx context.Context, input llm.PreparedInput, taskContext st
 				a.emit(event.NewToolCallStarted(runID, call))
 			}
 			results := a.Executor.Execute(ctx, resp.ToolCalls)
+			a.appendImageToolMessages(runID, results)
 			for _, result := range results {
 				a.emit(event.NewToolCallCompleted(runID, result))
 				toolMessage := llm.ToolMessage(result.ToolCall.ID, result.Result)
@@ -124,6 +139,39 @@ func (a *Agent) Run(ctx context.Context, input llm.PreparedInput, taskContext st
 	a.appendDurable(runID, llm.Assistant(stopped))
 	return stopped, nil
 }
+
+func (a *Agent) appendImageToolMessages(runID string, results []tool.ToolCallResult) {
+	for _, result := range results {
+		if len(result.ImageParts) == 0 {
+			continue
+		}
+		parts := make([]llm.ContentPart, 0, len(result.ImageParts)+1)
+		parts = append(parts, llm.TextPart(
+			"工具 "+result.ToolCall.Function.Name+" 返回了图片内容，请结合上面的工具文本结果分析。",
+		))
+		parts = append(parts, result.ImageParts...)
+		msg := llm.Message{
+			Role:         llm.RoleUser,
+			Content:      llm.PlainText(parts),
+			ContentParts: parts,
+		}
+		a.append(msg)
+		a.emit(event.NewMessageCompleted(runID, msg, true))
+	}
+}
+
+// isRetryable returns true when an error from Chat() is a transient network failure.
+func isRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "HTTP 5") || strings.Contains(msg, "network") ||
+		strings.Contains(msg, "timeout") || strings.Contains(msg, "temporary") ||
+		strings.Contains(msg, "connection") || strings.Contains(msg, "deadline")
+}
+
+
 
 func (a *Agent) append(msg llm.Message) {
 	a.History = append(a.History, msg)
@@ -256,3 +304,4 @@ func (f *FakeClient) ModelName() string {
 func (*FakeClient) MaxContextWindow() int       { return 200000 }
 func (*FakeClient) SupportsTools() bool         { return true }
 func (*FakeClient) SupportsPromptCaching() bool { return false }
+func (*FakeClient) SupportsImages() bool         { return true }

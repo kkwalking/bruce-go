@@ -33,7 +33,7 @@ func completionsFor(input string, cursor int, rt *integrated.Runtime) []Completi
 	prefixText := string([]rune(text)[:cursor])
 	word := currentWord(prefixText)
 	var candidates []CompletionItem
-	if strings.HasPrefix(word, "@image:") {
+	if strings.HasPrefix(word, "@image:") || strings.HasPrefix(word, "@img:") {
 		return completeImagePath(word)
 	}
 	if strings.HasPrefix(word, "$") {
@@ -211,7 +211,7 @@ func completeSkillNames(prefix string, rt *integrated.Runtime, explicit bool) []
 }
 
 func completeImagePath(word string) []CompletionItem {
-	prefix := strings.TrimPrefix(word, "@image:")
+	prefix := strings.TrimPrefix(strings.TrimPrefix(word, "@image:"), "@img:")
 	angle := strings.HasPrefix(prefix, "<")
 	if angle {
 		prefix = strings.TrimPrefix(prefix, "<")

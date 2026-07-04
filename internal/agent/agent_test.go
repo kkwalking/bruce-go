@@ -224,3 +224,36 @@ func (*recordingClient) ModelName() string           { return "fake-model" }
 func (*recordingClient) MaxContextWindow() int       { return 200000 }
 func (*recordingClient) SupportsTools() bool         { return true }
 func (*recordingClient) SupportsPromptCaching() bool { return false }
+func (*recordingClient) SupportsImages() bool         { return false }
+
+func TestAgentRetriesOnNetworkError(t *testing.T) {
+	bus := event.NewBus()
+	client := &FakeClient{
+		Responses: []llm.ChatResponse{{Content: "ok"}},
+		Err:       errors.New("HTTP 502 Bad Gateway"),
+	}
+	a := New(client, tool.EmptyRegistry(t.TempDir()), "", runtime.DefaultConcurrency(), bus)
+	out, err := a.Run(context.Background(), llm.PreparedInput{Text: "run", Message: llm.User("run")}, "", "run_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "网络错误") {
+		t.Fatalf("expected network error, got %q", out)
+	}
+}
+
+func TestAgentRetryExhaustsAndReturnsError(t *testing.T) {
+	bus := event.NewBus()
+	client := &FakeClient{
+		Responses: []llm.ChatResponse{{Content: "ok"}},
+		Err:       errors.New("HTTP 503 Service Unavailable"),
+	}
+	a := New(client, tool.EmptyRegistry(t.TempDir()), "", runtime.DefaultConcurrency(), bus)
+	out, err := a.Run(context.Background(), llm.PreparedInput{Text: "run", Message: llm.User("run")}, "", "run_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "网络错误") {
+		t.Fatalf("expected network error in output, got %q", out)
+	}
+}

@@ -131,6 +131,12 @@ func (c *SwitchableClient) SupportsPromptCaching() bool {
 	return c.client.SupportsPromptCaching()
 }
 
+func (c *SwitchableClient) SupportsImages() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.client.SupportsImages()
+}
+
 func (c *SwitchableClient) Options() []ModelOption {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

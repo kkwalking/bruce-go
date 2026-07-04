@@ -552,6 +552,7 @@ func isFullDiskScan(lowerCommand string) bool {
 }
 
 type ToolCallResult struct {
+	ImageParts     []llm.ContentPart
 	ToolCall       llm.ToolCall
 	Result         string
 	Status         string
@@ -565,7 +566,14 @@ func RunToolCall(ctx context.Context, registry *Registry, call llm.ToolCall) Too
 	if strings.HasPrefix(result, "工具执行失败") || strings.HasPrefix(result, "工具参数解析失败") {
 		status = "failed"
 	}
-	return ToolCallResult{ToolCall: call, Result: result, Status: status, DurationMillis: time.Since(start).Milliseconds()}
+	cleanText, imageParts := ParseToolResult(result)
+	return ToolCallResult{
+		ToolCall:       call,
+		Result:         cleanText,
+		Status:         status,
+		DurationMillis: time.Since(start).Milliseconds(),
+		ImageParts:     imageParts,
+	}
 }
 
 type ParallelExecutor struct {
@@ -598,4 +606,92 @@ func (e ParallelExecutor) Execute(ctx context.Context, calls []llm.ToolCall) []T
 	}
 	wg.Wait()
 	return results
+}
+
+// ParseToolResult extracts image content blocks from raw tool output.
+// Mirrors Java ToolResultContent.parse(): each [bruce-image-content] block
+// is replaced by a fallback text (not deleted), matching Java's behavior.
+func ParseToolResult(raw string) (string, []llm.ContentPart) {
+	if raw == "" {
+		return raw, nil
+	}
+	const startTag = "[bruce-image-content mimeType="
+	const endTag = "[/bruce-image-content]"
+	var parts []llm.ContentPart
+	var out strings.Builder
+	cleaned := raw
+	for {
+		start := strings.Index(cleaned, startTag)
+		if start < 0 {
+			out.WriteString(cleaned)
+			break
+		}
+		out.WriteString(cleaned[:start])
+
+		headerEnd := strings.IndexByte(cleaned[start:], ']')
+		if headerEnd < 0 {
+			out.WriteString(cleaned[start:])
+			break
+		}
+		headerEnd += start
+		header := cleaned[start+len(startTag) : headerEnd]
+		afterHeader := cleaned[headerEnd+1:]
+		nl := strings.IndexByte(afterHeader, '\n')
+		if nl < 0 {
+			out.WriteString(cleaned[start:])
+			break
+		}
+		bodyStart := headerEnd + 1 + nl + 1
+		end := strings.Index(cleaned[bodyStart:], endTag)
+		if end < 0 {
+			out.WriteString(cleaned[start:])
+			break
+		}
+		blockEnd := end + bodyStart + len(endTag)
+		if blockEnd > len(cleaned) {
+			out.WriteString(cleaned[start:])
+			break
+		}
+
+		base64Data := strings.Join(strings.Fields(cleaned[bodyStart:end+bodyStart]), "")
+		mimeType := ""
+		source := "tool"
+		for _, part := range strings.Split(header, " ") {
+			kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+			if len(kv) == 2 {
+				switch strings.TrimSpace(kv[0]) {
+				case "mimeType":
+					mimeType = kv[1]
+				case "source":
+					source = kv[1]
+				}
+			}
+		}
+
+		imagePart, err := llm.FromBase64(base64Data, mimeType, source)
+		if err == nil {
+			parts = append(parts, imagePart)
+			// Replace block with fallback text, mirroring Java fallbackText()
+			out.WriteString("[已附加图片: " + source + ", mimeType=" + mimeType + "]")
+		} else {
+			out.WriteString("[图片内容处理失败: " + err.Error() + "]")
+		}
+		cleaned = cleaned[blockEnd:]
+	}
+	return strings.TrimSpace(out.String()), parts
+}
+
+func EncodeToolImage(mimeType, base64Data, source string) string {
+	mime := mimeType
+	if strings.TrimSpace(mime) == "" {
+		mime = "image/png"
+	}
+	src := source
+	if strings.TrimSpace(src) == "" {
+		src = "tool"
+	}
+	return "\n[bruce-image-content mimeType=" + strings.TrimSpace(mime) +
+		" source=" + src + "]\n" +
+		strings.TrimSpace(base64Data) +
+		"\n[/bruce-image-content]\n"
 }

@@ -29,6 +29,7 @@ type ChatClient interface {
 	MaxContextWindow() int
 	SupportsTools() bool
 	SupportsPromptCaching() bool
+	SupportsImages() bool
 }
 
 type Message struct {

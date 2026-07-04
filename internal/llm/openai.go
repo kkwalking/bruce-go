@@ -57,6 +57,18 @@ func (c *OpenAICompatibleClient) SupportsTools() bool  { return true }
 func (c *OpenAICompatibleClient) SupportsPromptCaching() bool {
 	return c.Provider == "deepseek" || c.Provider == "glm"
 }
+
+func (c *OpenAICompatibleClient) SupportsImages() bool {
+	switch c.Provider {
+	case "glm":
+		return strings.HasPrefix(strings.ToLower(c.Model), "glm-5v")
+	case "deepseek":
+		return false
+	default:
+		return strings.Contains(strings.ToLower(c.Model), "vision") ||
+			strings.Contains(strings.ToLower(c.Model), "vl")
+	}
+}
 func (c *OpenAICompatibleClient) MaxContextWindow() int {
 	switch c.Provider {
 	case "deepseek":
@@ -119,16 +131,12 @@ func (c *OpenAICompatibleClient) requestBody(messages []Message, tools []ToolDef
 	if len(tools) > 0 {
 		serialized := make([]any, 0, len(tools))
 		for _, tool := range tools {
-			var params any
-			if len(tool.Parameters) > 0 {
-				_ = json.Unmarshal(tool.Parameters, &params)
-			}
 			serialized = append(serialized, map[string]any{
 				"type": "function",
 				"function": map[string]any{
 					"name":        tool.Name,
 					"description": tool.Description,
-					"parameters":  params,
+					"parameters":  tool.Parameters,
 				},
 			})
 		}

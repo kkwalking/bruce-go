@@ -84,3 +84,64 @@ func (f *fakeTransport) Call(_ context.Context, method string, params any) (json
 
 func (f *fakeTransport) Close() error   { return nil }
 func (f *fakeTransport) Logs() []string { return []string{"fake log"} }
+
+func TestSanitizeSchemaEnsuresObject(t *testing.T) {
+	// Non-object schema should be wrapped
+	raw := json.RawMessage(`{"type":"string"}`)
+	out := SanitizeSchema(raw)
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["type"] != "object" {
+		t.Fatalf("expected type=object, got %v", m["type"])
+	}
+	props, _ := m["properties"].(map[string]any)
+	if props == nil || props["value"] == nil {
+		t.Fatalf("expected properties.value, got %v", m["properties"])
+	}
+}
+
+func TestSanitizeSchemaRemovesExtensionKeys(t *testing.T) {
+	raw := json.RawMessage(`{"type":"object","$schema":"http://x","$ref":"#/defs/Foo","properties":{"x":{"type":"string"}}}`)
+	out := SanitizeSchema(raw)
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m["$schema"]; ok {
+		t.Fatal("expected $schema to be removed")
+	}
+	if _, ok := m["$ref"]; ok {
+		t.Fatal("expected $ref to be removed")
+	}
+}
+
+func TestSanitizeSchemaFoldsUnion(t *testing.T) {
+	raw := json.RawMessage(`{"type":"object","anyOf":[{"type":"string","description":"a string"},{"type":"number"}],"description":"check"}`)
+	out := SanitizeSchema(raw)
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m["anyOf"]; ok {
+		t.Fatal("expected anyOf to be removed")
+	}
+	desc, _ := m["description"].(string)
+	if !strings.Contains(desc, "anyOf options") {
+		t.Fatalf("expected description to contain union options, got %q", desc)
+	}
+}
+
+func TestSanitizeSchemaEnsuresRequired(t *testing.T) {
+	raw := json.RawMessage(`{"type":"object","properties":{"a":{"type":"string"}}}`)
+	out := SanitizeSchema(raw)
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	req, _ := m["required"].([]any)
+	if req == nil {
+		t.Fatal("expected required to be an array")
+	}
+}

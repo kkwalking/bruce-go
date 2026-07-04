@@ -242,7 +242,7 @@ func RegisterTools(registry *tool.Registry, manager *Manager) {
 	for _, item := range manager.Tools() {
 		serverName, remoteName := item.Server, item.Tool.Name
 		localName := "mcp_" + sanitize(serverName) + "_" + sanitize(remoteName)
-		schema := item.Tool.InputSchema
+		schema := SanitizeSchema(item.Tool.InputSchema)
 		if len(schema) == 0 {
 			schema = []byte(`{"type":"object","properties":{}}`)
 		}
@@ -508,6 +508,129 @@ func decodeRPCResponse(r io.Reader) (json.RawMessage, error) {
 		return nil, errors.New(resp.Error.Message)
 	}
 	return resp.Result, nil
+}
+
+const schemaDescriptionLimit = 1000
+
+// SanitizeSchema cleans a JSON Schema for safe tool registration.
+func SanitizeSchema(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return json.RawMessage(`{"type":"object","properties":{},"required":[]}`)
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		return json.RawMessage(`{"type":"object","properties":{},"required":[]}`)
+	}
+	if schema == nil {
+		schema = map[string]any{}
+	}
+	ensureObjectSchema(schema)
+	sanitizeObject(schema)
+	if _, ok := schema["properties"]; !ok {
+		schema["properties"] = map[string]any{}
+	}
+	if _, ok := schema["required"]; !ok {
+		schema["required"] = []any{}
+	}
+	out, _ := json.Marshal(schema)
+	return out
+}
+
+func ensureObjectSchema(schema map[string]any) {
+	tp, _ := schema["type"].(string)
+	if tp == "" {
+		schema["type"] = "object"
+		return
+	}
+	if tp != "object" {
+		// Deep-copy the original content to avoid reference cycles
+		inner := deepCopyMap(schema)
+		for k := range schema {
+			delete(schema, k)
+		}
+		schema["type"] = "object"
+		schema["properties"] = map[string]any{"value": inner}
+	}
+}
+
+func deepCopyMap(src map[string]any) map[string]any {
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		switch val := v.(type) {
+		case map[string]any:
+			dst[k] = deepCopyMap(val)
+		case []any:
+			arr := make([]any, len(val))
+			for i, item := range val {
+				if m, ok := item.(map[string]any); ok {
+					arr[i] = deepCopyMap(m)
+				} else {
+					arr[i] = item
+				}
+			}
+			dst[k] = arr
+		default:
+			dst[k] = val
+		}
+	}
+	return dst
+}
+
+func sanitizeObject(schema map[string]any) {
+	delete(schema, "$schema")
+	delete(schema, "$id")
+	delete(schema, "$defs")
+	delete(schema, "definitions")
+	delete(schema, "$ref")
+	foldUnion(schema, "anyOf")
+	foldUnion(schema, "oneOf")
+	truncateSchemaDescription(schema)
+
+	for _, v := range schema {
+		switch val := v.(type) {
+		case map[string]any:
+			sanitizeObject(val)
+		case []any:
+			for _, item := range val {
+				if obj, ok := item.(map[string]any); ok {
+					sanitizeObject(obj)
+				}
+			}
+		}
+	}
+}
+
+func foldUnion(schema map[string]any, field string) {
+	union, ok := schema[field].([]any)
+	if !ok || len(union) == 0 {
+		return
+	}
+	var desc strings.Builder
+	if existing, _ := schema["description"].(string); existing != "" {
+		desc.WriteString(existing)
+			desc.WriteByte('\n')
+	}
+	desc.WriteString(field + " options: ")
+	for _, option := range union {
+		opt, _ := option.(map[string]any)
+		if tp, _ := opt["type"].(string); tp != "" {
+			desc.WriteString(tp)
+		}
+		if od, _ := opt["description"].(string); od != "" {
+			desc.WriteString("(" + od + ")")
+		}
+		desc.WriteString("; ")
+	}
+	schema["description"] = desc.String()
+	delete(schema, field)
+}
+
+func truncateSchemaDescription(schema map[string]any) {
+	d, ok := schema["description"].(string)
+	if !ok || len(d) <= schemaDescriptionLimit {
+		return
+	}
+	schema["description"] = d[:schemaDescriptionLimit] + "..."
 }
 
 func formatToolResult(raw json.RawMessage) string {

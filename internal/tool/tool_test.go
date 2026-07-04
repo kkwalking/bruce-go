@@ -156,3 +156,39 @@ func mustSchema(t *testing.T, raw string) json.RawMessage {
 	var data json.RawMessage = []byte(raw)
 	return data
 }
+
+func TestParseToolResultExtractsImageBlocks(t *testing.T) {
+	// A small valid PNG base64 string (1x1 red pixel)
+	raw := "text before\n[bruce-image-content mimeType=image/png source=test]\niVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==\n[/bruce-image-content]\ntext after"
+	clean, parts := ParseToolResult(raw)
+	if !strings.Contains(clean, "text before") || !strings.Contains(clean, "text after") {
+		t.Fatalf("clean text = %q", clean)
+	}
+	if len(parts) != 1 {
+		t.Fatalf("expected 1 image part, got %d", len(parts))
+	}
+	if parts[0].Type != llm.ContentImageURL {
+		t.Fatalf("expected image part, got %+v", parts[0])
+	}
+}
+
+func TestParseToolResultNoImages(t *testing.T) {
+	raw := "plain text only"
+	clean, parts := ParseToolResult(raw)
+	if clean != "plain text only" {
+		t.Fatalf("clean = %q", clean)
+	}
+	if len(parts) != 0 {
+		t.Fatalf("expected 0 parts, got %d", len(parts))
+	}
+}
+
+func TestEncodeToolImage(t *testing.T) {
+	out := EncodeToolImage("image/png", "dGVzdA==", "test-source")
+	if !strings.Contains(out, "[bruce-image-content mimeType=image/png source=test-source]") {
+		t.Fatalf("output = %q", out)
+	}
+	if !strings.Contains(out, "dGVzdA==") {
+		t.Fatalf("output missing base64 data: %q", out)
+	}
+}
