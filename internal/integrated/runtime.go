@@ -69,6 +69,8 @@ type modelSwitcher interface {
 	Options() []llm.ModelOption
 	Current() llm.ModelOption
 	Switch(selector string) (llm.ModelOption, error)
+	ReasoningEffort() string
+	SetReasoningEffort(level string) error
 }
 
 func New(ctx context.Context, opts Options) (*Runtime, error) {
@@ -336,6 +338,9 @@ func (r *Runtime) Status() runtime.Status {
 }
 
 func (r *Runtime) handleModel(args []string) (string, error) {
+	if len(args) > 0 && strings.EqualFold(args[0], "reasoning") {
+		return r.handleModelReasoning(args[1:])
+	}
 	if r.switchable == nil {
 		return fmt.Sprintf("当前模型: %s/%s", r.Client.ProviderName(), r.Client.ModelName()), nil
 	}
@@ -350,6 +355,7 @@ func (r *Runtime) handleModel(args []string) (string, error) {
 			}
 			b.WriteString(prefix + opt.Selector() + "\n")
 		}
+		b.WriteString("\n当前推理级别: " + r.ReasoningEffort() + "（/model reasoning <级别> 调整）")
 		return strings.TrimSpace(b.String()), nil
 	}
 	next, err := r.switchable.Switch(strings.Join(args, " "))
@@ -358,7 +364,18 @@ func (r *Runtime) handleModel(args []string) (string, error) {
 	}
 	r.Client = r.switchable
 	r.rebuildAgents()
-	return "已切换模型: " + next.Selector(), nil
+	return "已切换模型: " + next.Selector() + " " + r.ReasoningEffort(), nil
+}
+
+func (r *Runtime) handleModelReasoning(args []string) (string, error) {
+	current := r.ReasoningEffort()
+	if len(args) == 0 {
+		return fmt.Sprintf("当前推理级别: %s\n可选级别: off / low / medium / high / max", current), nil
+	}
+	if err := r.SetReasoningEffort(args[0]); err != nil {
+		return "", err
+	}
+	return "已切换推理级别: " + r.ReasoningEffort(), nil
 }
 
 func (r *Runtime) handleWeb(ctx context.Context, args []string) (string, error) {
@@ -548,6 +565,20 @@ func (r *Runtime) CurrentModel() llm.ModelOption {
 		return r.switchable.Current()
 	}
 	return llm.ModelOption{Provider: r.Client.ProviderName(), Model: r.Client.ModelName()}
+}
+
+func (r *Runtime) ReasoningEffort() string {
+	if r.switchable != nil {
+		return r.switchable.ReasoningEffort()
+	}
+	return ""
+}
+
+func (r *Runtime) SetReasoningEffort(level string) error {
+	if r.switchable == nil {
+		return errors.New("当前运行时不支持调整推理级别")
+	}
+	return r.switchable.SetReasoningEffort(level)
 }
 
 func (r *Runtime) MCPServerNames() []string {
