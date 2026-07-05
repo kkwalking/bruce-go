@@ -984,7 +984,7 @@ func (m *Model) drawStatus(canvas []string, columns, row int) {
 	permission := " HITL on "
 	permissionStyle := okStyle
 	if !status.HITLEnabled {
-		permission = " bypass permissions on "
+		permission = " HITL off "
 		permissionStyle = warnStyle
 	}
 	details := fmt.Sprintf(" bruce · %s · mode %s · %s",
