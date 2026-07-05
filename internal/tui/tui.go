@@ -88,21 +88,21 @@ type Model struct {
 	streamingReasoning      string
 	streamingReasoningIndex int
 	toolActivityIndexes     map[string]int
-	agentStatusText    string
+	agentStatusText         string
 
-	width              int
-	height             int
-	quit               bool
-	busy               bool
-	statusPhase        string
-	elapsedMillis      int64
-	cancel             context.CancelFunc
-	lastEscTime        time.Time
-	scrollOffset       int
-	selectedCompletion int
-	modelSelectorOpen  bool
+	width                  int
+	height                 int
+	quit                   bool
+	busy                   bool
+	statusPhase            string
+	elapsedMillis          int64
+	cancel                 context.CancelFunc
+	lastEscTime            time.Time
+	scrollOffset           int
+	selectedCompletion     int
+	modelSelectorOpen      bool
 	pendingReasoningEffort string // popup 内 ←/→ 调整的待定强度，回车确认才落盘
-	approval           *approvalDialog
+	approval               *approvalDialog
 
 	history      []string
 	historyIndex int
@@ -767,7 +767,6 @@ func (m *Model) replaceActivity(index int, text string) bool {
 	return true
 }
 
-
 func (m *Model) beginStreamingAssistantMessage() {
 	if m.streamingAssistantIndex >= 0 {
 		return
@@ -952,7 +951,6 @@ func (m *Model) drawCompletions(canvas []string, columns, indexStatusRow int) {
 		setRow(canvas, top+visible+2, columns, dimStyle.Render("└"+strings.Repeat("─", max(0, width-2))+"┘"))
 	}
 }
-
 
 func (m *Model) drawInput(canvas []string, columns, inputTop, inputLine, inputBottom int) {
 	if m.agentStatusText != "" {
@@ -1168,15 +1166,30 @@ func welcomeLines(rt *integrated.Runtime) []string {
 		model = empty(rt.Client.ModelName(), "auto")
 		workspace = compactPath(rt.Workspace)
 	}
-	return []string{
-		"┌─ Bruce Coding Agent ─────────────────────────────────────────────────────────┐",
-		"│  Welcome back        │ Tips for getting started                    │",
-		"│  bruce               │ Run /help to see bruce commands             │",
-		"│  " + padRight(model, 18) + "│ What's new                                  │",
-		"│  " + padRight(workspace, 18) + "│ /skill lists project skills and /mcp shows tools│",
-		"│                      │ /web search queries configured providers    │",
-		"└────────────────────────────────────────────────────────────────────┘",
+	// title is ASCII-only so runewidth.StringWidth matches terminal cell width;
+	// box-drawing runes like ─ are mis-measured by runewidth (counted as 2,
+	// rendered as 1) in EastAsianWidth locales, which would skew the border math.
+	title := " Bruce Coding Agent "
+	rows := []string{
+		"  Welcome back!",
+		"  model: " + model,
+		"  workspace: " + workspace,
 	}
+	inner := runewidth.StringWidth(title)
+	for _, r := range rows {
+		if w := runewidth.StringWidth(r); w > inner {
+			inner = w
+		}
+	}
+	inner += 5 // right inner padding
+	out := []string{
+		"┌─" + title + strings.Repeat("─", max(0, inner-1-runewidth.StringWidth(title))) + "┐",
+	}
+	for _, r := range rows {
+		out = append(out, "│"+padRight(r, inner)+"│")
+	}
+	out = append(out, "└"+strings.Repeat("─", inner)+"┘")
+	return out
 }
 
 func toolActivityText(call llm.ToolCall, status string) string {
@@ -1222,7 +1235,6 @@ func builtinToolSummary(name, rawArgs string) string {
 	}
 	return strings.TrimSpace(value)
 }
-
 
 func compactPath(path string) string {
 	if path == "" {
