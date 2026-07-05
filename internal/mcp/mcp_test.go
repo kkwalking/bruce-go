@@ -145,3 +145,26 @@ func TestSanitizeSchemaEnsuresRequired(t *testing.T) {
 		t.Fatal("expected required to be an array")
 	}
 }
+
+func TestExpandMCPVarsReplacesKnownVariables(t *testing.T) {
+	cases := []struct {
+		input     string
+		workspace string
+		home      string
+		want      string
+	}{
+		{"/some/path", "/ws", "/home/user", "/some/path"},
+		{"${PROJECT_DIR}/src", "/ws", "/home/user", "/ws/src"},
+		{"${HOME}/.bruce", "/ws", "/home/user", "/home/user/.bruce"},
+		{"${PROJECT_DIR},${HOME}", "/ws", "/home", "/ws,/home"},
+		{"${UNKNOWN}", "/ws", "/home", "${UNKNOWN}"},
+		{"", "/ws", "/home", ""},
+		{"npx -y @scope/pkg ${PROJECT_DIR}", "/app", "/h", "npx -y @scope/pkg /app"},
+	}
+	for _, tc := range cases {
+		got := expandMCPVars(tc.input, tc.workspace, tc.home)
+		if got != tc.want {
+			t.Errorf("expandMCPVars(%q, %q, %q) = %q, want %q", tc.input, tc.workspace, tc.home, got, tc.want)
+		}
+	}
+}

@@ -262,7 +262,7 @@ func DefaultTransportFactory(ctx context.Context, _ string, cfg config.MCPServer
 	switch strings.ToLower(strings.TrimSpace(cfg.Type)) {
 	case "", "stdio":
 		return NewStdioTransport(ctx, cfg, workspace)
-	case "http", "streamable_http", "streamable-http":
+	case "http", "streamable_http", "streamable-http", "streamablehttp":
 		return NewHTTPTransport(cfg), nil
 	default:
 		return nil, errors.New("不支持的 MCP transport: " + cfg.Type)
@@ -359,15 +359,37 @@ type StdioTransport struct {
 	nextID  int64
 }
 
+
+var mcpVarRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_.]*)\}`)
+
+func expandMCPVars(s string, workspace, home string) string {
+	return mcpVarRe.ReplaceAllStringFunc(s, func(match string) string {
+		name := match[2 : len(match)-1]
+		switch name {
+		case "PROJECT_DIR":
+			return workspace
+		case "HOME":
+			return home
+		default:
+			return match
+		}
+	})
+}
 func NewStdioTransport(ctx context.Context, cfg config.MCPServerSetting, workspace string) (*StdioTransport, error) {
 	if strings.TrimSpace(cfg.Command) == "" {
 		return nil, errors.New("MCP stdio command 不能为空")
 	}
-	cmd := exec.CommandContext(ctx, cfg.Command, cfg.Args...)
+	home, _ := os.UserHomeDir()
+	command := expandMCPVars(cfg.Command, workspace, home)
+	args := make([]string, len(cfg.Args))
+	for i, arg := range cfg.Args {
+		args[i] = expandMCPVars(arg, workspace, home)
+	}
+	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = workspace
 	cmd.Env = os.Environ()
 	for key, value := range cfg.Env {
-		cmd.Env = append(cmd.Env, key+"="+value)
+		cmd.Env = append(cmd.Env, key+"="+expandMCPVars(value, workspace, home))
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
