@@ -14,11 +14,12 @@ import (
 )
 
 type OpenAICompatibleClient struct {
-	Provider   string
-	APIKey     string
-	Model      string
-	APIURL     string
-	HTTPClient *http.Client
+	Provider        string
+	APIKey          string
+	Model           string
+	APIURL          string
+	HTTPClient      *http.Client
+	reasoningEffort string
 }
 
 func NewOpenAICompatibleClient(provider, apiKey, model, baseURL string) *OpenAICompatibleClient {
@@ -57,6 +58,9 @@ func (c *OpenAICompatibleClient) SupportsTools() bool  { return true }
 func (c *OpenAICompatibleClient) SupportsPromptCaching() bool {
 	return c.Provider == "deepseek" || c.Provider == "glm"
 }
+
+func (c *OpenAICompatibleClient) SetReasoningEffort(effort string) { c.reasoningEffort = effort }
+func (c *OpenAICompatibleClient) ReasoningEffort() string           { return c.reasoningEffort }
 
 func (c *OpenAICompatibleClient) SupportsImages() bool {
 	switch c.Provider {
@@ -140,9 +144,13 @@ func (c *OpenAICompatibleClient) requestBody(messages []Message, tools []ToolDef
 		payload["tools"] = serialized
 		payload["tool_choice"] = "auto"
 	}
-	if c.Provider == "deepseek" {
-		payload["thinking"] = map[string]any{"type": "enabled"}
-		payload["reasoning_effort"] = "max"
+	switch c.reasoningEffort {
+	case "", "off":
+	default:
+		payload["reasoning_effort"] = c.reasoningEffort
+		if c.Provider == "deepseek" {
+			payload["thinking"] = map[string]any{"type": "enabled"}
+		}
 	}
 	return json.Marshal(payload)
 }

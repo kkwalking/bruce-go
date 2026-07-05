@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -51,3 +52,60 @@ data: [DONE]
 	}
 }
 
+
+func TestOpenAICompatibleClientRequestBodyHonorsReasoningEffort(t *testing.T) {
+	body, err := func() ([]byte, error) {
+		c := NewOpenAICompatibleClient("deepseek", "key", "model", "https://api.example.com/v1")
+		c.SetReasoningEffort("high")
+		return c.requestBody(nil, nil, false)
+	}()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if got := payload["reasoning_effort"]; got != "high" {
+		t.Fatalf("reasoning_effort = %v, want high", got)
+	}
+	if _, ok := payload["thinking"]; !ok {
+		t.Fatal("deepseek should include thinking.enabled")
+	}
+
+	// off: no reasoning fields at all
+	c2 := NewOpenAICompatibleClient("deepseek", "key", "model", "https://api.example.com/v1")
+	c2.SetReasoningEffort("off")
+	body2, err := c2.requestBody(nil, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload2 map[string]any
+	if err := json.Unmarshal(body2, &payload2); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := payload2["reasoning_effort"]; ok {
+		t.Fatal("off should not include reasoning_effort")
+	}
+	if _, ok := payload2["thinking"]; ok {
+		t.Fatal("off should not include thinking")
+	}
+
+	// glm: reasoning_effort sent, but no thinking field
+	c3 := NewOpenAICompatibleClient("glm", "key", "model", "https://api.example.com/v1")
+	c3.SetReasoningEffort("medium")
+	body3, err := c3.requestBody(nil, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload3 map[string]any
+	if err := json.Unmarshal(body3, &payload3); err != nil {
+		t.Fatal(err)
+	}
+	if got := payload3["reasoning_effort"]; got != "medium" {
+		t.Fatalf("reasoning_effort = %v, want medium", got)
+	}
+	if _, ok := payload3["thinking"]; ok {
+		t.Fatal("glm should not include thinking")
+	}
+}

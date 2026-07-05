@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -14,15 +15,23 @@ var (
 	GLMModels      = []string{"glm-4.5-air", "glm-4.7", "glm-5-turbo", "glm-5.1", "glm-5.2", "glm-5v-turbo"}
 )
 
+func validReasoningEffort(s string) bool {
+	switch s {
+	case "off", "low", "medium", "high", "max":
+		return true
+	}
+	return false
+}
 type SwitchableClient struct {
-	mu            sync.RWMutex
-	settings      *config.Settings
-	loader        config.Loader
-	options       []ModelOption
-	suppliers     map[string]func() ChatClient
-	defaultModels map[string]string
-	current       ModelOption
-	client        ChatClient
+	mu              sync.RWMutex
+	settings        *config.Settings
+	loader          config.Loader
+	options         []ModelOption
+	suppliers       map[string]func() ChatClient
+	defaultModels   map[string]string
+	current         ModelOption
+	client          ChatClient
+	reasoningEffort string
 }
 
 func NewSwitchable(settings config.Settings, loader config.Loader) (*SwitchableClient, error) {
@@ -67,6 +76,12 @@ func NewSwitchable(settings config.Settings, loader config.Loader) (*SwitchableC
 		current:       initial,
 	}
 	c.client = c.suppliers[key(initial)]()
+	effort := strings.TrimSpace(settings.LLM.ReasoningEffort)
+	if effort == "" || !validReasoningEffort(effort) {
+		effort = "max"
+	}
+	c.reasoningEffort = effort
+	c.applyEffortToClient()
 	return c, nil
 }
 
@@ -149,6 +164,14 @@ func (c *SwitchableClient) Current() ModelOption {
 	return c.current
 }
 
+func (c *SwitchableClient) applyEffortToClient() {
+	if rc, ok := c.client.(interface {
+		SetReasoningEffort(string)
+	}); ok {
+		rc.SetReasoningEffort(c.reasoningEffort)
+	}
+}
+
 func (c *SwitchableClient) Switch(selector string) (ModelOption, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -171,7 +194,35 @@ func (c *SwitchableClient) Switch(selector string) (ModelOption, error) {
 	}
 	c.current = next
 	c.client = supplier()
+	c.applyEffortToClient()
 	return next, nil
+}
+
+func (c *SwitchableClient) ReasoningEffort() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.reasoningEffort
+}
+
+func (c *SwitchableClient) SetReasoningEffort(level string) error {
+	level = strings.TrimSpace(strings.ToLower(level))
+	if !validReasoningEffort(level) {
+		return fmt.Errorf("无效的推理级别: %s（可选 off/low/medium/high/max）", level)
+	}
+	c.mu.Lock()
+	old := c.settings.LLM.ReasoningEffort
+	c.settings.LLM.ReasoningEffort = level
+	if c.loader.Path != "" {
+		if err := c.loader.Save(*c.settings); err != nil {
+			c.settings.LLM.ReasoningEffort = old
+			c.mu.Unlock()
+			return err
+		}
+	}
+	c.reasoningEffort = level
+	c.applyEffortToClient()
+	c.mu.Unlock()
+	return nil
 }
 
 func (c *SwitchableClient) resolve(selector string) (ModelOption, error) {

@@ -154,3 +154,26 @@ type fakeSearcher struct{}
 func (fakeSearcher) Search(context.Context, string, int) ([]web.Result, error) {
 	return []web.Result{{Title: "Go", URL: "https://go.dev", Snippet: "build simple"}}, nil
 }
+
+func TestHandleModelReasoningSubcommand(t *testing.T) {
+	// Without switchable: shows current level or error
+	rt, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: t.TempDir(), Client: &agent.FakeClient{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Query current level (no switchable → empty)
+	result := rt.Handle(context.Background(), "/model reasoning")
+	if result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if !strings.Contains(result.Output, "可选级别") {
+		t.Fatalf("expected level list, got: %q", result.Output)
+	}
+
+	// Set level without switchable → error
+	result2 := rt.Handle(context.Background(), "/model reasoning high")
+	if result2.Err == nil {
+		t.Fatal("expected error when setting effort without switchable")
+	}
+}

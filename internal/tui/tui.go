@@ -987,12 +987,10 @@ func (m *Model) drawStatus(canvas []string, columns, row int) {
 		permission = " bypass permissions on "
 		permissionStyle = warnStyle
 	}
-	details := fmt.Sprintf(" bruce · %s · mode %s · %s · mcp %s · skills %d",
+	details := fmt.Sprintf(" bruce · %s · mode %s · %s",
 		empty(status.Model, "auto"),
 		strings.ToLower(string(status.Mode)),
 		compactPath(status.WorkspaceRoot),
-		mcpSummary(m.runtime),
-		status.SkillCount,
 	)
 	if m.elapsedMillis > 0 {
 		details += fmt.Sprintf(" · %dms", m.elapsedMillis)
@@ -1225,22 +1223,6 @@ func builtinToolSummary(name, rawArgs string) string {
 	return strings.TrimSpace(value)
 }
 
-func mcpSummary(rt *integrated.Runtime) string {
-	if rt == nil || rt.MCP == nil {
-		return "未配置"
-	}
-	statuses := rt.MCP.Status()
-	if len(statuses) == 0 {
-		return "未配置"
-	}
-	ready := 0
-	for _, status := range statuses {
-		if status.Ready {
-			ready++
-		}
-	}
-	return fmt.Sprintf("已配置 %d 个, ready %d 个", len(statuses), ready)
-}
 
 func compactPath(path string) string {
 	if path == "" {

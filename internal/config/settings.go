@@ -20,6 +20,7 @@ type LLMSettings struct {
 	DefaultProvider string                     `json:"defaultProvider"`
 	DefaultModel    string                     `json:"defaultModel"`
 	Providers       map[string]ProviderSetting `json:"providers"`
+	ReasoningEffort string                     `json:"reasoningEffort,omitempty"`
 }
 
 type ProviderSetting struct {

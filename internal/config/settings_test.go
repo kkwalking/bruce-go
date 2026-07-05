@@ -95,3 +95,41 @@ func TestLoaderDefaultsAndSave(t *testing.T) {
 		t.Fatalf("save/load provider = %q", reloaded.LLM.DefaultProvider)
 	}
 }
+
+func TestLoaderReasoningEffortField(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "setting.json")
+	data := `{
+  "llm": {
+    "defaultProvider": "deepseek",
+    "defaultModel": "deepseek-v4-flash",
+    "reasoningEffort": "high",
+    "providers": {
+      "deepseek": {
+        "apiKey": "key",
+        "models": ["deepseek-v4-flash"]
+      }
+    }
+  },
+  "webSearch": {},
+  "mcp": {"servers": {}},
+  "compaction": {}
+}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	settings, err := NewLoader(path).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := settings.LLM.ReasoningEffort; got != "high" {
+		t.Fatalf("reasoningEffort = %q, want high", got)
+	}
+
+	// Empty field (omitted from JSON) should not panic
+	settings2 := DefaultSettings()
+	if got := settings2.LLM.ReasoningEffort; got != "" {
+		t.Fatalf("default reasoningEffort = %q, want empty", got)
+	}
+}
