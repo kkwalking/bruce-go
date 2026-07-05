@@ -126,19 +126,58 @@ func topLevelCommandValue(command cli.CommandInfo) string {
 }
 
 func completeModel(input string, rt *integrated.Runtime) []CompletionItem {
-	prefix := ""
+	// Extract the part after "/model "
+	rest := ""
 	if startsWithFold(input, "/model ") && len(input) > len("/model ") {
-		prefix = strings.TrimSpace(input[len("/model "):])
+		rest = strings.TrimSpace(input[len("/model "):])
 	}
-	current := rt.CurrentModel()
+	parts := strings.Fields(rest)
+
+	// If first word is "reasoning", show reasoning level completions
+	if len(parts) > 0 && strings.EqualFold(parts[0], "reasoning") {
+		// Check what comes after "reasoning"
+		levelPrefix := ""
+		if len(parts) > 1 {
+			levelPrefix = parts[1]
+		}
+		// If input ends with space after "reasoning", prefix should be empty
+		if strings.HasSuffix(input, " ") && len(parts) == 1 {
+			levelPrefix = ""
+		}
+		current := rt.ReasoningEffort()
+		levels := []string{"off", "low", "medium", "high", "max"}
+		var out []CompletionItem
+		for _, level := range levels {
+			if !matches(level, levelPrefix) {
+				continue
+			}
+			desc := ""
+			if strings.EqualFold(level, current) {
+				desc = "当前"
+			}
+			out = append(out, CompletionItem{
+				Value:       level,
+				Display:     level,
+				Description: desc,
+				Group:       "Reasoning",
+				Complete:    true,
+			})
+		}
+		return out
+	}
+
+	// Model list
+	currentModel := rt.CurrentModel()
+	prefix := rest
 	var out []CompletionItem
+
 	for _, option := range rt.ModelOptions() {
 		selector := option.Selector()
 		if !matches(option.Model, prefix) && !matches(selector, prefix) {
 			continue
 		}
 		description := ""
-		if option.Provider == current.Provider && option.Model == current.Model {
+		if option.Provider == currentModel.Provider && option.Model == currentModel.Model {
 			description = "当前模型"
 		}
 		out = append(out, CompletionItem{

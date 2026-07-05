@@ -23,7 +23,7 @@ import (
 const (
 	historySize       = 2000
 	historyFileSize   = 10000
-	scrollLines       = 5
+	scrollLines       = 2
 	maxCompletionRows = 6
 )
 
@@ -101,6 +101,7 @@ type Model struct {
 	scrollOffset       int
 	selectedCompletion int
 	modelSelectorOpen  bool
+	pendingReasoningEffort string // popup 内 ←/→ 调整的待定强度，回车确认才落盘
 	approval           *approvalDialog
 
 	history      []string
@@ -240,8 +241,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case "delete":
 		m.deleteAtCursor()
 	case "left":
+		if m.modelSelectorOpen {
+			m.adjustReasoningEffort(-1)
+			return nil
+		}
 		m.cursor = max(0, m.cursor-1)
 	case "right":
+		if m.modelSelectorOpen {
+			m.adjustReasoningEffort(1)
+			return nil
+		}
 		m.cursor = min(len(m.input), m.cursor+1)
 	case "home":
 		m.cursor = 0
@@ -556,9 +565,8 @@ func (m *Model) applyCompletion() {
 	item := items[clamp(m.selectedCompletion, 0, len(items)-1)]
 	next, cursor := applyCompletion(m.inputText(), m.cursor, item)
 	m.input = []rune(next)
-	m.cursor = clamp(cursor, 0, len(m.input))
+	m.cursor = cursor
 	m.selectedCompletion = 0
-	m.updateModelSelectorStateAfterEdit()
 }
 
 func (m *Model) handleModelSelectorEnter() (bool, tea.Cmd) {
@@ -569,16 +577,21 @@ func (m *Model) handleModelSelectorEnter() (bool, tea.Cmd) {
 	}
 	items := filterCompletionGroup(m.completions(), "Model")
 	if (m.modelSelectorOpen || startsWithModelCommand(value)) && len(items) > 0 {
+		m.confirmReasoningEffort() // 落盘 pendingReasoningEffort（若有变化）
 		item := items[clamp(m.selectedCompletion, 0, len(items)-1)]
 		m.replaceInput("/model " + item.Value)
 		return true, m.submitInput()
 	}
 	return false, nil
 }
-
 func (m *Model) openModelSelector() {
 	m.replaceInput("/model ")
 	m.modelSelectorOpen = true
+	if m.runtime != nil {
+		m.pendingReasoningEffort = m.runtime.ReasoningEffort()
+	} else {
+		m.pendingReasoningEffort = ""
+	}
 	items := filterCompletionGroup(m.completions(), "Model")
 	m.selectedCompletion = 0
 	for i, item := range items {
@@ -587,6 +600,34 @@ func (m *Model) openModelSelector() {
 			return
 		}
 	}
+}
+
+var reasoningEffortLevels = []string{"off", "low", "medium", "high", "max"}
+
+func (m *Model) adjustReasoningEffort(delta int) {
+	current := m.pendingReasoningEffort
+	idx := -1
+	for i, lvl := range reasoningEffortLevels {
+		if strings.EqualFold(lvl, current) {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		idx = 4 // 未识别值（含空串）回退到 max 档位（与 NewSwitchable 默认 max 一致）
+	}
+	n := len(reasoningEffortLevels)
+	m.pendingReasoningEffort = reasoningEffortLevels[((idx+delta)%n+n)%n]
+}
+
+func (m *Model) confirmReasoningEffort() {
+	if m.runtime == nil || m.pendingReasoningEffort == "" {
+		return
+	}
+	if m.pendingReasoningEffort == m.runtime.ReasoningEffort() {
+		return // 无变化，跳过写文件
+	}
+	_ = m.runtime.SetReasoningEffort(m.pendingReasoningEffort) // 失败静默：无 switchable 时忽略
 }
 
 func (m *Model) updateModelSelectorStateAfterEdit() {
@@ -862,14 +903,30 @@ func (m *Model) drawMessages(canvas []string, columns, messageRows int) {
 	}
 }
 
+func isModelSelectorPopup(m *Model) bool {
+	if !m.modelSelectorOpen {
+		return false
+	}
+	items := m.completions()
+	if len(items) == 0 {
+		return false
+	}
+	// reasoning 子命令的 5 档列表 Group=="Reasoning"，不显示 reasoning 行
+	return items[0].Group == "Model"
+}
+
 func (m *Model) drawCompletions(canvas []string, columns, indexStatusRow int) {
 	items := m.completions()
 	if len(items) == 0 || indexStatusRow <= 1 {
 		return
 	}
-	visible := min(maxCompletionRows, len(items))
-	top := max(0, indexStatusRow-visible-1)
-	visible = min(visible, max(0, indexStatusRow-top-1))
+	modelRows := min(maxCompletionRows, len(items))
+	popupRows := modelRows
+	if isModelSelectorPopup(m) {
+		popupRows = modelRows + 2 // reasoning 行 + 底框
+	}
+	top := max(0, indexStatusRow-popupRows-1)
+	visible := min(modelRows, max(0, indexStatusRow-top-1))
 	if visible <= 0 {
 		return
 	}
@@ -877,7 +934,7 @@ func (m *Model) drawCompletions(canvas []string, columns, indexStatusRow int) {
 	selected := clamp(m.selectedCompletion, 0, len(items)-1)
 	first := firstVisibleCompletionIndex(selected, len(items), visible)
 	setRow(canvas, top, columns, dimStyle.Render("┌"+strings.Repeat("─", max(0, width-2))+"┐"))
-	for i := 0; i < visible; i++ {
+	for i := range visible {
 		itemIndex := first + i
 		item := items[itemIndex]
 		body := " " + item.Display + "  " + item.Description
@@ -887,6 +944,12 @@ func (m *Model) drawCompletions(canvas []string, columns, indexStatusRow int) {
 			style = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("14")).Bold(true)
 		}
 		setRow(canvas, top+i+1, columns, style.Render(fit(line, width)))
+	}
+	if isModelSelectorPopup(m) {
+		body := " 推理强度: " + m.pendingReasoningEffort + "  ←/→ to adjust"
+		line := "│" + padRight(body, max(0, width-2)) + "│"
+		setRow(canvas, top+visible+1, columns, dimStyle.Render(line))
+		setRow(canvas, top+visible+2, columns, dimStyle.Render("└"+strings.Repeat("─", max(0, width-2))+"┘"))
 	}
 }
 

@@ -358,3 +358,37 @@ func testRuntime(t *testing.T) *integrated.Runtime {
 func toolResult(call llm.ToolCall, status string) tool.ToolCallResult {
 	return tool.ToolCallResult{ToolCall: call, Status: status}
 }
+
+func TestCompletesModelReasoningSubcommand(t *testing.T) {
+	rt := testRuntime(t)
+
+	// /model reasoning → 5 level items
+	values := completionValues(completeModel("/model reasoning ", rt))
+	if len(values) != 5 {
+		t.Fatalf("reasoning completions = %d items, want 5: %v", len(values), values)
+	}
+	expectedLevels := []string{"off", "low", "medium", "high", "max"}
+	for _, level := range expectedLevels {
+		if !contains(values, level) {
+			t.Fatalf("missing level %q in %v", level, values)
+		}
+	}
+
+	// /model rea → no reasoning item (removed; use ←/→ in popup instead)
+	values2 := completionValues(completeModel("/model rea", rt))
+	if contains(values2, "reasoning") {
+		t.Fatalf("unexpected reasoning item for 'rea' prefix: %v", values2)
+	}
+
+	// /model → completions must not include reasoning entry
+	allModelValues := completionValues(completeModel("/model ", rt))
+	if contains(allModelValues, "reasoning") {
+		t.Fatalf("unexpected reasoning item in model list: %v", allModelValues)
+	}
+
+	// /model reasoning hi → filtered to "high"
+	values3 := completionValues(completeModel("/model reasoning hi", rt))
+	if !contains(values3, "high") || contains(values3, "low") {
+		t.Fatalf("expected only high, got: %v", values3)
+	}
+}
