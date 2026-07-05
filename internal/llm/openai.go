@@ -141,7 +141,8 @@ func (c *OpenAICompatibleClient) requestBody(messages []Message, tools []ToolDef
 		payload["tool_choice"] = "auto"
 	}
 	if c.Provider == "deepseek" {
-		payload["thinking"] = map[string]any{"type": "disabled"}
+		payload["thinking"] = map[string]any{"type": "enabled"}
+		payload["reasoning_effort"] = "max"
 	}
 	return json.Marshal(payload)
 }
@@ -236,11 +237,15 @@ func parseStreamData(data string, acc *streamAccumulator, opts StreamOptions) (b
 	reasoning := firstNonEmpty(delta.ReasoningContent, delta.Reasoning, delta.ReasoningCamel)
 	if reasoning != "" {
 		acc.reasoning.WriteString(reasoning)
-		if opts.OnReasoning != nil { opts.OnReasoning(reasoning) }
+		if opts.OnReasoning != nil {
+			opts.OnReasoning(reasoning)
+		}
 	}
 	if delta.Content != "" {
 		acc.content.WriteString(delta.Content)
-		if opts.OnContent != nil { opts.OnContent(delta.Content) }
+		if opts.OnContent != nil {
+			opts.OnContent(delta.Content)
+		}
 	}
 	for _, call := range delta.ToolCalls {
 		d := acc.calls[call.Index]

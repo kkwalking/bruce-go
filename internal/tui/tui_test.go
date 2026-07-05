@@ -89,6 +89,58 @@ func TestBlankStreamingAssistantIsRemovedAroundToolActivity(t *testing.T) {
 	}
 }
 
+func TestStreamingReasoningDeltasProduceSingleFinalMessage(t *testing.T) {
+	model := NewModel(context.Background(), testRuntime(t))
+	model.messages = nil
+	model.appendStreamingReasoningDelta("先")
+	model.appendStreamingReasoningDelta("想")
+	model.appendStreamingReasoningDelta("一")
+	model.appendStreamingReasoningDelta("下")
+	model.finishStreamingReasoningMessage("先想一下")
+	if len(model.messages) != 1 || model.messages[0].kind != messageReasoning || model.messages[0].text != "先想一下" {
+		t.Fatalf("messages = %+v", model.messages)
+	}
+}
+
+func TestBlankStreamingReasoningIsRemoved(t *testing.T) {
+	model := NewModel(context.Background(), testRuntime(t))
+	model.messages = nil
+	model.beginStreamingReasoningMessage()
+	model.finishStreamingReasoningMessage("")
+	if len(model.messages) != 0 {
+		t.Fatalf("messages = %+v", model.messages)
+	}
+}
+
+func TestReasoningDeltaViaRuntimeEventCreatesReasoningMessage(t *testing.T) {
+	model := NewModel(context.Background(), testRuntime(t))
+	model.messages = nil
+	runID := "run-r1"
+	model.handleRuntimeEvent(event.NewMessageDelta(runID, llm.RoleAssistant, "reasoning", "思考步骤1"))
+	model.handleRuntimeEvent(event.NewMessageDelta(runID, llm.RoleAssistant, "reasoning", "思考步骤2"))
+	model.handleRuntimeEvent(event.NewMessageCompleted(runID, llm.Message{
+		Role:             llm.RoleAssistant,
+		ReasoningContent: "思考步骤1思考步骤2",
+		Content:          "最终答案",
+	}, false))
+	hasReasoning := false
+	hasAnswer := false
+	for _, msg := range model.messages {
+		if msg.kind == messageReasoning && strings.Contains(msg.text, "思考步骤") {
+			hasReasoning = true
+		}
+		if msg.kind == messageAssistant && strings.Contains(msg.text, "最终答案") {
+			hasAnswer = true
+		}
+	}
+	if !hasReasoning {
+		t.Fatal("reasoning message not found in messages")
+	}
+	if !hasAnswer {
+		t.Fatal("assistant message not found in messages")
+	}
+}
+
 func TestMessageWindowUsesScrollOffsetAndClamps(t *testing.T) {
 	model := NewModel(context.Background(), testRuntime(t))
 	model.messages = []tuiMessage{{kind: messageAssistant, text: strings.Join([]string{
@@ -203,6 +255,26 @@ func TestRunActivityTracksReasoningContentAndCompletion(t *testing.T) {
 	assertMessageContains(t, model.messages, "完成")
 	if _, ok := model.runActivityIndexes[runID]; ok {
 		t.Fatalf("run activity index not cleared: %+v", model.runActivityIndexes)
+	}
+
+	// also check reasoning text is recorded as a message
+	model2 := NewModel(context.Background(), testRuntime(t))
+	model2.messages = nil
+	reasoningRunID := "run-2"
+	model2.handleRuntimeEvent(event.NewMessageDelta(reasoningRunID, llm.RoleAssistant, "reasoning", "思考中"))
+	model2.handleRuntimeEvent(event.NewMessageCompleted(reasoningRunID, llm.Message{
+		Role:             llm.RoleAssistant,
+		ReasoningContent: "思考中",
+		Content:          "答案",
+	}, false))
+	hasReasoning := false
+	for _, msg := range model2.messages {
+		if msg.kind == messageReasoning && strings.Contains(msg.text, "思考中") {
+			hasReasoning = true
+		}
+	}
+	if !hasReasoning {
+		t.Fatalf("reasoning message not found: %+v", model2.messages)
 	}
 }
 

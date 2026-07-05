@@ -34,6 +34,7 @@ const (
 	messageAssistant
 	messageSystem
 	messageActivity
+	messageReasoning
 )
 
 type tuiMessage struct {
@@ -84,6 +85,8 @@ type Model struct {
 	messages                []tuiMessage
 	streamingAssistant      string
 	streamingAssistantIndex int
+	streamingReasoning      string
+	streamingReasoningIndex int
 	toolActivityIndexes     map[string]int
 	runActivityIndexes      map[string]int
 
@@ -116,6 +119,7 @@ func NewModel(ctx context.Context, rt *integrated.Runtime) *Model {
 		statusPhase:             "idle",
 		busy:                    rt != nil && rt.StartMCP,
 		streamingAssistantIndex: -1,
+		streamingReasoningIndex: -1,
 		toolActivityIndexes:     map[string]int{},
 		runActivityIndexes:      map[string]int{},
 		historyFile:             resolveHistoryFile(homeDir),
@@ -321,15 +325,17 @@ func (m *Model) handleRuntimeEvent(evt event.Event) {
 			switch e.Channel {
 			case "reasoning":
 				m.updateRunActivity(e.RunID, "推理中...")
+				m.appendStreamingReasoningDelta(e.Delta)
 			case "content":
 				m.updateRunActivity(e.RunID, "生成回答...")
 				m.appendStreamingAssistantDelta(e.Delta)
 			}
 		}
 	case event.MessageCompleted:
-		if e.Message.Role == llm.RoleAssistant {
-			m.finishStreamingAssistantMessage(e.Message.Content)
-		}
+	if e.Message.Role == llm.RoleAssistant {
+		m.finishStreamingReasoningMessage(e.Message.ReasoningContent)
+		m.finishStreamingAssistantMessage(e.Message.Content)
+	}
 	case event.ToolCallStarted:
 		m.updateRunActivity(e.RunID, "调用工具...")
 		index := m.appendActivityAndReturnIndex(toolActivityText(e.ToolCall, "处理中"))
@@ -762,16 +768,73 @@ func (m *Model) finishStreamingAssistantMessage(finalText string) {
 	m.streamingAssistant = ""
 }
 
+func (m *Model) beginStreamingReasoningMessage() {
+	if m.streamingReasoningIndex >= 0 {
+		return
+	}
+	m.streamingReasoning = ""
+	if m.streamingAssistantIndex >= 0 {
+		pos := m.streamingAssistantIndex
+		m.messages = append(m.messages, tuiMessage{})
+		copy(m.messages[pos+1:], m.messages[pos:])
+		m.messages[pos] = tuiMessage{kind: messageReasoning}
+		m.streamingReasoningIndex = pos
+		m.streamingAssistantIndex++
+	} else {
+		m.messages = append(m.messages, tuiMessage{kind: messageReasoning})
+		m.streamingReasoningIndex = len(m.messages) - 1
+	}
+}
+
+func (m *Model) appendStreamingReasoningDelta(delta string) {
+	if delta == "" {
+		return
+	}
+	if m.streamingReasoningIndex < 0 {
+		m.beginStreamingReasoningMessage()
+	}
+	m.streamingReasoning += delta
+	m.messages[m.streamingReasoningIndex] = tuiMessage{kind: messageReasoning, text: m.streamingReasoning}
+}
+
+func (m *Model) finishStreamingReasoningMessage(text string) {
+	text = strings.TrimSpace(text)
+	if m.streamingReasoningIndex < 0 {
+		if text != "" {
+			m.messages = append(m.messages, tuiMessage{kind: messageReasoning, text: text})
+		}
+		return
+	}
+	if text == "" {
+		text = strings.TrimSpace(m.streamingReasoning)
+	}
+	if text == "" {
+		m.messages = append(m.messages[:m.streamingReasoningIndex], m.messages[m.streamingReasoningIndex+1:]...)
+		if m.streamingAssistantIndex > m.streamingReasoningIndex {
+			m.streamingAssistantIndex--
+		}
+	} else {
+		m.messages[m.streamingReasoningIndex] = tuiMessage{kind: messageReasoning, text: text}
+	}
+	m.streamingReasoningIndex = -1
+	m.streamingReasoning = ""
+}
+
 func (m *Model) replaySessionHistory(messages []llm.Message) {
 	m.messages = nil
 	m.streamingAssistantIndex = -1
 	m.streamingAssistant = ""
+	m.streamingReasoningIndex = -1
+	m.streamingReasoning = ""
 	m.scrollOffset = 0
 	for _, message := range messages {
 		switch message.Role {
 		case llm.RoleUser:
 			m.appendUserMessage(message.Content)
 		case llm.RoleAssistant:
+			if strings.TrimSpace(message.ReasoningContent) != "" {
+				m.appendMessage(messageReasoning, message.ReasoningContent)
+			}
 			if strings.TrimSpace(message.Content) != "" {
 				m.appendMessage(messageAssistant, message.Content)
 			}
@@ -1201,8 +1264,8 @@ func styleForMessage(kind messageKind) lipgloss.Style {
 		return userStyle
 	case messageSystem:
 		return infoStyle
-	case messageActivity:
-		return dimStyle
+	case messageReasoning:
+		return reasoningStyle
 	default:
 		return baseStyle
 	}
@@ -1236,6 +1299,7 @@ var (
 	mentionStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
 	imageStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
 	cursorCellStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("#C0C0C0")).Bold(true)
+	reasoningStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#A0A0A0"))
 )
 
 func empty(value, fallback string) string {
