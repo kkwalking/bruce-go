@@ -88,7 +88,7 @@ type Model struct {
 	streamingReasoning      string
 	streamingReasoningIndex int
 	toolActivityIndexes     map[string]int
-	runActivityIndexes      map[string]int
+	agentStatusText    string
 
 	width              int
 	height             int
@@ -121,7 +121,6 @@ func NewModel(ctx context.Context, rt *integrated.Runtime) *Model {
 		streamingAssistantIndex: -1,
 		streamingReasoningIndex: -1,
 		toolActivityIndexes:     map[string]int{},
-		runActivityIndexes:      map[string]int{},
 		historyFile:             resolveHistoryFile(homeDir),
 	}
 	if m.busy {
@@ -288,6 +287,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) {
 
 func (m *Model) handleCommandFinished(msg commandFinishedMsg) tea.Cmd {
 	m.busy = false
+	m.agentStatusText = ""
 	m.statusPhase = "idle"
 	m.elapsedMillis = msg.elapsedMillis
 	if msg.command {
@@ -312,10 +312,7 @@ func (m *Model) handleRuntimeEvent(evt event.Event) {
 	switch e := evt.(type) {
 	case event.RunStarted:
 		m.toolActivityIndexes = map[string]int{}
-		index := m.appendActivityAndReturnIndex("思考中...")
-		if index >= 0 {
-			m.runActivityIndexes[e.RunID] = index
-		}
+		m.agentStatusText = "💭 思考中..."
 	case event.MessageStarted:
 		if e.Role == llm.RoleAssistant {
 			m.beginStreamingAssistantMessage()
@@ -324,20 +321,20 @@ func (m *Model) handleRuntimeEvent(evt event.Event) {
 		if e.Role == llm.RoleAssistant {
 			switch e.Channel {
 			case "reasoning":
-				m.updateRunActivity(e.RunID, "推理中...")
 				m.appendStreamingReasoningDelta(e.Delta)
+				m.agentStatusText = "🧠 推理中..."
 			case "content":
-				m.updateRunActivity(e.RunID, "生成回答...")
 				m.appendStreamingAssistantDelta(e.Delta)
+				m.agentStatusText = "📝 生成回答..."
 			}
 		}
 	case event.MessageCompleted:
-	if e.Message.Role == llm.RoleAssistant {
-		m.finishStreamingReasoningMessage(e.Message.ReasoningContent)
-		m.finishStreamingAssistantMessage(e.Message.Content)
-	}
+		if e.Message.Role == llm.RoleAssistant {
+			m.finishStreamingReasoningMessage(e.Message.ReasoningContent)
+			m.finishStreamingAssistantMessage(e.Message.Content)
+		}
 	case event.ToolCallStarted:
-		m.updateRunActivity(e.RunID, "调用工具...")
+		m.agentStatusText = "🔧 调用工具..."
 		index := m.appendActivityAndReturnIndex(toolActivityText(e.ToolCall, "处理中"))
 		if index >= 0 {
 			m.toolActivityIndexes[toolActivityKey(e.RunID, e.ToolCall)] = index
@@ -359,14 +356,15 @@ func (m *Model) handleRuntimeEvent(evt event.Event) {
 	case event.SessionChanged:
 		if e.Reason == "resume" || e.Reason == "compact" {
 			m.replaySessionHistory(e.Context.Messages)
+			m.agentStatusText = ""
 		}
 	case event.RunFailed:
-		m.finishRunActivity(e.RunID, "失败")
+		m.agentStatusText = "❌ 失败"
 		if e.Message != "" {
 			m.appendSystemMessage("执行失败: " + e.Message)
 		}
 	case event.RunCompleted:
-		m.finishRunActivity(e.RunID, "完成")
+		m.agentStatusText = ""
 	case event.Basic:
 		m.handleBasicEvent(e)
 	}
@@ -713,20 +711,6 @@ func (m *Model) replaceActivity(index int, text string) bool {
 	return true
 }
 
-func (m *Model) updateRunActivity(runID, text string) {
-	index, ok := m.runActivityIndexes[runID]
-	if !ok {
-		return
-	}
-	if !m.replaceActivity(index, text) {
-		delete(m.runActivityIndexes, runID)
-	}
-}
-
-func (m *Model) finishRunActivity(runID, text string) {
-	m.updateRunActivity(runID, text)
-	delete(m.runActivityIndexes, runID)
-}
 
 func (m *Model) beginStreamingAssistantMessage() {
 	if m.streamingAssistantIndex >= 0 {
@@ -827,6 +811,7 @@ func (m *Model) replaySessionHistory(messages []llm.Message) {
 	m.streamingReasoningIndex = -1
 	m.streamingReasoning = ""
 	m.scrollOffset = 0
+	m.agentStatusText = ""
 	for _, message := range messages {
 		switch message.Role {
 		case llm.RoleUser:
@@ -890,8 +875,17 @@ func (m *Model) drawCompletions(canvas []string, columns, indexStatusRow int) {
 	}
 }
 
+
 func (m *Model) drawInput(canvas []string, columns, inputTop, inputLine, inputBottom int) {
-	setRow(canvas, inputTop, columns, dimStyle.Render(inputFrameLine(columns)))
+	if m.agentStatusText != "" {
+		leftFrame := 3
+		content := dimStyle.Render(" " + m.agentStatusText + " ")
+		contentW := runewidth.StringWidth(m.agentStatusText) + 2
+		restW := max(0, columns-contentW-leftFrame)
+		setRow(canvas, inputTop, columns, dimStyle.Render(strings.Repeat("━", leftFrame))+content+dimStyle.Render(strings.Repeat("━", restW)))
+	} else {
+		setRow(canvas, inputTop, columns, dimStyle.Render(inputFrameLine(columns)))
+	}
 	setRow(canvas, inputBottom, columns, dimStyle.Render(inputFrameLine(columns)))
 	prompt := "❯ "
 	promptStyle := userStyle
@@ -1067,7 +1061,14 @@ type tuiLayout struct {
 
 func layoutFor(rows int) tuiLayout {
 	rows = max(8, rows)
-	return tuiLayout{messageRows: max(1, rows-5), indexStatusRow: rows - 5, inputTop: rows - 4, inputLine: rows - 3, inputBottom: rows - 2, statusRow: rows - 1}
+	return tuiLayout{
+		messageRows:    max(1, rows-5),
+		indexStatusRow: rows - 5,
+		inputTop:       rows - 4,
+		inputLine:      rows - 3,
+		inputBottom:    rows - 2,
+		statusRow:      rows - 1,
+	}
 }
 
 func inputFrameLine(columns int) string {

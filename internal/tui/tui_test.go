@@ -242,19 +242,24 @@ func TestRunActivityTracksReasoningContentAndCompletion(t *testing.T) {
 	runID := "run-1"
 
 	model.handleRuntimeEvent(event.NewRunStarted(runID, model.runtime.Mode, "hello"))
-	assertMessageContains(t, model.messages, "思考中")
+	if !strings.Contains(model.agentStatusText, "思考中") {
+		t.Fatalf("agentStatusText = %q, want 思考中", model.agentStatusText)
+	}
 
 	model.handleRuntimeEvent(event.NewMessageDelta(runID, llm.RoleAssistant, "reasoning", "先想"))
-	assertMessageContains(t, model.messages, "推理中")
+	if !strings.Contains(model.agentStatusText, "推理中") {
+		t.Fatalf("agentStatusText = %q, want 推理中", model.agentStatusText)
+	}
 
 	model.handleRuntimeEvent(event.NewMessageDelta(runID, llm.RoleAssistant, "content", "答案"))
-	assertMessageContains(t, model.messages, "生成回答")
+	if !strings.Contains(model.agentStatusText, "生成回答") {
+		t.Fatalf("agentStatusText = %q, want 生成回答", model.agentStatusText)
+	}
 	assertMessageContains(t, model.messages, "答案")
 
 	model.handleRuntimeEvent(event.NewRunCompleted(runID, "答案"))
-	assertMessageContains(t, model.messages, "完成")
-	if _, ok := model.runActivityIndexes[runID]; ok {
-		t.Fatalf("run activity index not cleared: %+v", model.runActivityIndexes)
+	if model.agentStatusText != "" {
+		t.Fatalf("agentStatusText = %q, want empty after completed", model.agentStatusText)
 	}
 
 	// also check reasoning text is recorded as a message
