@@ -96,6 +96,8 @@ type Model struct {
 	busy               bool
 	statusPhase        string
 	elapsedMillis      int64
+	cancel             context.CancelFunc
+	lastEscTime        time.Time
 	scrollOffset       int
 	selectedCompletion int
 	modelSelectorOpen  bool
@@ -266,6 +268,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case "tab":
 		m.applyCompletion()
 	case "esc":
+		if m.busy && m.cancel != nil {
+			if time.Since(m.lastEscTime) < 500*time.Millisecond {
+				m.cancel()
+				m.cancel = nil
+				m.appendSystemMessage("⏹ 任务已被用户中断。")
+				return nil
+			}
+			m.lastEscTime = time.Now()
+			return nil
+		}
 		m.selectedCompletion = 0
 		m.modelSelectorOpen = false
 	default:
@@ -287,6 +299,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) {
 
 func (m *Model) handleCommandFinished(msg commandFinishedMsg) tea.Cmd {
 	m.busy = false
+	m.cancel = nil
 	m.agentStatusText = ""
 	m.statusPhase = "idle"
 	m.elapsedMillis = msg.elapsedMillis
@@ -395,7 +408,9 @@ func (m *Model) submitInput() tea.Cmd {
 	m.appendUserMessage(submitted)
 	m.busy = true
 	m.statusPhase = "running"
-	return runInputCmd(m.ctx, m.runtime, submitted)
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.cancel = cancel
+	return runInputCmd(ctx, m.runtime, submitted)
 }
 
 func runInputCmd(ctx context.Context, rt *integrated.Runtime, submitted string) tea.Cmd {

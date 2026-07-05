@@ -88,10 +88,19 @@ func (a *Agent) Run(ctx context.Context, input llm.PreparedInput, taskContext st
 	a.appendDurable(runID, input.Message)
 	retryCount := 0
 	for i := 0; i < a.MaxIterations; i++ {
+		select {
+		case <-ctx.Done():
+			return "任务已被用户中断", nil
+		default:
+		}
 		pruneImages(a.History)
 		a.emit(event.NewMessageStarted(runID, llm.RoleAssistant))
 		resp, err := a.Client.Chat(ctx, a.History, a.Tools.Definitions(), streamToEvents(a.Events, runID))
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				a.emit(event.NewMessageCompleted(runID, llm.Assistant(""), false))
+				return "任务已被用户中断", nil
+			}
 			if retryCount < maxRetries && isRetryable(err) {
 				retryCount++
 				continue
