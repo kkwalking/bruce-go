@@ -3,4 +3,4 @@
 原Java版本项目位置: /User/zhouzekun/code/bruce-cli
 
 ## 开发guideline
-需求开发或者bug修复要用新开分支，开发完成之后不要提交，等我审阅
+需求开发或者bug修复时先新开分支，然后改动，开发完成之后不要提交，等我审阅
