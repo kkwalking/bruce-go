@@ -94,11 +94,11 @@ func NewProviderClient(provider, model string, settings config.ProviderSetting) 
 	}
 }
 
-func (c *SwitchableClient) Chat(ctx context.Context, messages []Message, tools []ToolDefinition, listener StreamListener) (ChatResponse, error) {
+func (c *SwitchableClient) Chat(ctx context.Context, messages []Message, tools []ToolDefinition, opts StreamOptions) (ChatResponse, error) {
 	c.mu.RLock()
 	client := c.client
 	c.mu.RUnlock()
-	return client.Chat(ctx, messages, tools, listener)
+	return client.Chat(ctx, messages, tools, opts)
 }
 
 func (c *SwitchableClient) ProviderName() string {

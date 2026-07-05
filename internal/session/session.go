@@ -635,7 +635,7 @@ func Compact(ctx context.Context, client llm.ChatClient, messages []llm.Message,
 	if strings.TrimSpace(custom) != "" {
 		prompt += "\n\n额外摘要指令:\n" + custom
 	}
-	resp, err := client.Chat(ctx, []llm.Message{llm.System("You are a context summarization assistant."), llm.User(prompt)}, nil, llm.NoopStreamListener{})
+	resp, err := client.Chat(ctx, []llm.Message{llm.System("You are a context summarization assistant."), llm.User(prompt)}, nil, llm.StreamOptions{})
 	if err != nil {
 		return CompactionResult{}, err
 	}

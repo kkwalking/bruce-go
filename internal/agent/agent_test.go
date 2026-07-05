@@ -206,15 +206,15 @@ type recordingClient struct {
 	calls     [][]llm.Message
 }
 
-func (c *recordingClient) Chat(_ context.Context, messages []llm.Message, _ []llm.ToolDefinition, listener llm.StreamListener) (llm.ChatResponse, error) {
+func (c *recordingClient) Chat(_ context.Context, messages []llm.Message, _ []llm.ToolDefinition, opts llm.StreamOptions) (llm.ChatResponse, error) {
 	copied := append([]llm.Message(nil), messages...)
 	c.calls = append(c.calls, copied)
 	if len(c.calls) > len(c.responses) {
 		return llm.ChatResponse{}, errors.New("recording client response exhausted")
 	}
 	resp := c.responses[len(c.calls)-1]
-	if listener != nil && resp.Content != "" {
-		listener.OnContentDelta(resp.Content)
+	if opts.OnContent != nil && resp.Content != "" {
+		opts.OnContent(resp.Content)
 	}
 	return resp, nil
 }

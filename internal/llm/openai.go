@@ -80,10 +80,7 @@ func (c *OpenAICompatibleClient) MaxContextWindow() int {
 	}
 }
 
-func (c *OpenAICompatibleClient) Chat(ctx context.Context, messages []Message, tools []ToolDefinition, listener StreamListener) (ChatResponse, error) {
-	if listener == nil {
-		listener = NoopStreamListener{}
-	}
+func (c *OpenAICompatibleClient) Chat(ctx context.Context, messages []Message, tools []ToolDefinition, opts StreamOptions) (ChatResponse, error) {
 	body, err := c.requestBody(messages, tools, true)
 	if err != nil {
 		return ChatResponse{}, err
@@ -104,7 +101,7 @@ func (c *OpenAICompatibleClient) Chat(ctx context.Context, messages []Message, t
 		return ChatResponse{}, errors.New(c.Provider + " API request failed: HTTP " + resp.Status + "\n" + string(data))
 	}
 	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		return ParseChatStream(resp.Body, listener)
+		return ParseChatStream(resp.Body, opts)
 	}
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -174,10 +171,7 @@ func ParseChatResponse(data []byte) (ChatResponse, error) {
 	}, nil
 }
 
-func ParseChatStream(r io.Reader, listener StreamListener) (ChatResponse, error) {
-	if listener == nil {
-		listener = NoopStreamListener{}
-	}
+func ParseChatStream(r io.Reader, opts StreamOptions) (ChatResponse, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	var data strings.Builder
@@ -185,7 +179,7 @@ func ParseChatStream(r io.Reader, listener StreamListener) (ChatResponse, error)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.TrimSpace(line) == "" {
-			done, err := parseStreamData(data.String(), &acc, listener)
+			done, err := parseStreamData(data.String(), &acc, opts)
 			data.Reset()
 			if err != nil || done {
 				return acc.response(), err
@@ -200,7 +194,7 @@ func ParseChatStream(r io.Reader, listener StreamListener) (ChatResponse, error)
 		}
 	}
 	if data.Len() > 0 {
-		_, err := parseStreamData(data.String(), &acc, listener)
+		_, err := parseStreamData(data.String(), &acc, opts)
 		if err != nil {
 			return ChatResponse{}, err
 		}
@@ -208,7 +202,7 @@ func ParseChatStream(r io.Reader, listener StreamListener) (ChatResponse, error)
 	return acc.response(), scanner.Err()
 }
 
-func parseStreamData(data string, acc *streamAccumulator, listener StreamListener) (bool, error) {
+func parseStreamData(data string, acc *streamAccumulator, opts StreamOptions) (bool, error) {
 	payload := strings.TrimSpace(data)
 	if payload == "" {
 		return false, nil
@@ -242,11 +236,11 @@ func parseStreamData(data string, acc *streamAccumulator, listener StreamListene
 	reasoning := firstNonEmpty(delta.ReasoningContent, delta.Reasoning, delta.ReasoningCamel)
 	if reasoning != "" {
 		acc.reasoning.WriteString(reasoning)
-		listener.OnReasoningDelta(reasoning)
+		if opts.OnReasoning != nil { opts.OnReasoning(reasoning) }
 	}
 	if delta.Content != "" {
 		acc.content.WriteString(delta.Content)
-		listener.OnContentDelta(delta.Content)
+		if opts.OnContent != nil { opts.OnContent(delta.Content) }
 	}
 	for _, call := range delta.ToolCalls {
 		d := acc.calls[call.Index]

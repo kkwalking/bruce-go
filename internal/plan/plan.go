@@ -274,7 +274,7 @@ func (p LLMPlanner) Plan(ctx context.Context, goal, supplemental, taskContext st
 		defs = p.Tools.Definitions()
 	}
 	for i := 0; i < 5; i++ {
-		resp, err := p.Client.Chat(ctx, messages, defs, llm.NoopStreamListener{})
+		resp, err := p.Client.Chat(ctx, messages, defs, llm.StreamOptions{})
 		if err != nil {
 			return nil, err
 		}

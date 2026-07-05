@@ -225,25 +225,16 @@ func buildPrompt(registry *tool.Registry, additional string) string {
 	return prompt
 }
 
-func streamToEvents(bus *event.Bus, runID string) llm.StreamListener {
+func streamToEvents(bus *event.Bus, runID string) llm.StreamOptions {
 	if bus == nil {
-		return llm.NoopStreamListener{}
+		return llm.StreamOptions{}
 	}
-	return streamListener{bus: bus, runID: runID}
+	return llm.StreamOptions{
+		OnContent:   func(delta string) { bus.Emit(event.NewMessageDelta(runID, llm.RoleAssistant, "content", delta)) },
+		OnReasoning: func(delta string) { bus.Emit(event.NewMessageDelta(runID, llm.RoleAssistant, "reasoning", delta)) },
+	}
 }
 
-type streamListener struct {
-	bus   *event.Bus
-	runID string
-}
-
-func (s streamListener) OnReasoningDelta(delta string) {
-	s.bus.Emit(event.NewMessageDelta(s.runID, llm.RoleAssistant, "reasoning", delta))
-}
-
-func (s streamListener) OnContentDelta(delta string) {
-	s.bus.Emit(event.NewMessageDelta(s.runID, llm.RoleAssistant, "content", delta))
-}
 
 func pruneImages(messages []llm.Message) {
 	latest := -1
@@ -267,7 +258,7 @@ type FakeClient struct {
 	Err       error
 }
 
-func (f *FakeClient) Chat(_ context.Context, _ []llm.Message, _ []llm.ToolDefinition, listener llm.StreamListener) (llm.ChatResponse, error) {
+func (f *FakeClient) Chat(_ context.Context, _ []llm.Message, _ []llm.ToolDefinition, opts llm.StreamOptions) (llm.ChatResponse, error) {
 	if f.Err != nil {
 		return llm.ChatResponse{}, f.Err
 	}
@@ -276,13 +267,11 @@ func (f *FakeClient) Chat(_ context.Context, _ []llm.Message, _ []llm.ToolDefini
 	}
 	resp := f.Responses[f.Calls]
 	f.Calls++
-	if listener != nil {
-		if resp.ReasoningContent != "" {
-			listener.OnReasoningDelta(resp.ReasoningContent)
-		}
-		if resp.Content != "" {
-			listener.OnContentDelta(resp.Content)
-		}
+	if resp.ReasoningContent != "" && opts.OnReasoning != nil {
+		opts.OnReasoning(resp.ReasoningContent)
+	}
+	if resp.Content != "" && opts.OnContent != nil {
+		opts.OnContent(resp.Content)
 	}
 	return resp, nil
 }

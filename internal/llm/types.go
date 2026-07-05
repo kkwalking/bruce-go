@@ -12,18 +12,14 @@ const (
 	RoleTool      = "tool"
 )
 
-type StreamListener interface {
-	OnReasoningDelta(delta string)
-	OnContentDelta(delta string)
+type StreamOptions struct {
+	OnContent   func(delta string)
+	OnReasoning func(delta string)
 }
 
-type NoopStreamListener struct{}
-
-func (NoopStreamListener) OnReasoningDelta(string) {}
-func (NoopStreamListener) OnContentDelta(string)   {}
 
 type ChatClient interface {
-	Chat(ctx context.Context, messages []Message, tools []ToolDefinition, listener StreamListener) (ChatResponse, error)
+	Chat(ctx context.Context, messages []Message, tools []ToolDefinition, opts StreamOptions) (ChatResponse, error)
 	ProviderName() string
 	ModelName() string
 	MaxContextWindow() int

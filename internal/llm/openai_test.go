@@ -39,7 +39,7 @@ data: {"choices":[{"delta":{"content":""}}],"usage":{"prompt_tokens":5,"completi
 
 data: [DONE]
 
-`), streamRecorderForTest{content: &content})
+`), StreamOptions{OnContent: func(delta string) { content.WriteString(delta) }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,12 +51,3 @@ data: [DONE]
 	}
 }
 
-type streamRecorderForTest struct {
-	content *strings.Builder
-}
-
-func (s streamRecorderForTest) OnReasoningDelta(string) {}
-
-func (s streamRecorderForTest) OnContentDelta(delta string) {
-	s.content.WriteString(delta)
-}
