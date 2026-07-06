@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -37,7 +36,6 @@ func NewDeepSeekClient(apiKey, model string) *OpenAICompatibleClient {
 		model = "deepseek-v4-flash"
 	}
 	c := NewOpenAICompatibleClient("deepseek", apiKey, model, "https://api.deepseek.com")
-	c.HTTPClient = newDeepSeekHTTPClient()
 	return c
 }
 
@@ -60,7 +58,7 @@ func (c *OpenAICompatibleClient) SupportsPromptCaching() bool {
 }
 
 func (c *OpenAICompatibleClient) SetReasoningEffort(effort string) { c.reasoningEffort = effort }
-func (c *OpenAICompatibleClient) ReasoningEffort() string           { return c.reasoningEffort }
+func (c *OpenAICompatibleClient) ReasoningEffort() string          { return c.reasoningEffort }
 
 func (c *OpenAICompatibleClient) SupportsImages() bool {
 	switch c.Provider {
@@ -401,13 +399,6 @@ func (c *OpenAICompatibleClient) httpClient() *http.Client {
 		return c.HTTPClient
 	}
 	return &http.Client{Timeout: 120 * time.Second}
-}
-
-func newDeepSeekHTTPClient() *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.ForceAttemptHTTP2 = false
-	transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
-	return &http.Client{Transport: transport, Timeout: 120 * time.Second}
 }
 
 func firstNonEmpty(values ...string) string {
