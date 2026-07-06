@@ -14,6 +14,8 @@ import (
 	"bruce-go/internal/event"
 	"bruce-go/internal/integrated"
 	"bruce-go/internal/llm"
+	bruntime "bruce-go/internal/runtime"
+	"bruce-go/internal/session"
 	"bruce-go/internal/tool"
 )
 
@@ -66,6 +68,53 @@ func TestPlainPlanCommandStillAppendsResultOutput(t *testing.T) {
 	assertMessageContains(t, model.messages, "已切换到 Plan 模式")
 }
 
+func TestPlanEventRecordedRendersPresentedPlanContent(t *testing.T) {
+	model := NewModel(context.Background(), testRuntime(t))
+	model.messages = nil
+	runID := "run-plan"
+	model.handleRuntimeEvent(event.NewMessageCompleted(runID, llm.Assistant("计划创建完成，请审阅。"), false))
+	model.handleRuntimeEvent(event.NewPlanEventRecorded(runID, bruntime.PlanEvent{
+		ID:       "plan_1",
+		Action:   bruntime.PlanActionPresented,
+		Revision: 2,
+		Content:  "# Plan\n\n| 文件 | 说明 |\n|------|------|\n| a.go | 实现 |",
+	}))
+
+	if len(model.messages) != 2 {
+		t.Fatalf("messages = %+v", model.messages)
+	}
+	if model.messages[0].kind != messageAssistant || !strings.Contains(model.messages[0].text, "计划创建完成") {
+		t.Fatalf("assistant message should remain ordinary output: %+v", model.messages)
+	}
+	if model.messages[1].kind != messagePlan || !strings.Contains(model.messages[1].text, "# Plan") || !strings.Contains(model.messages[1].text, "| a.go | 实现 |") {
+		t.Fatalf("plan message missing full content: %+v", model.messages)
+	}
+}
+
+func TestSessionReplayRendersPresentedPlanEntriesInOrder(t *testing.T) {
+	model := NewModel(context.Background(), testRuntime(t))
+	model.messages = nil
+	model.replaySessionEntries([]session.Entry{
+		{Type: session.TypeMessage, Message: messagePtr(llm.User("请创建计划"))},
+		{Type: session.TypePlanEvent, Plan: &bruntime.PlanEvent{ID: "plan_1", Action: bruntime.PlanActionCreated, Revision: 1, Content: "# Draft"}},
+		{Type: session.TypePlanEvent, Plan: &bruntime.PlanEvent{ID: "plan_1", Action: bruntime.PlanActionPresented, Revision: 1, Content: "# Final Plan\n\n- Step"}},
+		{Type: session.TypeMessage, Message: messagePtr(llm.Assistant("计划创建完成，请审阅。"))},
+	}, nil)
+
+	if len(model.messages) != 3 {
+		t.Fatalf("messages = %+v", model.messages)
+	}
+	if model.messages[0].kind != messageUser || !strings.Contains(model.messages[0].text, "请创建计划") {
+		t.Fatalf("user message order broken: %+v", model.messages)
+	}
+	if model.messages[1].kind != messagePlan || !strings.Contains(model.messages[1].text, "# Final Plan") || strings.Contains(model.messages[1].text, "# Draft") {
+		t.Fatalf("plan replay message = %+v", model.messages[1])
+	}
+	if model.messages[2].kind != messageAssistant || !strings.Contains(model.messages[2].text, "计划创建完成") {
+		t.Fatalf("assistant message order broken: %+v", model.messages)
+	}
+}
+
 func TestLayoutKeepsInputAndStatusDockedAtBottom(t *testing.T) {
 	layout := layoutFor(24)
 	if layout.messageRows != 19 || layout.indexStatusRow != 19 || layout.inputTop != 20 || layout.inputLine != 21 || layout.inputBottom != 22 || layout.statusRow != 23 {
@@ -86,6 +135,19 @@ func TestCursorStyleUsesGrayBackground(t *testing.T) {
 	}
 	if got := cursorCellStyle.GetForeground(); got != lipgloss.Color("0") {
 		t.Fatalf("cursor foreground = %v, want black", got)
+	}
+}
+
+func TestPlanStyleUsesReadableLightBackground(t *testing.T) {
+	if got := planStyle.GetForeground(); got != lipgloss.Color("0") {
+		t.Fatalf("plan foreground = %v, want black", got)
+	}
+	if got := planStyle.GetBackground(); got != lipgloss.Color("#E6F4EA") {
+		t.Fatalf("plan background = %v, want light green", got)
+	}
+	rendered := renderMessageLine(renderLine{kind: messagePlan, text: "# Plan"}, 20)
+	if lipgloss.Width(rendered) != 20 {
+		t.Fatalf("rendered plan width = %d, want 20", lipgloss.Width(rendered))
 	}
 }
 
@@ -396,6 +458,10 @@ func testRuntime(t *testing.T) *integrated.Runtime {
 
 func toolResult(call llm.ToolCall, status string) tool.ToolCallResult {
 	return tool.ToolCallResult{ToolCall: call, Status: status}
+}
+
+func messagePtr(message llm.Message) *llm.Message {
+	return &message
 }
 
 func TestCompletesModelReasoningSubcommand(t *testing.T) {

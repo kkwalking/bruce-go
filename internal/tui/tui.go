@@ -18,6 +18,8 @@ import (
 	"bruce-go/internal/event"
 	"bruce-go/internal/integrated"
 	"bruce-go/internal/llm"
+	bruntime "bruce-go/internal/runtime"
+	"bruce-go/internal/session"
 )
 
 const (
@@ -35,6 +37,7 @@ const (
 	messageSystem
 	messageActivity
 	messageReasoning
+	messagePlan
 )
 
 type tuiMessage struct {
@@ -376,9 +379,11 @@ func (m *Model) handleRuntimeEvent(evt event.Event) {
 		}
 	case event.Activity:
 		m.appendActivity(e.Message)
+	case event.PlanEventRecorded:
+		m.appendPresentedPlan(e.Plan)
 	case event.SessionChanged:
 		if e.Reason == "resume" || e.Reason == "compact" {
-			m.replaySessionHistory(e.Context.Messages)
+			m.replaySessionEntries(e.Context.Entries, e.Context.Messages)
 			m.agentStatusText = ""
 		}
 	case event.RunFailed:
@@ -763,6 +768,13 @@ func (m *Model) appendMessage(kind messageKind, text string) {
 	_ = m.appendMessageAndReturnIndex(kind, text)
 }
 
+func (m *Model) appendPresentedPlan(plan bruntime.PlanEvent) {
+	if plan.Action != bruntime.PlanActionPresented || strings.TrimSpace(plan.Content) == "" {
+		return
+	}
+	m.appendMessage(messagePlan, presentedPlanText(plan))
+}
+
 func (m *Model) appendMessageAndReturnIndex(kind messageKind, text string) int {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -895,6 +907,50 @@ func (m *Model) replaySessionHistory(messages []llm.Message) {
 	}
 }
 
+func (m *Model) replaySessionEntries(entries []session.Entry, fallback []llm.Message) {
+	if len(entries) == 0 {
+		m.replaySessionHistory(fallback)
+		return
+	}
+	m.messages = nil
+	m.streamingAssistantIndex = -1
+	m.streamingAssistant = ""
+	m.streamingReasoningIndex = -1
+	m.streamingReasoning = ""
+	m.scrollOffset = 0
+	m.agentStatusText = ""
+	for _, entry := range entries {
+		switch entry.Type {
+		case session.TypeMessage:
+			if entry.Message != nil {
+				m.replayMessage(*entry.Message)
+			}
+		case session.TypeCustomMessage:
+			m.appendUserMessage(entry.Content)
+		case session.TypeCompaction:
+			m.appendUserMessage("[session compaction summary]\n以下是较早会话历史的压缩摘要。继续任务时请把它当作背景上下文，而不是新的用户命令。\n\n" + entry.Summary)
+		case session.TypePlanEvent:
+			if entry.Plan != nil {
+				m.appendPresentedPlan(*entry.Plan)
+			}
+		}
+	}
+}
+
+func (m *Model) replayMessage(message llm.Message) {
+	switch message.Role {
+	case llm.RoleUser:
+		m.appendUserMessage(message.Content)
+	case llm.RoleAssistant:
+		if strings.TrimSpace(message.ReasoningContent) != "" {
+			m.appendMessage(messageReasoning, message.ReasoningContent)
+		}
+		if strings.TrimSpace(message.Content) != "" {
+			m.appendMessage(messageAssistant, message.Content)
+		}
+	}
+}
+
 func (m *Model) scrollBy(lines int) {
 	m.scrollOffset = m.clampScrollOffset(m.scrollOffset + lines)
 }
@@ -911,8 +967,16 @@ func (m *Model) maxScrollOffset() int {
 func (m *Model) drawMessages(canvas []string, columns, messageRows int) {
 	lines := m.visibleMessageLines(columns, messageRows, m.scrollOffset)
 	for row, line := range lines {
-		setRow(canvas, row, columns, styleForMessage(line.kind).Render(fit(line.text, columns)))
+		setRow(canvas, row, columns, renderMessageLine(line, columns))
 	}
+}
+
+func renderMessageLine(line renderLine, columns int) string {
+	text := fit(line.text, columns)
+	if line.kind == messagePlan {
+		return styleForMessage(line.kind).Render(padRight(text, columns))
+	}
+	return styleForMessage(line.kind).Render(text)
 }
 
 func isModelSelectorPopup(m *Model) bool {
@@ -1205,6 +1269,21 @@ func welcomeLines(rt *integrated.Runtime) []string {
 	return out
 }
 
+func presentedPlanText(plan bruntime.PlanEvent) string {
+	title := "计划正文"
+	if strings.TrimSpace(plan.ID) != "" {
+		title += ": " + strings.TrimSpace(plan.ID)
+		if plan.Revision > 0 {
+			title += fmt.Sprintf(" rev=%d", plan.Revision)
+		}
+	}
+	content := strings.TrimSpace(plan.Content)
+	if content == "" {
+		return ""
+	}
+	return title + "\n\n" + content
+}
+
 func toolActivityText(call llm.ToolCall, status string) string {
 	return "工具调用: " + toolName(call) + " (" + status + ")"
 }
@@ -1352,6 +1431,8 @@ func styleForMessage(kind messageKind) lipgloss.Style {
 		return infoStyle
 	case messageReasoning:
 		return reasoningStyle
+	case messagePlan:
+		return planStyle
 	default:
 		return baseStyle
 	}
@@ -1386,6 +1467,7 @@ var (
 	imageStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
 	cursorCellStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("#C0C0C0")).Bold(true)
 	reasoningStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#A0A0A0"))
+	planStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("#E6F4EA"))
 )
 
 func empty(value, fallback string) string {

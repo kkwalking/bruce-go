@@ -173,6 +173,18 @@ func NewToolCallCompleted(runID string, result tool.ToolCallResult) ToolCallComp
 
 func (e ToolCallCompleted) Type() string { return "tool_call_completed" }
 
+type PlanEventRecorded struct {
+	RunID     string
+	Timestamp time.Time
+	Plan      runtime.PlanEvent
+}
+
+func NewPlanEventRecorded(runID string, plan runtime.PlanEvent) PlanEventRecorded {
+	return PlanEventRecorded{RunID: runID, Timestamp: time.Now(), Plan: plan}
+}
+
+func (e PlanEventRecorded) Type() string { return "plan_event_recorded" }
+
 type ModeChanged struct {
 	RunID     string
 	Timestamp time.Time

@@ -239,7 +239,7 @@ func (r *Runtime) runTask(ctx context.Context, input string, allowPendingPlanInp
 			r.emit(event.NewRunFailed(runID, err.Error()))
 			return "", err
 		}
-		display, err := r.presentPlan(out)
+		display, err := r.presentPlan(runID, out)
 		if err != nil {
 			r.emit(event.NewRunFailed(runID, err.Error()))
 			return "", err
@@ -708,7 +708,7 @@ func (r *Runtime) currentPlanState() runtime.PlanState {
 	return state
 }
 
-func (r *Runtime) presentPlan(out string) (string, error) {
+func (r *Runtime) presentPlan(runID, out string) (string, error) {
 	content := strings.TrimSpace(out)
 	state := r.currentPlanState()
 	if !state.Empty() {
@@ -726,10 +726,24 @@ func (r *Runtime) presentPlan(out string) (string, error) {
 		}
 		state = next
 	}
-	if _, err := r.planStore.Record(runtime.PlanActionPresented, state, content, "计划已展示"); err != nil {
+	presented, err := r.planStore.Record(runtime.PlanActionPresented, state, content, "计划已展示")
+	if err != nil {
 		return "", err
 	}
+	r.emit(event.NewPlanEventRecorded(runID, planEventFromState(presented)))
 	return content, nil
+}
+
+func planEventFromState(state runtime.PlanState) runtime.PlanEvent {
+	return runtime.PlanEvent{
+		ID:       state.ID,
+		Path:     state.Path,
+		Action:   state.Action,
+		Revision: state.Revision,
+		SHA256:   state.SHA256,
+		Summary:  state.Summary,
+		Content:  state.Content,
+	}
 }
 
 func (r *Runtime) approvePlan(ctx context.Context, raw string) (string, error) {

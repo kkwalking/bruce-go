@@ -89,3 +89,34 @@ func TestPlanEventDoesNotDetermineMode(t *testing.T) {
 		t.Fatalf("active plan = %+v", ctx.ActivePlan)
 	}
 }
+
+func TestContextIncludesPlanEntriesWithoutLLMHistory(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	store, err := CreateNew(home, workspace, runtime.ModePlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendMessage(llm.User("创建计划")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendPlanEvent(runtime.PlanEvent{ID: "plan_1", Action: runtime.PlanActionPresented, Revision: 1, Content: "# Plan\n\n- Step"}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := store.Context(runtime.ModeReact)
+	foundPlanEntry := false
+	for _, entry := range ctx.Entries {
+		if entry.Type == TypePlanEvent && entry.Plan != nil && entry.Plan.Content == "# Plan\n\n- Step" {
+			foundPlanEntry = true
+		}
+	}
+	if !foundPlanEntry {
+		t.Fatalf("plan entry not found in context entries: %+v", ctx.Entries)
+	}
+	for _, msg := range ctx.Messages {
+		if strings.Contains(msg.Content, "# Plan") {
+			t.Fatalf("plan content should not enter LLM messages: %+v", ctx.Messages)
+		}
+	}
+}

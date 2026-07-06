@@ -75,6 +75,7 @@ type Context struct {
 	Mode         runtime.AgentMode
 	MessageCount int
 	Messages     []llm.Message
+	Entries      []Entry
 	ActivePlan   runtime.PlanState
 }
 
@@ -136,7 +137,7 @@ func (s *Store) Context(fallback runtime.AgentMode) Context {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	path := s.activePathLocked()
-	return Context{SessionID: s.Header.ID, File: s.File, ActiveLeaf: s.ActiveLeaf, Mode: s.currentModeFromPathLocked(path, fallback), MessageCount: s.messageCountLocked(), Messages: s.buildMessagesFromPathLocked(path), ActivePlan: planStateFromPath(path)}
+	return Context{SessionID: s.Header.ID, File: s.File, ActiveLeaf: s.ActiveLeaf, Mode: s.currentModeFromPathLocked(path, fallback), MessageCount: s.messageCountLocked(), Messages: s.buildMessagesFromPathLocked(path), Entries: replayEntriesFromPath(path), ActivePlan: planStateFromPath(path)}
 }
 
 func (s *Store) AppendMessage(message llm.Message) error {
@@ -301,6 +302,31 @@ func (s *Store) buildMessagesFromPathLocked(path []Entry) []llm.Message {
 		appendContext(&messages, entry)
 	}
 	return messages
+}
+
+func replayEntriesFromPath(path []Entry) []Entry {
+	compactionIndex := -1
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i].Type == TypeCompaction {
+			compactionIndex = i
+			break
+		}
+	}
+	if compactionIndex < 0 {
+		return append([]Entry(nil), path...)
+	}
+	out := []Entry{path[compactionIndex]}
+	found := false
+	for i := 0; i < compactionIndex; i++ {
+		if path[i].ID == path[compactionIndex].FirstKeptEntryID {
+			found = true
+		}
+		if found {
+			out = append(out, path[i])
+		}
+	}
+	out = append(out, path[compactionIndex+1:]...)
+	return out
 }
 
 func (s *Store) openLocked(file string) error {

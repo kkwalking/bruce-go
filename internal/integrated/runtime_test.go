@@ -145,6 +145,36 @@ func TestPlanModePersistsOnlyTopLevelMessagesAndPlanEvents(t *testing.T) {
 	}
 }
 
+func TestPlanModeEmitsPresentedPlanEvent(t *testing.T) {
+	client := &recordingChatClient{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{ID: "call_plan", Function: llm.FunctionCall{Name: "replace_plan", Arguments: `{"content":"# Presented Plan\n\n- Step","summary":"create"}`}}}},
+		{Content: "计划创建完成，请审阅。"},
+	}}
+	rt, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: t.TempDir(), Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var planEvents []event.PlanEventRecorded
+	unsubscribe := rt.Events.Subscribe(func(evt event.Event) {
+		if recorded, ok := evt.(event.PlanEventRecorded); ok {
+			planEvents = append(planEvents, recorded)
+		}
+	})
+	defer unsubscribe()
+
+	planned := rt.Handle(context.Background(), "/plan 生成计划")
+	if planned.Err != nil {
+		t.Fatal(planned.Err)
+	}
+	if len(planEvents) != 1 {
+		t.Fatalf("plan events = %+v", planEvents)
+	}
+	got := planEvents[0].Plan
+	if got.Action != bruntime.PlanActionPresented || !strings.Contains(got.Content, "# Presented Plan") || got.Revision != 1 {
+		t.Fatalf("presented event = %+v", got)
+	}
+}
+
 func TestPlanDescriptionApproveAndRejectLifecycle(t *testing.T) {
 	client := &recordingChatClient{responses: []llm.ChatResponse{
 		{ToolCalls: []llm.ToolCall{{ID: "call_plan", Function: llm.FunctionCall{Name: "replace_plan", Arguments: `{"content":"# Plan\n\n- Inspect\n- Edit","summary":"create"}`}}}},
