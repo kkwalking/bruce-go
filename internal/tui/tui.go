@@ -27,6 +27,7 @@ const (
 	historyFileSize   = 10000
 	scrollLines       = 2
 	maxCompletionRows = 6
+	inputPrompt       = "❯ "
 )
 
 type messageKind int
@@ -48,6 +49,19 @@ type tuiMessage struct {
 type renderLine struct {
 	kind messageKind
 	text string
+}
+
+type inputRenderCell struct {
+	text   string
+	style  inputStyle
+	cursor bool
+	width  int
+}
+
+type inputRenderLine struct {
+	cells  []inputRenderCell
+	width  int
+	cursor bool
 }
 
 type commandFinishedMsg struct {
@@ -184,10 +198,10 @@ func (m *Model) View() string {
 	for i := range canvas {
 		canvas[i] = strings.Repeat(" ", columns)
 	}
-	layout := layoutFor(rows)
+	layout := m.layoutFor(columns, rows)
 	m.drawMessages(canvas, columns, layout.messageRows)
 	m.drawCompletions(canvas, columns, layout.indexStatusRow)
-	m.drawInput(canvas, columns, layout.inputTop, layout.inputLine, layout.inputBottom)
+	m.drawInput(canvas, columns, layout)
 	m.drawStatus(canvas, columns, layout.statusRow)
 	m.drawApproval(canvas, columns, rows)
 	return strings.Join(canvas, "\n")
@@ -960,8 +974,9 @@ func (m *Model) clampScrollOffset(offset int) int {
 }
 
 func (m *Model) maxScrollOffset() int {
-	layout := layoutFor(max(8, m.height))
-	return max(0, len(m.wrappedMessageLines(max(20, m.width)))-layout.messageRows)
+	columns := max(20, m.width)
+	layout := m.layoutFor(columns, max(8, m.height))
+	return max(0, len(m.wrappedMessageLines(columns))-layout.messageRows)
 }
 
 func (m *Model) drawMessages(canvas []string, columns, messageRows int) {
@@ -1029,25 +1044,35 @@ func (m *Model) drawCompletions(canvas []string, columns, indexStatusRow int) {
 	}
 }
 
-func (m *Model) drawInput(canvas []string, columns, inputTop, inputLine, inputBottom int) {
+func (m *Model) drawInput(canvas []string, columns int, layout tuiLayout) {
 	if m.agentStatusText != "" {
 		leftFrame := 3
 		content := dimStyle.Render(" " + m.agentStatusText + " ")
 		contentW := runewidth.StringWidth(m.agentStatusText) + 2
 		restW := max(0, columns-contentW-leftFrame)
-		setRow(canvas, inputTop, columns, dimStyle.Render(strings.Repeat("━", leftFrame))+content+dimStyle.Render(strings.Repeat("━", restW)))
+		setRow(canvas, layout.inputTop, columns, dimStyle.Render(strings.Repeat("━", leftFrame))+content+dimStyle.Render(strings.Repeat("━", restW)))
 	} else {
-		setRow(canvas, inputTop, columns, dimStyle.Render(inputFrameLine(columns)))
+		setRow(canvas, layout.inputTop, columns, dimStyle.Render(inputFrameLine(columns)))
 	}
-	setRow(canvas, inputBottom, columns, dimStyle.Render(inputFrameLine(columns)))
-	prompt := "❯ "
+	setRow(canvas, layout.inputBottom, columns, dimStyle.Render(inputFrameLine(columns)))
 	promptStyle := userStyle
 	if m.busy {
 		promptStyle = warnStyle
 	}
-	promptWidth := runewidth.StringWidth(prompt)
-	input := m.renderHighlightedInput(max(0, columns-promptWidth), promptStyle)
-	setRow(canvas, inputLine, columns, promptStyle.Render(prompt)+input)
+	promptWidth := runewidth.StringWidth(inputPrompt)
+	contentWidth := max(1, columns-promptWidth)
+	lines := visibleInputLines(m.wrappedInputLines(contentWidth), layout.inputRows)
+	for i := 0; i < layout.inputRows; i++ {
+		prefix := strings.Repeat(" ", promptWidth)
+		if i == 0 {
+			prefix = promptStyle.Render(inputPrompt)
+		}
+		input := strings.Repeat(" ", contentWidth)
+		if i < len(lines) {
+			input = renderInputLine(lines[i], contentWidth)
+		}
+		setRow(canvas, layout.inputLine+i, columns, prefix+input)
+	}
 }
 
 func (m *Model) drawStatus(canvas []string, columns, row int) {
@@ -1128,38 +1153,68 @@ func (m *Model) approvalLines(width int) []string {
 	return wrapped
 }
 
-func (m *Model) renderHighlightedInput(width int, cursorStyle lipgloss.Style) string {
-	if width <= 0 {
-		return ""
-	}
+func (m *Model) wrappedInputLines(width int) []inputRenderLine {
+	width = max(1, width)
 	styles := inputRuneStyles(m.inputText(), len(m.input))
-	var out strings.Builder
-	used := 0
+	lines := []inputRenderLine{{}}
+	appendCell := func(cell inputRenderCell) {
+		current := &lines[len(lines)-1]
+		if len(current.cells) > 0 && current.width+cell.width > width {
+			lines = append(lines, inputRenderLine{})
+			current = &lines[len(lines)-1]
+		}
+		current.cells = append(current.cells, cell)
+		current.width += cell.width
+		if cell.cursor {
+			current.cursor = true
+		}
+	}
 	for i, r := range m.input {
-		if i == m.cursor {
-			if used+runewidth.RuneWidth(r) > width {
-				break
-			}
-			out.WriteString(cursorCellStyle.Render(string(r)))
-			used += runewidth.RuneWidth(r)
+		appendCell(inputRenderCell{
+			text:   string(r),
+			style:  styles[i],
+			cursor: i == m.cursor,
+			width:  max(0, runewidth.RuneWidth(r)),
+		})
+	}
+	if m.cursor == len(m.input) {
+		appendCell(inputRenderCell{text: " ", cursor: true, width: 1})
+	}
+	return lines
+}
+
+func renderInputLine(line inputRenderLine, width int) string {
+	var out strings.Builder
+	for _, cell := range line.cells {
+		if cell.cursor {
+			out.WriteString(cursorCellStyle.Render(cell.text))
 			continue
 		}
-		w := runewidth.RuneWidth(r)
-		if used+w > width {
+		out.WriteString(styleForInput(cell.style).Render(cell.text))
+	}
+	if line.width < width {
+		out.WriteString(strings.Repeat(" ", width-line.width))
+	}
+	return out.String()
+}
+
+func visibleInputLines(lines []inputRenderLine, rows int) []inputRenderLine {
+	if len(lines) == 0 {
+		return []inputRenderLine{{cells: []inputRenderCell{{text: " ", cursor: true, width: 1}}, width: 1, cursor: true}}
+	}
+	rows = max(1, rows)
+	if len(lines) <= rows {
+		return append([]inputRenderLine(nil), lines...)
+	}
+	cursorLine := len(lines) - 1
+	for i, line := range lines {
+		if line.cursor {
+			cursorLine = i
 			break
 		}
-		out.WriteString(styleForInput(styles[i]).Render(string(r)))
-		used += w
 	}
-	if m.cursor == len(m.input) && used < width {
-		out.WriteString(cursorCellStyle.Render(" "))
-		used++
-	}
-	if used < width {
-		out.WriteString(strings.Repeat(" ", width-used))
-	}
-	_ = cursorStyle
-	return out.String()
+	start := clamp(cursorLine-rows+1, 0, len(lines)-rows)
+	return append([]inputRenderLine(nil), lines[start:start+rows]...)
 }
 
 func inputRuneStyles(input string, length int) []inputStyle {
@@ -1207,18 +1262,31 @@ type tuiLayout struct {
 	inputTop       int
 	inputLine      int
 	inputBottom    int
+	inputRows      int
 	statusRow      int
 }
 
-func layoutFor(rows int) tuiLayout {
+func (m *Model) layoutFor(columns, rows int) tuiLayout {
+	promptWidth := runewidth.StringWidth(inputPrompt)
+	inputRows := len(m.wrappedInputLines(max(1, columns-promptWidth)))
+	return layoutFor(rows, inputRows)
+}
+
+func layoutFor(rows, inputRows int) tuiLayout {
 	rows = max(8, rows)
+	inputRows = clamp(inputRows, 1, max(1, rows-5))
+	statusRow := rows - 1
+	inputBottom := statusRow - 1
+	inputTop := inputBottom - inputRows - 1
+	indexStatusRow := max(1, inputTop-1)
 	return tuiLayout{
-		messageRows:    max(1, rows-5),
-		indexStatusRow: rows - 5,
-		inputTop:       rows - 4,
-		inputLine:      rows - 3,
-		inputBottom:    rows - 2,
-		statusRow:      rows - 1,
+		messageRows:    max(1, indexStatusRow),
+		indexStatusRow: indexStatusRow,
+		inputTop:       inputTop,
+		inputLine:      inputTop + 1,
+		inputBottom:    inputBottom,
+		inputRows:      inputRows,
+		statusRow:      statusRow,
 	}
 }
 
