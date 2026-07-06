@@ -116,9 +116,69 @@ func TestSessionReplayRendersPresentedPlanEntriesInOrder(t *testing.T) {
 }
 
 func TestLayoutKeepsInputAndStatusDockedAtBottom(t *testing.T) {
-	layout := layoutFor(24)
-	if layout.messageRows != 19 || layout.indexStatusRow != 19 || layout.inputTop != 20 || layout.inputLine != 21 || layout.inputBottom != 22 || layout.statusRow != 23 {
+	layout := layoutFor(24, 1)
+	if layout.messageRows != 19 || layout.indexStatusRow != 19 || layout.inputTop != 20 || layout.inputLine != 21 || layout.inputBottom != 22 || layout.inputRows != 1 || layout.statusRow != 23 {
 		t.Fatalf("layout = %+v", layout)
+	}
+}
+
+func TestLayoutExpandsInputRowsUpward(t *testing.T) {
+	layout := layoutFor(24, 3)
+	if layout.messageRows != 17 || layout.indexStatusRow != 17 || layout.inputTop != 18 || layout.inputLine != 19 || layout.inputBottom != 22 || layout.inputRows != 3 || layout.statusRow != 23 {
+		t.Fatalf("layout = %+v", layout)
+	}
+}
+
+func TestLongInputWrapsAndShrinkRestoresSingleRow(t *testing.T) {
+	model := NewModel(context.Background(), testRuntime(t))
+	model.replaceInput(strings.Repeat("当前的内容", 3))
+
+	expanded := model.layoutFor(20, 24)
+	if expanded.inputRows <= 1 {
+		t.Fatalf("expected wrapped input rows, layout = %+v", expanded)
+	}
+	if expanded.messageRows >= 19 || expanded.inputBottom != 22 || expanded.statusRow != 23 {
+		t.Fatalf("expanded layout = %+v", expanded)
+	}
+
+	model.replaceInput("短")
+	shrunk := model.layoutFor(20, 24)
+	if shrunk.inputRows != 1 || shrunk.messageRows != 19 || shrunk.inputTop != 20 {
+		t.Fatalf("shrunk layout = %+v", shrunk)
+	}
+}
+
+func TestWrappedInputCursorMovesToWrappedLine(t *testing.T) {
+	model := NewModel(context.Background(), testRuntime(t))
+	model.replaceInput("abcdefghi")
+	model.cursor = 8
+
+	lines := model.wrappedInputLines(8)
+	if len(lines) != 2 {
+		t.Fatalf("lines = %+v", lines)
+	}
+	if got := cursorLineIndex(lines); got != 1 {
+		t.Fatalf("cursor line = %d, want 1; lines = %+v", got, lines)
+	}
+
+	visible := visibleInputLines(lines, 1)
+	if got := cursorLineIndex(visible); got != 0 {
+		t.Fatalf("visible cursor line = %d, want 0; lines = %+v", got, visible)
+	}
+}
+
+func TestWrappedInputWideRunesStayWithinWidth(t *testing.T) {
+	model := NewModel(context.Background(), testRuntime(t))
+	model.replaceInput("当前内容当前内容")
+
+	lines := model.wrappedInputLines(5)
+	if len(lines) < 2 {
+		t.Fatalf("expected wrapped wide input, lines = %+v", lines)
+	}
+	for _, line := range lines {
+		if line.width > 5 {
+			t.Fatalf("line exceeds width: %+v", line)
+		}
 	}
 }
 
@@ -418,6 +478,15 @@ func texts(lines []renderLine) []string {
 		out = append(out, line.text)
 	}
 	return out
+}
+
+func cursorLineIndex(lines []inputRenderLine) int {
+	for i, line := range lines {
+		if line.cursor {
+			return i
+		}
+	}
+	return -1
 }
 
 func assertMessageContains(t *testing.T, messages []tuiMessage, want string) {
