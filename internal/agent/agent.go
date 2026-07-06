@@ -23,7 +23,6 @@ const baseSystemPrompt = `你是 Bruce Coding Agent，一个智能编程助手�
 
 const maxRetries = 2
 
-
 type Agent struct {
 	Client        llm.ChatClient
 	Tools         *tool.Registry
@@ -180,8 +179,6 @@ func isRetryable(err error) bool {
 		strings.Contains(msg, "connection") || strings.Contains(msg, "deadline")
 }
 
-
-
 func (a *Agent) append(msg llm.Message) {
 	a.History = append(a.History, msg)
 }
@@ -244,7 +241,6 @@ func streamToEvents(bus *event.Bus, runID string) llm.StreamOptions {
 	}
 }
 
-
 func pruneImages(messages []llm.Message) {
 	latest := -1
 	for i, msg := range messages {
@@ -302,4 +298,4 @@ func (f *FakeClient) ModelName() string {
 func (*FakeClient) MaxContextWindow() int       { return 200000 }
 func (*FakeClient) SupportsTools() bool         { return true }
 func (*FakeClient) SupportsPromptCaching() bool { return false }
-func (*FakeClient) SupportsImages() bool         { return true }
+func (*FakeClient) SupportsImages() bool        { return true }

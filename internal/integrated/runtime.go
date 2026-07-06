@@ -19,7 +19,7 @@ import (
 	"bruce-go/internal/instructions"
 	"bruce-go/internal/llm"
 	"bruce-go/internal/mcp"
-	"bruce-go/internal/plan"
+	"bruce-go/internal/planning"
 	"bruce-go/internal/render"
 	"bruce-go/internal/runtime"
 	"bruce-go/internal/session"
@@ -57,7 +57,8 @@ type Runtime struct {
 	StartMCP   bool
 
 	react      *agent.Agent
-	plan       plan.Agent
+	planning   *agent.Agent
+	planStore  *planning.Store
 	startMu    sync.Mutex
 	mcpStarted bool
 
@@ -139,6 +140,7 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		Concurrent: concurrency,
 		StartMCP:   opts.StartMCP,
 	}
+	r.planStore = planning.NewStore(home, store)
 	r.subscribeSessionRecorder()
 	r.refreshMCPTools()
 	r.rebuildAgents()
@@ -190,6 +192,10 @@ func (r *Runtime) Handle(ctx context.Context, input string) cli.Result {
 }
 
 func (r *Runtime) RunTask(ctx context.Context, input string) (string, error) {
+	return r.runTask(ctx, input, false)
+}
+
+func (r *Runtime) runTask(ctx context.Context, input string, allowPendingPlanInput bool) (string, error) {
 	r.Skills.BeginTask()
 	defer r.Skills.EndTask()
 	runID := event.NewRunID()
@@ -203,6 +209,16 @@ func (r *Runtime) RunTask(ctx context.Context, input string) (string, error) {
 		task = strings.TrimSpace(input)
 	}
 	r.emit(event.NewRunStarted(runID, r.Mode, task))
+	if r.Mode == runtime.ModePlan && !allowPendingPlanInput {
+		if prompt, ok := r.pendingPlanInputPrompt(); ok {
+			user := llm.User(task)
+			r.emit(event.NewMessageCompleted(runID, user, true))
+			assistant := llm.Assistant(prompt)
+			r.emit(event.NewMessageCompleted(runID, assistant, true))
+			r.emit(event.NewRunCompleted(runID, prompt))
+			return prompt, nil
+		}
+	}
 	for _, name := range invocation.Names {
 		if _, err := r.Skills.LoadSkill(name); err != nil {
 			r.emit(event.NewRunFailed(runID, err.Error()))
@@ -217,19 +233,22 @@ func (r *Runtime) RunTask(ctx context.Context, input string) (string, error) {
 	}
 	current := r.Session.Context(r.Mode)
 	if r.Mode == runtime.ModePlan {
-		r.emit(event.NewMessageCompleted(runID, prepared.Message, true))
-		report, err := r.plan.Run(ctx, prepared.Text, "", taskContext)
+		r.planning.RestoreHistory(current.Messages)
+		out, err := r.planning.Run(ctx, prepared, r.taskContextWithPlan(taskContext), runID)
 		if err != nil {
 			r.emit(event.NewRunFailed(runID, err.Error()))
 			return "", err
 		}
-		out := formatPlanReport(report)
-		r.emit(event.NewMessageCompleted(runID, llm.Assistant(out), true))
-		r.emit(event.NewRunCompleted(runID, out))
-		return out, nil
+		display, err := r.presentPlan(out)
+		if err != nil {
+			r.emit(event.NewRunFailed(runID, err.Error()))
+			return "", err
+		}
+		r.emit(event.NewRunCompleted(runID, display))
+		return display, nil
 	}
 	r.react.RestoreHistory(current.Messages)
-	out, err := r.react.Run(ctx, prepared, taskContext, runID)
+	out, err := r.react.Run(ctx, prepared, r.taskContextWithPlan(taskContext), runID)
 	if err != nil {
 		r.emit(event.NewRunFailed(runID, err.Error()))
 		return "", err
@@ -250,8 +269,7 @@ func (r *Runtime) HandleCommand(ctx context.Context, command cli.Command) cli.Re
 		result.Err = r.setMode(runtime.ModeReact)
 		result.Output = "已切换到 ReAct 模式"
 	case "plan":
-		result.Err = r.setMode(runtime.ModePlan)
-		result.Output = "已切换到 Plan-and-Execute 模式"
+		result.Output, result.Err = r.handlePlan(ctx, command.Args, command.Raw)
 	case "model":
 		result.Output, result.Err = r.handleModel(command.Args)
 	case "web":
@@ -334,6 +352,39 @@ func (r *Runtime) Status() runtime.Status {
 		RAGIndexed:        false,
 		SkillCount:        len(r.Skills.Skills()),
 		ToolNames:         toolNames,
+		ActivePlan:        r.currentPlanState(),
+	}
+}
+
+func (r *Runtime) handlePlan(ctx context.Context, args []string, raw string) (string, error) {
+	if len(args) == 0 {
+		if err := r.setMode(runtime.ModePlan); err != nil {
+			return "", err
+		}
+		return "已切换到 Plan 模式。输入任务开始规划，或使用 /plan <任务> 直接开始。", nil
+	}
+	sub := strings.ToLower(args[0])
+	switch sub {
+	case "approve":
+		return r.approvePlan(ctx, raw)
+	case "reject":
+		return r.rejectPlan(runtime.PlanActionRejected, strings.TrimSpace(strings.Join(args[1:], " ")))
+	case "cancel":
+		return r.rejectPlan(runtime.PlanActionCanceled, strings.TrimSpace(strings.Join(args[1:], " ")))
+	case "continue":
+		if err := r.setMode(runtime.ModePlan); err != nil {
+			return "", err
+		}
+		feedback := strings.TrimSpace(strings.Join(args[1:], " "))
+		if feedback == "" {
+			feedback = "请继续完善当前计划。"
+		}
+		return r.runTask(ctx, feedback, true)
+	default:
+		if err := r.setMode(runtime.ModePlan); err != nil {
+			return "", err
+		}
+		return r.RunTask(ctx, strings.Join(args, " "))
 	}
 }
 
@@ -549,8 +600,10 @@ func (r *Runtime) refreshMCPTools() {
 func (r *Runtime) rebuildAgents() {
 	additional := strings.TrimSpace(r.Skills.CatalogPrompt())
 	r.react = agent.New(r.Client, r.Tools, additional, r.Concurrent, r.Events)
-	planner := plan.LLMPlanner{Client: r.Client, Tools: r.Tools, Parser: plan.Parser{}}
-	r.plan = plan.Agent{Planner: planner, Executor: plan.Executor{Tools: r.Tools, Config: r.Concurrent}}
+	planRegistry := planning.NewToolRegistry(r.Tools, r.planStore, func() runtime.PlanState {
+		return r.currentPlanState()
+	})
+	r.planning = agent.New(r.Client, planRegistry, planning.Prompt(additional), r.Concurrent, r.Events)
 }
 
 func (r *Runtime) ModelOptions() []llm.ModelOption {
@@ -625,20 +678,149 @@ func (r *Runtime) taskContext() string {
 	return strings.Join(sections, "\n\n")
 }
 
-func formatPlanReport(report plan.Report) string {
-	if report.Plan == nil {
-		return "计划执行失败"
+func (r *Runtime) taskContextWithPlan(base string) string {
+	sections := []string{}
+	if strings.TrimSpace(base) != "" {
+		sections = append(sections, strings.TrimSpace(base))
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "Plan: %s\nStatus: %s\n", report.Plan.ID, report.Plan.Status)
-	ordered, _ := report.Plan.TopologicalOrder()
-	for _, task := range ordered {
-		fmt.Fprintf(&b, "- [%s] %s: %s\n", task.Status, task.ID, task.Description)
-		if task.Error != "" {
-			b.WriteString("  " + task.Error + "\n")
+	state := r.currentPlanState()
+	if state.Empty() {
+		return strings.Join(sections, "\n\n")
+	}
+	content, _ := r.readPlanContent(state)
+	switch {
+	case r.Mode == runtime.ModePlan && state.Pending():
+		sections = append(sections, fmt.Sprintf("当前待审批计划:\nPlan ID: %s\nRevision: %d\nPath: %s\n\n%s", state.ID, state.Revision, state.Path, content))
+	case r.Mode == runtime.ModeReact && state.Approved():
+		sections = append(sections, fmt.Sprintf("已批准计划执行上下文:\n用户输入 `/plan approve` 表示用户已经批准下方计划，并要求你立即按该计划执行项目修改。遇到该输入时，不要把它当作普通 slash command，也不要重新要求用户审批计划。\nPlan ID: %s\nRevision: %d\nPath: %s\n\n%s", state.ID, state.Revision, state.Path, content))
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+func (r *Runtime) currentPlanState() runtime.PlanState {
+	if r == nil || r.Session == nil {
+		return runtime.PlanState{}
+	}
+	state := r.Session.Context(r.Mode).ActivePlan
+	if r.planStore != nil {
+		state = r.planStore.Recover(state)
+	}
+	return state
+}
+
+func (r *Runtime) presentPlan(out string) (string, error) {
+	content := strings.TrimSpace(out)
+	state := r.currentPlanState()
+	if !state.Empty() {
+		if current, err := r.readPlanContent(state); err == nil && strings.TrimSpace(current) != "" {
+			content = strings.TrimSpace(current)
 		}
 	}
-	return strings.TrimSpace(b.String())
+	if content == "" {
+		return out, nil
+	}
+	if state.Empty() {
+		next, err := r.planStore.Replace(state, content, "Planning Agent 输出计划")
+		if err != nil {
+			return "", err
+		}
+		state = next
+	}
+	if _, err := r.planStore.Record(runtime.PlanActionPresented, state, content, "计划已展示"); err != nil {
+		return "", err
+	}
+	return content, nil
+}
+
+func (r *Runtime) approvePlan(ctx context.Context, raw string) (string, error) {
+	state := r.currentPlanState()
+	if state.Empty() || !state.Pending() {
+		return "", errors.New("当前没有待批准计划")
+	}
+	content, err := r.readPlanContent(state)
+	if err != nil {
+		return "", err
+	}
+	approved, err := r.planStore.Record(runtime.PlanActionApproved, state, content, "用户批准计划")
+	if err != nil {
+		return "", err
+	}
+	if err := r.setMode(runtime.ModeReact); err != nil {
+		return "", err
+	}
+	if _, err := r.planStore.Record(runtime.PlanActionHandoff, approved, content, "交接给 ReAct 执行"); err != nil {
+		return "", err
+	}
+	display := strings.TrimSpace(raw)
+	if display == "" {
+		display = "/plan approve"
+	}
+	return r.runTask(ctx, display, false)
+}
+
+func (r *Runtime) rejectPlan(action runtime.PlanAction, reason string) (string, error) {
+	state := r.currentPlanState()
+	if state.Empty() {
+		return "", errors.New("当前没有 active plan")
+	}
+	content, _ := r.readPlanContent(state)
+	summary := "用户取消计划"
+	if action == runtime.PlanActionRejected {
+		summary = "用户拒绝计划"
+	}
+	if strings.TrimSpace(reason) != "" {
+		summary += ": " + strings.TrimSpace(reason)
+	}
+	if _, err := r.planStore.Record(action, state, content, summary); err != nil {
+		return "", err
+	}
+	if err := r.setMode(runtime.ModeReact); err != nil {
+		return "", err
+	}
+	if action == runtime.PlanActionRejected {
+		return "已拒绝计划，未执行项目修改。", nil
+	}
+	return "已取消计划，未执行项目修改。", nil
+}
+
+func (r *Runtime) readPlanContent(state runtime.PlanState) (string, error) {
+	if r.planStore == nil {
+		if strings.TrimSpace(state.Content) == "" {
+			return "", errors.New("plan store 未初始化")
+		}
+		return state.Content, nil
+	}
+	content, err := r.planStore.Read(state)
+	if err != nil {
+		if strings.TrimSpace(state.Content) != "" {
+			return state.Content, nil
+		}
+		return "", err
+	}
+	return content, nil
+}
+
+func (r *Runtime) pendingPlanInputPrompt() (string, bool) {
+	if r == nil || r.Session == nil {
+		return "", false
+	}
+	state := r.Session.Context(r.Mode).ActivePlan
+	if !state.Pending() {
+		return "", false
+	}
+	var b strings.Builder
+	b.WriteString("当前已有待审批计划。要开始实现，请输入 `/plan approve`。")
+	if state.ID != "" {
+		fmt.Fprintf(&b, "\nPlan: %s", state.ID)
+		if state.Revision > 0 {
+			fmt.Fprintf(&b, " rev=%d", state.Revision)
+		}
+		if strings.TrimSpace(state.Path) != "" {
+			fmt.Fprintf(&b, " path=%s", state.Path)
+		}
+	}
+	b.WriteString("\n如需调整计划，请使用 `/plan continue <反馈>`；如需放弃，请使用 `/plan reject` 或 `/plan cancel`。")
+	return b.String(), true
 }
 
 func formatSearch(results []web.Result) string {

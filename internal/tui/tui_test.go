@@ -10,6 +10,7 @@ import (
 
 	"bruce-go/internal/agent"
 	"bruce-go/internal/approval"
+	"bruce-go/internal/cli"
 	"bruce-go/internal/event"
 	"bruce-go/internal/integrated"
 	"bruce-go/internal/llm"
@@ -35,6 +36,34 @@ func TestModelRunsSlashCommandOnEnter(t *testing.T) {
 	if !strings.Contains(view, "Bruce Go 可用命令") || !strings.Contains(view, "/status") {
 		t.Fatalf("view = %s", view)
 	}
+}
+
+func TestPlanAgentCommandDoesNotAppendResultOutput(t *testing.T) {
+	model := NewModel(context.Background(), testRuntime(t))
+	model.messages = nil
+	command := cli.Command{Name: "plan", Args: []string{"实现新能力"}}
+	result := cli.Result{Handled: true, Output: "# Full Plan\n\n- Step"}
+	suppress := commandOutputAlreadyRendered(command, result)
+	if !suppress {
+		t.Fatal("expected plan task output to be marked as already rendered")
+	}
+	model.handleCommandFinished(commandFinishedMsg{command: true, result: result, suppressOutput: suppress})
+	if len(model.messages) != 0 {
+		t.Fatalf("messages = %+v", model.messages)
+	}
+}
+
+func TestPlainPlanCommandStillAppendsResultOutput(t *testing.T) {
+	model := NewModel(context.Background(), testRuntime(t))
+	model.messages = nil
+	command := cli.Command{Name: "plan"}
+	result := cli.Result{Handled: true, Output: "已切换到 Plan 模式"}
+	suppress := commandOutputAlreadyRendered(command, result)
+	if suppress {
+		t.Fatal("plain /plan should still render its command output")
+	}
+	model.handleCommandFinished(commandFinishedMsg{command: true, result: result, suppressOutput: suppress})
+	assertMessageContains(t, model.messages, "已切换到 Plan 模式")
 }
 
 func TestLayoutKeepsInputAndStatusDockedAtBottom(t *testing.T) {
@@ -294,6 +323,16 @@ func TestCompletesTopLevelSlashCommandsWithoutRAG(t *testing.T) {
 	for _, forbidden := range []string{"/rag ", "/index ", "/graph "} {
 		if contains(values, forbidden) {
 			t.Fatalf("completion contains forbidden %q: %v", forbidden, values)
+		}
+	}
+}
+
+func TestCompletesPlanSubcommands(t *testing.T) {
+	rt := testRuntime(t)
+	values := completionValues(completionsFor("/plan ", len("/plan "), rt))
+	for _, want := range []string{"approve", "continue ", "reject ", "cancel"} {
+		if !contains(values, want) {
+			t.Fatalf("plan completion missing %q: %v", want, values)
 		}
 	}
 }

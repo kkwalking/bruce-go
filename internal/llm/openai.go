@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -36,6 +37,10 @@ func NewDeepSeekClient(apiKey, model string) *OpenAICompatibleClient {
 		model = "deepseek-v4-flash"
 	}
 	c := NewOpenAICompatibleClient("deepseek", apiKey, model, "https://api.deepseek.com")
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ForceAttemptHTTP2 = false
+	transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	c.HTTPClient = &http.Client{Timeout: 120 * time.Second, Transport: transport}
 	return c
 }
 

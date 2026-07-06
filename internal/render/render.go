@@ -15,11 +15,15 @@ func Status(status runtime.Status) string {
 }
 
 func Session(ctx session.Context) string {
-	return strings.TrimSpace(fmt.Sprintf(`Session: %s
+	out := strings.TrimSpace(fmt.Sprintf(`Session: %s
 File: %s
 Mode: %s
 Active leaf: %s
 Messages: %d`, ctx.SessionID, ctx.File, ctx.Mode, empty(ctx.ActiveLeaf, "(none)"), ctx.MessageCount))
+	if !ctx.ActivePlan.Empty() {
+		out += fmt.Sprintf("\nPlan: %s action=%s rev=%d path=%s", ctx.ActivePlan.ID, ctx.ActivePlan.Action, ctx.ActivePlan.Revision, ctx.ActivePlan.Path)
+	}
+	return out
 }
 
 func Sessions(summaries []session.Summary) string {
@@ -28,7 +32,11 @@ func Sessions(summaries []session.Summary) string {
 	}
 	var b strings.Builder
 	for _, summary := range summaries {
-		fmt.Fprintf(&b, "%s  %s  mode=%s  messages=%d\n", summary.ID, summary.UpdatedAt.Format("2006-01-02 15:04:05"), summary.Mode, summary.MessageCount)
+		plan := ""
+		if !summary.ActivePlan.Empty() {
+			plan = fmt.Sprintf("  plan=%s/%s", summary.ActivePlan.ID, summary.ActivePlan.Action)
+		}
+		fmt.Fprintf(&b, "%s  %s  mode=%s  messages=%d%s\n", summary.ID, summary.UpdatedAt.Format("2006-01-02 15:04:05"), summary.Mode, summary.MessageCount, plan)
 	}
 	return strings.TrimSpace(b.String())
 }

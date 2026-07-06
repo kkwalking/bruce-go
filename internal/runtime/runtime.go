@@ -12,6 +12,67 @@ const (
 	ModePlan  AgentMode = "PLAN"
 )
 
+type PlanAction string
+
+const (
+	PlanActionCreated   PlanAction = "created"
+	PlanActionUpdated   PlanAction = "updated"
+	PlanActionPresented PlanAction = "presented"
+	PlanActionApproved  PlanAction = "approved"
+	PlanActionRejected  PlanAction = "rejected"
+	PlanActionCanceled  PlanAction = "canceled"
+	PlanActionHandoff   PlanAction = "handoff"
+)
+
+type PlanEvent struct {
+	ID       string     `json:"id"`
+	Path     string     `json:"path,omitempty"`
+	Action   PlanAction `json:"action"`
+	Revision int        `json:"revision,omitempty"`
+	SHA256   string     `json:"sha256,omitempty"`
+	Summary  string     `json:"summary,omitempty"`
+	Content  string     `json:"content,omitempty"`
+}
+
+type PlanState struct {
+	ID                    string     `json:"id,omitempty"`
+	Path                  string     `json:"path,omitempty"`
+	Action                PlanAction `json:"action,omitempty"`
+	Revision              int        `json:"revision,omitempty"`
+	SHA256                string     `json:"sha256,omitempty"`
+	Summary               string     `json:"summary,omitempty"`
+	Content               string     `json:"content,omitempty"`
+	MissingFile           bool       `json:"missingFile,omitempty"`
+	HashMismatch          bool       `json:"hashMismatch,omitempty"`
+	RecoveredFromSnapshot bool       `json:"recoveredFromSnapshot,omitempty"`
+}
+
+func (s PlanState) Empty() bool {
+	return strings.TrimSpace(s.ID) == ""
+}
+
+func (s PlanState) Pending() bool {
+	switch s.Action {
+	case PlanActionCreated, PlanActionUpdated, PlanActionPresented:
+		return strings.TrimSpace(s.ID) != ""
+	default:
+		return false
+	}
+}
+
+func (s PlanState) Approved() bool {
+	return strings.TrimSpace(s.ID) != "" && (s.Action == PlanActionApproved || s.Action == PlanActionHandoff)
+}
+
+func (s PlanState) Terminal() bool {
+	switch s.Action {
+	case PlanActionApproved, PlanActionRejected, PlanActionCanceled, PlanActionHandoff:
+		return strings.TrimSpace(s.ID) != ""
+	default:
+		return false
+	}
+}
+
 type ConcurrencyConfig struct {
 	MaxParallelism int
 	BatchTimeout   time.Duration
@@ -70,6 +131,7 @@ type Status struct {
 	RAGIndexed        bool
 	SkillCount        int
 	ToolNames         []string
+	ActivePlan        PlanState
 }
 
 func (s Status) DisplayString() string {
@@ -80,7 +142,7 @@ func (s Status) DisplayString() string {
 		}
 		tools = append(tools, name)
 	}
-	return strings.TrimSpace(
+	status := strings.TrimSpace(
 		"当前模式: " + string(s.Mode) + "\n" +
 			"当前模型: " + empty(s.Model, "unknown") + " [" + empty(s.Provider, "unknown") + "]\n" +
 			"工作目录: " + s.WorkspaceRoot + "\n" +
@@ -93,6 +155,10 @@ func (s Status) DisplayString() string {
 			"Skills: " + itoa(s.SkillCount) + " 个\n" +
 			"Tools: " + strings.Join(tools, ", "),
 	)
+	if s.ActivePlan.Pending() {
+		status += "\nPending Plan: " + s.ActivePlan.ID + " rev=" + itoa(s.ActivePlan.Revision) + " path=" + s.ActivePlan.Path
+	}
+	return status
 }
 
 func onOff(v bool) string {

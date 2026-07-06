@@ -24,6 +24,9 @@ func TestSessionJSONLResumeTreeAndCompact(t *testing.T) {
 	if err := store.AppendModeChange(runtime.ModePlan); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.AppendPlanEvent(runtime.PlanEvent{ID: "plan_1", Path: "/tmp/plan_1.md", Action: runtime.PlanActionPresented, Revision: 1, SHA256: "abc", Content: "# Plan"}); err != nil {
+		t.Fatal(err)
+	}
 	entries := store.ActiveEntries()
 	if len(entries) < 2 {
 		t.Fatalf("entries = %d", len(entries))
@@ -38,6 +41,9 @@ func TestSessionJSONLResumeTreeAndCompact(t *testing.T) {
 	ctx := store.Context(runtime.ModeReact)
 	if ctx.Mode != runtime.ModePlan {
 		t.Fatalf("mode = %s", ctx.Mode)
+	}
+	if ctx.ActivePlan.ID != "plan_1" || !ctx.ActivePlan.Pending() {
+		t.Fatalf("active plan = %+v", ctx.ActivePlan)
 	}
 	if len(ctx.Messages) == 0 || !strings.Contains(ctx.Messages[0].Content, "summary") {
 		t.Fatalf("messages after compaction = %+v", ctx.Messages)
@@ -62,5 +68,24 @@ func TestSessionJSONLResumeTreeAndCompact(t *testing.T) {
 	}
 	if resumed.Context(runtime.ModeReact).ActiveLeaf != entries[0].ID {
 		t.Fatalf("active leaf = %q", resumed.Context(runtime.ModeReact).ActiveLeaf)
+	}
+}
+
+func TestPlanEventDoesNotDetermineMode(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	store, err := CreateNew(home, workspace, runtime.ModeReact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendPlanEvent(runtime.PlanEvent{ID: "plan_1", Action: runtime.PlanActionPresented, Revision: 1}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := store.Context(runtime.ModeReact)
+	if ctx.Mode != runtime.ModeReact {
+		t.Fatalf("mode should come from mode_change, got %s", ctx.Mode)
+	}
+	if ctx.ActivePlan.ID != "plan_1" || !ctx.ActivePlan.Pending() {
+		t.Fatalf("active plan = %+v", ctx.ActivePlan)
 	}
 }

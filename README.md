@@ -1,6 +1,6 @@
 # Bruce Go Coding Agent
 
-Bruce Go Coding Agent 是 Bruce Coding Agent 的 Go 版本移植，保持 Java 版 README 中除 RAG 之外的用户可见功能面：ReAct、Plan-and-Execute、HITL、并行工具调用、session/resume/tree/compact、模型切换、WebSearch/WebFetch、MCP stdio/Streamable HTTP、Skill 加载、AGENTS 指令加载、图片输入引用解析和常用 slash 命令。
+Bruce Go Coding Agent 是 Bruce Coding Agent 的 Go 版本移植，保持 Java 版 README 中除 RAG 之外的用户可见功能面：ReAct、Claude Code 风格 Plan mode、HITL、并行工具调用、session/resume/tree/compact、模型切换、WebSearch/WebFetch、MCP stdio/Streamable HTTP、Skill 加载、AGENTS 指令加载、图片输入引用解析和常用 slash 命令。
 
 RAG、Embedding、SQLite 向量库、代码索引、RAG slash 命令和 RAG 测试按需求未移植。
 
@@ -70,7 +70,7 @@ go run ./cmd/bruce --no-mcp
 可用命令：
 
 - `/react`
-- `/plan`
+- `/plan [任务|approve|reject|cancel|continue]`
 - `/model [provider/model]`
 - `/web on|off|status|search <query>|fetch <url>`
 - `/mcp [restart|logs|disable|enable <name>]`
@@ -89,6 +89,8 @@ go run ./cmd/bruce --no-mcp
 - `/exit`
 
 不提供 `/rag`、`/index`、`/graph` 等 RAG 入口。
+
+`/plan` 是只读 planning workflow：Planning Agent 可以读取和搜索项目、维护 `~/.bruce/plans/` 下的 markdown 计划，并把计划生命周期写入 session JSONL。只有执行 `/plan approve` 批准计划后，Bruce 才会切回 ReAct 并按批准计划执行；具体文件修改和命令仍受 HITL 设置约束。
 
 ## 输入语法
 

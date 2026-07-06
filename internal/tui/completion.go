@@ -91,6 +91,15 @@ func completeSlash(input, word string, rt *integrated.Runtime) []CompletionItem 
 		prefix = ""
 	}
 	switch command {
+	case "plan":
+		if len(parts) <= 1 || (len(parts) == 2 && !strings.HasSuffix(input, " ")) {
+			return matchingOptions(prefix, "Plan", []CompletionItem{
+				completion("approve", "批准当前计划并开始执行", "Plan"),
+				completion("continue ", "带反馈继续规划", "Plan"),
+				completion("reject ", "拒绝当前计划", "Plan"),
+				completion("cancel", "取消当前计划", "Plan"),
+			})
+		}
 	case "hitl", "parallel", "concurrency":
 		return matchingOptions(prefix, "状态", []CompletionItem{
 			completion("on", "开启", "状态"),
@@ -118,7 +127,7 @@ func completeSlash(input, word string, rt *integrated.Runtime) []CompletionItem 
 func topLevelCommandValue(command cli.CommandInfo) string {
 	value := "/" + command.Name
 	switch command.Name {
-	case "web", "mcp", "skill", "hitl", "parallel", "resume", "tree", "compact":
+	case "web", "mcp", "skill", "hitl", "parallel", "resume", "tree", "compact", "plan":
 		return value + " "
 	default:
 		return value

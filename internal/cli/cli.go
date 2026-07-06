@@ -25,7 +25,7 @@ type CommandInfo struct {
 
 var Commands = []CommandInfo{
 	{Name: "react", Usage: "/react", Description: "切换到 ReAct 模式"},
-	{Name: "plan", Usage: "/plan", Description: "切换到 Plan-and-Execute 模式"},
+	{Name: "plan", Usage: "/plan [任务|approve|reject|cancel|continue]", Description: "进入计划模式、维护计划或审批计划"},
 	{Name: "model", Usage: "/model [provider/model | reasoning [off|low|medium|high|max]]", Description: "查看或切换模型、调整推理级别"},
 	{Name: "web", Usage: "/web on|off|status|search <query>|fetch <url>", Description: "开关、查看或手动使用 WebSearch/WebFetch"},
 	{Name: "mcp", Usage: "/mcp [restart|logs|disable|enable <name>]", Description: "查看或管理 MCP server"},

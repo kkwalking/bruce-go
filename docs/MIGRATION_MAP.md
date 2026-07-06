@@ -73,22 +73,23 @@ Counts verified during port:
 | `mcp/transport/McpTransportFactory.java` | `internal/mcp/mcp.go` | Transport factory |
 | `mcp/transport/StdioMcpTransport.java` | `internal/mcp/mcp.go` | stdio JSON-RPC transport |
 | `mcp/transport/StreamableHttpMcpTransport.java` | `internal/mcp/mcp.go` | HTTP JSON-RPC and simple SSE response parsing |
-| `plan/agent/PlanAndExecuteAgent.java` | `internal/plan/plan.go` | Plan-and-Execute agent |
-| `plan/executor/ExecutionPlanExecutor.java` | `internal/plan/plan.go` | Plan executor |
-| `plan/executor/ParallelPlanExecutor.java` | `internal/plan/plan.go` | Parallel DAG batch execution |
-| `plan/executor/PlanExecutionReport.java` | `internal/plan/plan.go` | Plan report |
-| `plan/executor/PlanExecutor.java` | `internal/plan/plan.go` | Executor interface folded into struct |
-| `plan/executor/TaskExecutionResult.java` | `internal/plan/plan.go` | Task result fields on `Task` |
-| `plan/model/ExecutionPlan.java` | `internal/plan/plan.go` | Plan model |
-| `plan/model/PlanStatus.java` | `internal/plan/plan.go` | Plan status enum |
-| `plan/model/Task.java` | `internal/plan/plan.go` | Task model |
-| `plan/model/TaskStatus.java` | `internal/plan/plan.go` | Task status enum |
-| `plan/model/TaskType.java` | `internal/plan/plan.go` | Task type enum |
-| `plan/planner/DeepSeekPlanner.java` | `internal/plan/plan.go` | LLM planner with compatible chat client |
-| `plan/planner/PlanJsonParser.java` | `internal/plan/plan.go` | Plan JSON parser |
-| `plan/planner/Planner.java` | `internal/plan/plan.go` | Planner interface |
-| `plan/util/DagValidator.java` | `internal/plan/plan.go` | Topological validation |
-| `plan/util/PlanValidator.java` | `internal/plan/plan.go` | Plan validation |
+| `plan/agent/PlanAndExecuteAgent.java` | `internal/plan/plan.go` | Legacy Plan-and-Execute model/parser; no longer backs user-facing `/plan` |
+| `plan/executor/ExecutionPlanExecutor.java` | `internal/plan/plan.go` | Legacy executor retained internally |
+| `plan/executor/ParallelPlanExecutor.java` | `internal/plan/plan.go` | Legacy parallel DAG batch execution retained internally |
+| `plan/executor/PlanExecutionReport.java` | `internal/plan/plan.go` | Legacy plan report |
+| `plan/executor/PlanExecutor.java` | `internal/plan/plan.go` | Legacy executor interface folded into struct |
+| `plan/executor/TaskExecutionResult.java` | `internal/plan/plan.go` | Legacy task result fields on `Task` |
+| `plan/model/ExecutionPlan.java` | `internal/plan/plan.go` | Legacy plan model |
+| `plan/model/PlanStatus.java` | `internal/plan/plan.go` | Legacy plan status enum |
+| `plan/model/Task.java` | `internal/plan/plan.go` | Legacy task model |
+| `plan/model/TaskStatus.java` | `internal/plan/plan.go` | Legacy task status enum |
+| `plan/model/TaskType.java` | `internal/plan/plan.go` | Legacy task type enum |
+| `plan/planner/DeepSeekPlanner.java` | `internal/plan/plan.go` | Legacy LLM planner with compatible chat client |
+| `plan/planner/PlanJsonParser.java` | `internal/plan/plan.go` | Legacy plan JSON parser |
+| `plan/planner/Planner.java` | `internal/plan/plan.go` | Legacy planner interface |
+| `plan/util/DagValidator.java` | `internal/plan/plan.go` | Legacy topological validation |
+| `plan/util/PlanValidator.java` | `internal/plan/plan.go` | Legacy plan validation |
+| Claude Code-style plan mode | `internal/planning`, `internal/session`, `internal/integrated` | Read-only markdown planning, `plan_event` session timeline, approval handoff |
 | `render/BruceRenderer.java` | `internal/render/render.go`, `internal/tui/tui.go` | Text rendering helpers and TUI view |
 | `render/BruceStatusInfo.java` | `internal/runtime/runtime.go`, `internal/render/render.go` | Status info model |
 | `runtime/ConcurrencyConfig.java` | `internal/runtime/runtime.go` | Parallelism/timeouts/output truncation |

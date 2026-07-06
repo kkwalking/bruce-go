@@ -48,10 +48,11 @@ type renderLine struct {
 }
 
 type commandFinishedMsg struct {
-	command       bool
-	result        cli.Result
-	err           error
-	elapsedMillis int64
+	command        bool
+	result         cli.Result
+	err            error
+	elapsedMillis  int64
+	suppressOutput bool
 }
 
 type runtimeStartedMsg struct{}
@@ -313,7 +314,7 @@ func (m *Model) handleCommandFinished(msg commandFinishedMsg) tea.Cmd {
 	m.statusPhase = "idle"
 	m.elapsedMillis = msg.elapsedMillis
 	if msg.command {
-		if msg.result.Output != "" {
+		if msg.result.Output != "" && !msg.suppressOutput {
 			m.appendSystemMessage(msg.result.Output)
 		} else if msg.result.Err != nil {
 			m.appendSystemMessage("执行失败: " + msg.result.Err.Error())
@@ -427,10 +428,22 @@ func runInputCmd(ctx context.Context, rt *integrated.Runtime, submitted string) 
 		started := time.Now()
 		if command, ok := cli.Parse(submitted); ok {
 			result := rt.HandleCommand(ctx, command)
-			return commandFinishedMsg{command: true, result: result, elapsedMillis: time.Since(started).Milliseconds()}
+			return commandFinishedMsg{command: true, result: result, elapsedMillis: time.Since(started).Milliseconds(), suppressOutput: commandOutputAlreadyRendered(command, result)}
 		}
 		_, err := rt.RunTask(ctx, submitted)
 		return commandFinishedMsg{command: false, err: err, elapsedMillis: time.Since(started).Milliseconds()}
+	}
+}
+
+func commandOutputAlreadyRendered(command cli.Command, result cli.Result) bool {
+	if result.Err != nil || command.Name != "plan" || len(command.Args) == 0 {
+		return false
+	}
+	switch strings.ToLower(command.Args[0]) {
+	case "reject", "cancel":
+		return false
+	default:
+		return true
 	}
 }
 

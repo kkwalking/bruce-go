@@ -29,22 +29,23 @@ type Header struct {
 }
 
 type Entry struct {
-	Type             string            `json:"type"`
-	ID               string            `json:"id,omitempty"`
-	ParentID         string            `json:"parentId,omitempty"`
-	Timestamp        string            `json:"timestamp,omitempty"`
-	Message          *llm.Message      `json:"message,omitempty"`
-	Mode             runtime.AgentMode `json:"mode,omitempty"`
-	TargetID         string            `json:"targetId,omitempty"`
-	CustomType       string            `json:"customType,omitempty"`
-	Data             any               `json:"data,omitempty"`
-	Content          string            `json:"content,omitempty"`
-	Display          *bool             `json:"display,omitempty"`
-	Details          any               `json:"details,omitempty"`
-	Name             string            `json:"name,omitempty"`
-	Summary          string            `json:"summary,omitempty"`
-	FirstKeptEntryID string            `json:"firstKeptEntryId,omitempty"`
-	TokensBefore     int               `json:"tokensBefore,omitempty"`
+	Type             string             `json:"type"`
+	ID               string             `json:"id,omitempty"`
+	ParentID         string             `json:"parentId,omitempty"`
+	Timestamp        string             `json:"timestamp,omitempty"`
+	Message          *llm.Message       `json:"message,omitempty"`
+	Mode             runtime.AgentMode  `json:"mode,omitempty"`
+	TargetID         string             `json:"targetId,omitempty"`
+	CustomType       string             `json:"customType,omitempty"`
+	Data             any                `json:"data,omitempty"`
+	Content          string             `json:"content,omitempty"`
+	Display          *bool              `json:"display,omitempty"`
+	Details          any                `json:"details,omitempty"`
+	Name             string             `json:"name,omitempty"`
+	Summary          string             `json:"summary,omitempty"`
+	FirstKeptEntryID string             `json:"firstKeptEntryId,omitempty"`
+	TokensBefore     int                `json:"tokensBefore,omitempty"`
+	Plan             *runtime.PlanEvent `json:"plan,omitempty"`
 }
 
 const (
@@ -55,11 +56,12 @@ const (
 	TypeCustomMessage = "custom_message"
 	TypeSessionInfo   = "session_info"
 	TypeCompaction    = "compaction"
+	TypePlanEvent     = "plan_event"
 )
 
 func (e Entry) BranchNode() bool {
 	switch e.Type {
-	case TypeMessage, TypeModeChange, TypeCustom, TypeCustomMessage, TypeSessionInfo, TypeCompaction:
+	case TypeMessage, TypeModeChange, TypeCustom, TypeCustomMessage, TypeSessionInfo, TypeCompaction, TypePlanEvent:
 		return true
 	default:
 		return false
@@ -73,6 +75,7 @@ type Context struct {
 	Mode         runtime.AgentMode
 	MessageCount int
 	Messages     []llm.Message
+	ActivePlan   runtime.PlanState
 }
 
 type Summary struct {
@@ -83,6 +86,7 @@ type Summary struct {
 	Mode         runtime.AgentMode
 	ActiveLeafID string
 	MessageCount int
+	ActivePlan   runtime.PlanState
 }
 
 type Store struct {
@@ -131,7 +135,8 @@ func (s *Store) CreateNew(mode runtime.AgentMode) error {
 func (s *Store) Context(fallback runtime.AgentMode) Context {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return Context{SessionID: s.Header.ID, File: s.File, ActiveLeaf: s.ActiveLeaf, Mode: s.currentModeLocked(fallback), MessageCount: s.messageCountLocked(), Messages: s.buildMessagesLocked()}
+	path := s.activePathLocked()
+	return Context{SessionID: s.Header.ID, File: s.File, ActiveLeaf: s.ActiveLeaf, Mode: s.currentModeFromPathLocked(path, fallback), MessageCount: s.messageCountLocked(), Messages: s.buildMessagesFromPathLocked(path), ActivePlan: planStateFromPath(path)}
 }
 
 func (s *Store) AppendMessage(message llm.Message) error {
@@ -168,6 +173,18 @@ func (s *Store) AppendCompaction(summary, firstKept string, tokensBefore int, de
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.appendBranchLocked(Entry{Type: TypeCompaction, ID: newEntryID(), ParentID: s.ActiveLeaf, Timestamp: now(), Summary: summary, FirstKeptEntryID: firstKept, TokensBefore: tokensBefore, Details: details})
+}
+
+func (s *Store) AppendPlanEvent(plan runtime.PlanEvent) error {
+	if strings.TrimSpace(plan.ID) == "" {
+		return errors.New("plan_event 缺少 plan id")
+	}
+	if strings.TrimSpace(string(plan.Action)) == "" {
+		return errors.New("plan_event 缺少 action")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.appendBranchLocked(Entry{Type: TypePlanEvent, ID: newEntryID(), ParentID: s.ActiveLeaf, Timestamp: now(), Plan: &plan})
 }
 
 func (s *Store) Resume(reference string) error {
@@ -251,7 +268,10 @@ func (s *Store) ActiveEntries() []Entry {
 }
 
 func (s *Store) buildMessagesLocked() []llm.Message {
-	path := s.activePathLocked()
+	return s.buildMessagesFromPathLocked(s.activePathLocked())
+}
+
+func (s *Store) buildMessagesFromPathLocked(path []Entry) []llm.Message {
 	compactionIndex := -1
 	for i := len(path) - 1; i >= 0; i-- {
 		if path[i].Type == TypeCompaction {
@@ -362,11 +382,15 @@ func (s *Store) activePathLocked() []Entry {
 }
 
 func (s *Store) currentModeLocked(fallback runtime.AgentMode) runtime.AgentMode {
+	return s.currentModeFromPathLocked(s.activePathLocked(), fallback)
+}
+
+func (s *Store) currentModeFromPathLocked(path []Entry, fallback runtime.AgentMode) runtime.AgentMode {
 	mode := fallback
 	if mode == "" {
 		mode = runtime.ModeReact
 	}
-	for _, entry := range s.activePathLocked() {
+	for _, entry := range path {
 		if entry.Type == TypeModeChange && entry.Mode != "" {
 			mode = entry.Mode
 		}
@@ -438,7 +462,8 @@ func (s *Store) listLocked(fallback runtime.AgentMode) ([]Summary, error) {
 			continue
 		}
 		info, _ := os.Stat(file)
-		summaries = append(summaries, Summary{ID: reader.Header.ID, File: file, CreatedAt: reader.Header.CreatedAt, UpdatedAt: info.ModTime(), Mode: reader.currentModeLocked(fallback), ActiveLeafID: reader.ActiveLeaf, MessageCount: reader.messageCountLocked()})
+		path := reader.activePathLocked()
+		summaries = append(summaries, Summary{ID: reader.Header.ID, File: file, CreatedAt: reader.Header.CreatedAt, UpdatedAt: info.ModTime(), Mode: reader.currentModeFromPathLocked(path, fallback), ActiveLeafID: reader.ActiveLeaf, MessageCount: reader.messageCountLocked(), ActivePlan: planStateFromPath(path)})
 	}
 	sort.Slice(summaries, func(i, j int) bool { return summaries[i].UpdatedAt.After(summaries[j].UpdatedAt) })
 	return summaries, nil
@@ -473,6 +498,25 @@ func appendContext(messages *[]llm.Message, entry Entry) {
 	case TypeCustomMessage:
 		*messages = append(*messages, llm.User(entry.Content))
 	}
+}
+
+func planStateFromPath(path []Entry) runtime.PlanState {
+	var state runtime.PlanState
+	for _, entry := range path {
+		if entry.Type != TypePlanEvent || entry.Plan == nil {
+			continue
+		}
+		state = runtime.PlanState{
+			ID:       entry.Plan.ID,
+			Path:     entry.Plan.Path,
+			Action:   entry.Plan.Action,
+			Revision: entry.Plan.Revision,
+			SHA256:   entry.Plan.SHA256,
+			Summary:  entry.Plan.Summary,
+			Content:  entry.Plan.Content,
+		}
+	}
+	return state
 }
 
 func compactionMessage(summary string) llm.Message {
@@ -566,6 +610,10 @@ func label(entry Entry) string {
 		return "session_info " + labelContent(entry.Name)
 	case TypeCompaction:
 		return "compaction " + labelContent(entry.Summary)
+	case TypePlanEvent:
+		if entry.Plan != nil {
+			return fmt.Sprintf("plan %s %s rev=%d", entry.Plan.Action, labelContent(entry.Plan.ID), entry.Plan.Revision)
+		}
 	case TypeMessage:
 		if entry.Message != nil {
 			return entry.Message.Role + " " + labelContent(entry.Message.Content)

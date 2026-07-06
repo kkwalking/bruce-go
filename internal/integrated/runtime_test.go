@@ -2,13 +2,16 @@ package integrated
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"bruce-go/internal/agent"
+	"bruce-go/internal/event"
 	"bruce-go/internal/llm"
+	bruntime "bruce-go/internal/runtime"
 	"bruce-go/internal/web"
 )
 
@@ -110,7 +113,7 @@ func TestRuntimePersistsReactToolTranscriptInSession(t *testing.T) {
 	}
 }
 
-func TestPlanModePersistsOnlyTopLevelMessages(t *testing.T) {
+func TestPlanModePersistsOnlyTopLevelMessagesAndPlanEvents(t *testing.T) {
 	client := &agent.FakeClient{Responses: []llm.ChatResponse{{Content: `{"goal":"分析","tasks":[{"id":"t1","description":"分析目标","type":"ANALYSIS","dependencies":[]}]}`}}}
 	rt, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: t.TempDir(), Client: client})
 	if err != nil {
@@ -129,6 +132,246 @@ func TestPlanModePersistsOnlyTopLevelMessages(t *testing.T) {
 	}
 	if ctx.Messages[0].Role != llm.RoleUser || ctx.Messages[1].Role != llm.RoleAssistant {
 		t.Fatalf("messages = %+v", ctx.Messages)
+	}
+	if ctx.ActivePlan.ID == "" || !ctx.ActivePlan.Pending() {
+		t.Fatalf("active plan = %+v", ctx.ActivePlan)
+	}
+	raw, err := os.ReadFile(ctx.File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"type":"plan_event"`) || !strings.Contains(string(raw), `"action":"presented"`) {
+		t.Fatalf("raw session missing plan events:\n%s", raw)
+	}
+}
+
+func TestPlanDescriptionApproveAndRejectLifecycle(t *testing.T) {
+	client := &recordingChatClient{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{ID: "call_plan", Function: llm.FunctionCall{Name: "replace_plan", Arguments: `{"content":"# Plan\n\n- Inspect\n- Edit","summary":"create"}`}}}},
+		{Content: "计划已准备"},
+		{Content: "执行完成"},
+	}}
+	workspace := t.TempDir()
+	home := t.TempDir()
+	rt, err := New(context.Background(), Options{Workspace: workspace, HomeDir: home, Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var assistantCompletions []string
+	unsubscribe := rt.Events.Subscribe(func(evt event.Event) {
+		completed, ok := evt.(event.MessageCompleted)
+		if ok && completed.Message.Role == llm.RoleAssistant {
+			assistantCompletions = append(assistantCompletions, completed.Message.Content)
+		}
+	})
+	defer unsubscribe()
+
+	planned := rt.Handle(context.Background(), "/plan 实现新能力")
+	if planned.Err != nil {
+		t.Fatal(planned.Err)
+	}
+	if !strings.Contains(planned.Output, "# Plan") || rt.Mode != bruntime.ModePlan {
+		t.Fatalf("planned = %+v mode=%s", planned, rt.Mode)
+	}
+	ctx := rt.Session.Context(rt.Mode)
+	if !ctx.ActivePlan.Pending() || ctx.ActivePlan.Revision != 1 {
+		t.Fatalf("active plan = %+v", ctx.ActivePlan)
+	}
+	if messagesContainText(ctx.Messages, "# Plan\n\n- Inspect\n- Edit") {
+		t.Fatalf("plan file content should not be appended as a duplicate assistant message: %+v", ctx.Messages)
+	}
+	if messagesContainRawText(assistantCompletions, "# Plan\n\n- Inspect\n- Edit") {
+		t.Fatalf("plan file content should not be emitted as a duplicate assistant completion: %+v", assistantCompletions)
+	}
+
+	approved := rt.Handle(context.Background(), "/plan approve")
+	if approved.Err != nil {
+		t.Fatal(approved.Err)
+	}
+	if approved.Output != "执行完成" || rt.Mode != bruntime.ModeReact {
+		t.Fatalf("approved = %+v mode=%s", approved, rt.Mode)
+	}
+	raw, err := os.ReadFile(rt.Session.Context(rt.Mode).File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, want := range []string{`"action":"created"`, `"action":"presented"`, `"action":"approved"`, `"action":"handoff"`, `"content":"/plan approve"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("session missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "请按已批准计划开始执行") {
+		t.Fatalf("session should keep the user command, not the internal handoff prompt:\n%s", text)
+	}
+	if len(client.calls) != 3 {
+		t.Fatalf("chat calls = %d", len(client.calls))
+	}
+	approveMessages := client.calls[2]
+	if !messagesContainUser(approveMessages, "/plan approve") {
+		t.Fatalf("approve call should use the slash command as model input: %+v", approveMessages)
+	}
+	if messagesContainText(approveMessages, "请按已批准计划开始执行") {
+		t.Fatalf("approve call should not use the internal handoff prompt: %+v", approveMessages)
+	}
+	if !messagesContainText(approveMessages, "用户输入 `/plan approve` 表示用户已经批准下方计划") {
+		t.Fatalf("approve call missing approved-plan system context: %+v", approveMessages)
+	}
+	resumed, err := New(context.Background(), Options{Workspace: workspace, HomeDir: home, Client: &agent.FakeClient{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := resumed.Session.Resume(rt.Session.Context(rt.Mode).File); err != nil {
+		t.Fatal(err)
+	}
+	resumed.Mode = resumed.Session.Context(resumed.Mode).Mode
+	var sawApprove, sawInternal bool
+	for _, msg := range resumed.Session.Context(resumed.Mode).Messages {
+		if msg.Role != llm.RoleUser {
+			continue
+		}
+		if msg.Content == "/plan approve" {
+			sawApprove = true
+		}
+		if strings.Contains(msg.Content, "请按已批准计划开始执行") {
+			sawInternal = true
+		}
+	}
+	if !sawApprove || sawInternal {
+		t.Fatalf("resumed messages sawApprove=%v sawInternal=%v messages=%+v", sawApprove, sawInternal, resumed.Session.Context(resumed.Mode).Messages)
+	}
+	tree := resumed.Session.RenderTree(resumed.Mode)
+	if !strings.Contains(tree, "user /plan approve") || strings.Contains(tree, "请按已批准计划开始执行") {
+		t.Fatalf("resumed tree should show the slash command only:\n%s", tree)
+	}
+
+	client2 := &agent.FakeClient{Responses: []llm.ChatResponse{
+		{Content: "# Reject Plan"},
+	}}
+	rt2, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: t.TempDir(), Client: client2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := rt2.Handle(context.Background(), "/plan 规划但不执行"); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	rejected := rt2.Handle(context.Background(), "/plan reject 不采用")
+	if rejected.Err != nil {
+		t.Fatal(rejected.Err)
+	}
+	if rt2.Mode != bruntime.ModeReact || !strings.Contains(rejected.Output, "已拒绝计划") {
+		t.Fatalf("rejected = %+v mode=%s", rejected, rt2.Mode)
+	}
+	if action := rt2.Session.Context(rt2.Mode).ActivePlan.Action; action != "rejected" {
+		t.Fatalf("plan action = %s", action)
+	}
+}
+
+func TestPendingPlanNaturalLanguageInputIsGated(t *testing.T) {
+	client := &agent.FakeClient{Responses: []llm.ChatResponse{
+		{Content: "# Full Plan\n\n- should-not-repeat"},
+		{Content: "执行完成"},
+	}}
+	rt, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: t.TempDir(), Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	planned := rt.Handle(context.Background(), "/plan 生成计划")
+	if planned.Err != nil {
+		t.Fatal(planned.Err)
+	}
+	if client.Calls != 1 {
+		t.Fatalf("planning calls = %d", client.Calls)
+	}
+	beforeRaw, err := os.ReadFile(rt.Session.Context(rt.Mode).File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeEvents := strings.Count(string(beforeRaw), `"type":"plan_event"`)
+
+	gated := rt.Handle(context.Background(), "开始实现")
+	if gated.Err != nil {
+		t.Fatal(gated.Err)
+	}
+	for _, want := range []string{"/plan approve", "/plan continue", "/plan reject", "/plan cancel"} {
+		if !strings.Contains(gated.Output, want) {
+			t.Fatalf("gated output missing %q:\n%s", want, gated.Output)
+		}
+	}
+	if strings.Contains(gated.Output, "should-not-repeat") {
+		t.Fatalf("gated output repeated plan body:\n%s", gated.Output)
+	}
+	if client.Calls != 1 {
+		t.Fatalf("gated input should not consume LLM response, calls=%d", client.Calls)
+	}
+	afterRaw, err := os.ReadFile(rt.Session.Context(rt.Mode).File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterEvents := strings.Count(string(afterRaw), `"type":"plan_event"`)
+	if afterEvents != beforeEvents {
+		t.Fatalf("plan_event count changed: before=%d after=%d\n%s", beforeEvents, afterEvents, afterRaw)
+	}
+
+	approved := rt.Handle(context.Background(), "/plan approve")
+	if approved.Err != nil {
+		t.Fatal(approved.Err)
+	}
+	if approved.Output != "执行完成" || client.Calls != 2 {
+		t.Fatalf("approve output=%q calls=%d", approved.Output, client.Calls)
+	}
+}
+
+func TestPlanContinueAndResumeRecovery(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	client := &agent.FakeClient{Responses: []llm.ChatResponse{
+		{Content: "# Initial Plan"},
+		{ToolCalls: []llm.ToolCall{{ID: "call_edit", Function: llm.FunctionCall{Name: "edit_plan", Arguments: `{"old_text":"Initial","new_text":"Updated","summary":"feedback"}`}}}},
+		{Content: "已更新"},
+	}}
+	rt, err := New(context.Background(), Options{Workspace: workspace, HomeDir: home, Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := rt.Handle(context.Background(), "/plan 初始规划"); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if result := rt.Handle(context.Background(), "/plan continue 补充反馈"); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if client.Calls != 3 {
+		t.Fatalf("continue should reach Planning Agent, calls=%d", client.Calls)
+	}
+	ctx := rt.Session.Context(rt.Mode)
+	if rt.Mode != bruntime.ModePlan || !ctx.ActivePlan.Pending() || ctx.ActivePlan.Revision != 2 {
+		t.Fatalf("ctx = %+v mode=%s", ctx, rt.Mode)
+	}
+	if err := os.Remove(ctx.ActivePlan.Path); err != nil {
+		t.Fatal(err)
+	}
+
+	resumed, err := New(context.Background(), Options{Workspace: workspace, HomeDir: home, Client: &agent.FakeClient{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := resumed.Handle(context.Background(), "/resume "+rt.Session.Context(rt.Mode).SessionID); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	status := resumed.Status()
+	if status.Mode != bruntime.ModePlan || !status.ActivePlan.Pending() || !status.ActivePlan.RecoveredFromSnapshot {
+		t.Fatalf("status = %+v", status)
+	}
+	if _, err := os.Stat(status.ActivePlan.Path); err != nil {
+		t.Fatalf("plan file not recovered: %v", err)
+	}
+	if err := os.WriteFile(status.ActivePlan.Path, []byte("# Diverged"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	status = resumed.Status()
+	if !status.ActivePlan.HashMismatch {
+		t.Fatalf("expected hash mismatch, status = %+v", status.ActivePlan)
 	}
 }
 
@@ -176,4 +419,59 @@ func TestHandleModelReasoningSubcommand(t *testing.T) {
 	if result2.Err == nil {
 		t.Fatal("expected error when setting effort without switchable")
 	}
+}
+
+type recordingChatClient struct {
+	responses []llm.ChatResponse
+	calls     [][]llm.Message
+}
+
+func (c *recordingChatClient) Chat(_ context.Context, messages []llm.Message, _ []llm.ToolDefinition, opts llm.StreamOptions) (llm.ChatResponse, error) {
+	copied := append([]llm.Message(nil), messages...)
+	c.calls = append(c.calls, copied)
+	if len(c.calls) > len(c.responses) {
+		return llm.ChatResponse{}, errors.New("recording client response exhausted")
+	}
+	resp := c.responses[len(c.calls)-1]
+	if resp.ReasoningContent != "" && opts.OnReasoning != nil {
+		opts.OnReasoning(resp.ReasoningContent)
+	}
+	if resp.Content != "" && opts.OnContent != nil {
+		opts.OnContent(resp.Content)
+	}
+	return resp, nil
+}
+
+func (*recordingChatClient) ProviderName() string        { return "fake" }
+func (*recordingChatClient) ModelName() string           { return "fake-model" }
+func (*recordingChatClient) MaxContextWindow() int       { return 200000 }
+func (*recordingChatClient) SupportsTools() bool         { return true }
+func (*recordingChatClient) SupportsPromptCaching() bool { return false }
+func (*recordingChatClient) SupportsImages() bool        { return true }
+
+func messagesContainUser(messages []llm.Message, content string) bool {
+	for _, msg := range messages {
+		if msg.Role == llm.RoleUser && msg.Content == content {
+			return true
+		}
+	}
+	return false
+}
+
+func messagesContainText(messages []llm.Message, text string) bool {
+	for _, msg := range messages {
+		if strings.Contains(msg.Content, text) {
+			return true
+		}
+	}
+	return false
+}
+
+func messagesContainRawText(messages []string, text string) bool {
+	for _, msg := range messages {
+		if strings.Contains(msg, text) {
+			return true
+		}
+	}
+	return false
 }

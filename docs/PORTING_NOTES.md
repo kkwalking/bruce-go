@@ -2,10 +2,10 @@
 
 ## 设计取舍
 
-- 不是 Java 逐类翻译。Go 版按职责组织为 `internal/{agent,approval,cli,config,event,instructions,integrated,llm,mcp,plan,render,runtime,session,skill,tool,tui,web}`。
+- 不是 Java 逐类翻译。Go 版按职责组织为 `internal/{agent,approval,cli,config,event,instructions,integrated,llm,mcp,plan,planning,render,runtime,session,skill,tool,tui,web}`。
 - 运行时入口集中在 `internal/integrated`，slash 命令解析在 `internal/cli`，避免把终端 UI、命令解析和业务状态耦合在一起。
 - LLM、Web、MCP 都通过小接口隔离，测试使用 fake 或 `httptest`，不需要真实 API key、真实网络服务或真实 MCP server。
-- 工具执行使用显式错误返回和 `context.Context`；并行工具调用和 Plan DAG 执行使用 bounded goroutine。
+- 工具执行使用显式错误返回和 `context.Context`；并行工具调用使用 bounded goroutine。用户可见 `/plan` 已改为 Claude Code 风格只读规划流程。
 - Session 继续使用 JSONL，恢复上下文时保留 active leaf、tree 分支和 compaction 节点。
 - TUI 使用 Bubble Tea 生态替代 Java Lanterna。
 
@@ -29,11 +29,12 @@
 - MCP Streamable HTTP 以 JSON-RPC HTTP POST 为主，并能解析简单 SSE `data:` 响应；复杂 server 特性后续可在 `internal/mcp` 扩展。
 - `/compact` 当前提供确定性本地摘要节点，自动压缩判断和 LLM 摘要能力在 `internal/session` 保留可测试接口。
 - HITL 默认关闭，需要时可通过 `/hitl on` 打开；真实交互 handler 可在 TUI 层替换。
+- `/plan` 不再自动执行 JSON/DAG；计划正文保存在 `~/.bruce/plans/`，计划生命周期通过 `plan_event` 写入 session JSONL，`/resume` 会同时恢复 mode 和 active plan state。
 
 ## 测试策略
 
 - ReAct 使用 fake LLM 覆盖 tool calling 循环。
-- Plan 使用 table-driven JSON/DAG 和本地工具执行覆盖。
+- Plan mode 使用 fake LLM 覆盖 markdown 计划创建、审批、拒绝、继续规划和 resume 恢复；legacy `internal/plan` 仍保留 JSON/DAG parser 的局部测试。
 - Web 使用 `httptest` 覆盖 fetch/search，不访问真实互联网。
 - MCP 使用内存 fake transport 和 `httptest` 覆盖工具注册、调用和 HTTP JSON-RPC。
 - 图片输入使用临时 PNG 和 fake clipboard reader。
