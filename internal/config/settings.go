@@ -3,8 +3,11 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 )
 
 type Settings struct {
@@ -13,7 +16,14 @@ type Settings struct {
 	Embedding  EmbeddingSettings `json:"embedding,omitempty"`
 	MCP        MCPSettings       `json:"mcp"`
 	Compaction Compaction        `json:"compaction"`
+	Sandbox    SandboxSettings   `json:"sandbox"`
 	Variables  map[string]string `json:"variables"`
+}
+
+type SandboxSettings struct {
+	Mode          string   `json:"mode"`
+	NetworkAccess bool     `json:"networkAccess"`
+	AllowedEnv    []string `json:"allowedEnv,omitempty"`
 }
 
 type LLMSettings struct {
@@ -104,6 +114,7 @@ func DefaultSettings() Settings {
 			ReserveTokens:    16384,
 			KeepRecentTokens: 20000,
 		},
+		Sandbox:   SandboxSettings{Mode: "full-access"},
 		Variables: map[string]string{},
 	}
 }
@@ -146,6 +157,9 @@ func (l Loader) Load() (Settings, error) {
 		return settings, err
 	}
 	normalize(&settings)
+	if err := validateSandbox(settings.Sandbox); err != nil {
+		return settings, err
+	}
 	return settings, nil
 }
 
@@ -154,6 +168,9 @@ func (l Loader) Save(settings Settings) error {
 		l.Path = DefaultSettingsPath()
 	}
 	normalize(&settings)
+	if err := validateSandbox(settings.Sandbox); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(l.Path), 0o755); err != nil {
 		return err
 	}
@@ -210,4 +227,38 @@ func normalize(settings *Settings) {
 	if settings.Variables == nil {
 		settings.Variables = map[string]string{}
 	}
+	if strings.TrimSpace(settings.Sandbox.Mode) == "" {
+		settings.Sandbox.Mode = "full-access"
+	}
+	settings.Sandbox.AllowedEnv = normalizeAllowedEnv(settings.Sandbox.AllowedEnv)
+}
+
+var environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func validateSandbox(settings SandboxSettings) error {
+	switch settings.Mode {
+	case "read-only", "workspace-write", "full-access":
+	default:
+		return fmt.Errorf("sandbox.mode 无效: %q（允许 read-only、workspace-write、full-access）", settings.Mode)
+	}
+	for _, name := range settings.AllowedEnv {
+		if !environmentNamePattern.MatchString(name) {
+			return fmt.Errorf("sandbox.allowedEnv 包含非法环境变量名: %q", name)
+		}
+	}
+	return nil
+}
+
+func normalizeAllowedEnv(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
 }

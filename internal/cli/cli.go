@@ -31,6 +31,7 @@ var Commands = []CommandInfo{
 	{Name: "mcp", Usage: "/mcp [restart|logs|disable|enable <name>]", Description: "查看或管理 MCP server"},
 	{Name: "skill", Usage: "/skill list|show <name>|reload", Description: "查看、展示或重新加载 Skill"},
 	{Name: "hitl", Usage: "/hitl on|off|status", Description: "开关或查看人工审批"},
+	{Name: "sandbox", Usage: "/sandbox [status|mode <mode>|network on|off]", Description: "查看或切换命令沙箱"},
 	{Name: "parallel", Usage: "/parallel on|off|status", Description: "开关或查看并行工具调用"},
 	{Name: "status", Usage: "/status", Description: "查看统一运行状态"},
 	{Name: "session", Usage: "/session", Description: "查看当前 session"},

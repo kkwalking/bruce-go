@@ -13,6 +13,7 @@ import (
 	"bruce-go/internal/approval"
 	"bruce-go/internal/llm"
 	"bruce-go/internal/runtime"
+	"bruce-go/internal/sandbox"
 )
 
 func TestRegistryBuiltinsAndHITL(t *testing.T) {
@@ -43,6 +44,23 @@ func TestRegistryBuiltinsAndHITL(t *testing.T) {
 	out = registry.Execute(context.Background(), "write_file", map[string]string{"path": "b.txt", "content": "blocked"})
 	if !strings.Contains(out, "[HITL] 操作已被拒绝") {
 		t.Fatalf("HITL output = %q", out)
+	}
+}
+
+func TestHITLModifiedArgumentsAreRevalidated(t *testing.T) {
+	dir := t.TempDir()
+	modifiedWrite := approval.Result{Decision: approval.Modified, Arguments: `{"path":".git/config","content":"malicious"}`}
+	registry := NewRegistry(dir).WithHITL(approval.NewAutoHandler(true, modifiedWrite))
+	out := registry.Execute(context.Background(), "write_file", map[string]string{"path": "safe.txt", "content": "safe"})
+	if !strings.Contains(out, "文件工具禁止直接修改 .git") {
+		t.Fatalf("modified write was not revalidated: %q", out)
+	}
+
+	modifiedCommand := approval.Result{Decision: approval.Modified, Arguments: `{"command":"rm -rf /"}`}
+	registry.WithHITL(approval.NewAutoHandler(true, modifiedCommand))
+	out = registry.Execute(context.Background(), "execute_command", map[string]string{"command": "pwd"})
+	if !strings.Contains(out, "命令被安全策略拒绝") {
+		t.Fatalf("modified command was not revalidated: %q", out)
 	}
 }
 
@@ -113,6 +131,67 @@ func TestReadFileLargeOutputKeepsContinuationHint(t *testing.T) {
 	out := registry.Execute(context.Background(), "read_file", map[string]string{"path": "large.txt"})
 	if !strings.Contains(out, "char limit") || !strings.Contains(out, "Use offset=") {
 		t.Fatalf("large read output missing continuation hint:\n%s", out)
+	}
+}
+
+func TestFileToolsRejectTraversalSymlinksAndGitMetadata(t *testing.T) {
+	workspace := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("outside-secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(workspace, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(workspace, "final-link")); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry(workspace)
+
+	out := registry.Execute(context.Background(), "read_file", map[string]string{"path": "../secret.txt"})
+	if !strings.Contains(out, "路径超出工作目录") {
+		t.Fatalf("parent traversal output = %q", out)
+	}
+	out = registry.Execute(context.Background(), "read_file", map[string]string{"path": filepath.Join(outside, "secret.txt")})
+	if !strings.Contains(out, "路径超出工作目录") {
+		t.Fatalf("absolute traversal output = %q", out)
+	}
+	out = registry.Execute(context.Background(), "read_file", map[string]string{"path": "escape/secret.txt"})
+	if strings.Contains(out, "outside-secret") || !strings.Contains(out, "工具执行失败") {
+		t.Fatalf("symlink read output = %q", out)
+	}
+	out = registry.Execute(context.Background(), "write_file", map[string]string{"path": "escape/new.txt", "content": "bad"})
+	if !strings.Contains(out, "工具执行失败") {
+		t.Fatalf("symlink write output = %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "new.txt")); !os.IsNotExist(err) {
+		t.Fatalf("symlink write escaped workspace: %v", err)
+	}
+	out = registry.Execute(context.Background(), "read_file", map[string]string{"path": "final-link"})
+	if strings.Contains(out, "outside-secret") || !strings.Contains(out, "工具执行失败") {
+		t.Fatalf("final symlink read output = %q", out)
+	}
+	out = registry.Execute(context.Background(), "read_file", map[string]string{"path": "escape/"})
+	if strings.Contains(out, "outside-secret") || !strings.Contains(out, "工具执行失败") {
+		t.Fatalf("trailing slash escape output = %q", out)
+	}
+	out = registry.Execute(context.Background(), "write_file", map[string]string{"path": ".git/config", "content": "bad"})
+	if !strings.Contains(out, "禁止直接修改 .git") {
+		t.Fatalf("git metadata output = %q", out)
+	}
+}
+
+func TestReadOnlySandboxRejectsFileWritesBeforeExecution(t *testing.T) {
+	workspace := t.TempDir()
+	manager, err := sandbox.New(context.Background(), sandbox.Options{Workspace: workspace, HomeDir: t.TempDir(), Mode: sandbox.ModeReadOnly})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	registry := NewRegistry(workspace).WithSandbox(manager)
+	out := registry.Execute(context.Background(), "write_file", map[string]string{"path": "blocked.txt", "content": "bad"})
+	if !strings.Contains(out, "read-only 模式") {
+		t.Fatalf("read-only output = %q", out)
 	}
 }
 

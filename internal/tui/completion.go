@@ -120,6 +120,8 @@ func completeSlash(input, word string, rt *integrated.Runtime) []CompletionItem 
 		return completeMCP(parts, prefix, strings.HasSuffix(input, " "), rt)
 	case "skill":
 		return completeSkill(parts, prefix, strings.HasSuffix(input, " "), rt)
+	case "sandbox":
+		return completeSandbox(parts, prefix, strings.HasSuffix(input, " "))
 	}
 	return nil
 }
@@ -127,11 +129,39 @@ func completeSlash(input, word string, rt *integrated.Runtime) []CompletionItem 
 func topLevelCommandValue(command cli.CommandInfo) string {
 	value := "/" + command.Name
 	switch command.Name {
-	case "web", "mcp", "skill", "hitl", "parallel", "resume", "tree", "compact", "plan":
+	case "web", "mcp", "skill", "hitl", "parallel", "sandbox", "resume", "tree", "compact", "plan":
 		return value + " "
 	default:
 		return value
 	}
+}
+
+func completeSandbox(parts []string, prefix string, inputEndsWithSpace bool) []CompletionItem {
+	if len(parts) <= 1 || (len(parts) == 2 && !inputEndsWithSpace) {
+		return matchingOptions(prefix, "Sandbox", []CompletionItem{
+			completion("status", "查看沙箱状态", "Sandbox"),
+			completion("mode ", "切换文件系统权限模式", "Sandbox"),
+			completion("network ", "切换命令网络访问", "Sandbox"),
+		})
+	}
+	switch strings.ToLower(parts[1]) {
+	case "mode":
+		if len(parts) == 2 || (len(parts) == 3 && !inputEndsWithSpace) {
+			return matchingOptions(prefix, "Sandbox mode", []CompletionItem{
+				completion("read-only", "workspace 只读", "Sandbox mode"),
+				completion("workspace-write", "仅允许写入 workspace", "Sandbox mode"),
+				completion("full-access", "关闭原生 Shell 沙箱", "Sandbox mode"),
+			})
+		}
+	case "network":
+		if len(parts) == 2 || (len(parts) == 3 && !inputEndsWithSpace) {
+			return matchingOptions(prefix, "Sandbox network", []CompletionItem{
+				completion("on", "允许命令联网", "Sandbox network"),
+				completion("off", "禁止命令联网", "Sandbox network"),
+			})
+		}
+	}
+	return nil
 }
 
 func completeModel(input string, rt *integrated.Runtime) []CompletionItem {

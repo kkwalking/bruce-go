@@ -1092,6 +1092,11 @@ func (m *Model) drawStatus(canvas []string, columns, row int) {
 		strings.ToLower(string(status.Mode)),
 		compactPath(status.WorkspaceRoot),
 	)
+	network := "no-net"
+	if status.SandboxNetwork {
+		network = "net"
+	}
+	details += fmt.Sprintf(" · sandbox %s/%s/%s", status.SandboxBackend, status.SandboxMode, network)
 	if m.elapsedMillis > 0 {
 		details += fmt.Sprintf(" · %dms", m.elapsedMillis)
 	}

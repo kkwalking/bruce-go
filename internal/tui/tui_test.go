@@ -24,6 +24,7 @@ func TestModelRunsSlashCommandOnEnter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = rt.Close() })
 	model := NewModel(context.Background(), rt)
 	model.height = 80
 	model.replaceInput("/help")
@@ -459,6 +460,46 @@ func TestCompletesPlanSubcommands(t *testing.T) {
 	}
 }
 
+func TestCompletesNestedSandboxCommandsWithTab(t *testing.T) {
+	rt := testRuntime(t)
+	input := "/sandbox"
+	cursor := len([]rune(input))
+
+	item := completionItemByValue(t, completionsFor(input, cursor, rt), "/sandbox ")
+	input, cursor = applyCompletion(input, cursor, item)
+	if input != "/sandbox " {
+		t.Fatalf("top-level completion = %q", input)
+	}
+
+	firstLevel := completionValues(completionsFor(input, cursor, rt))
+	for _, want := range []string{"status", "mode ", "network "} {
+		if !contains(firstLevel, want) {
+			t.Fatalf("sandbox completion missing %q: %v", want, firstLevel)
+		}
+	}
+	item = completionItemByValue(t, completionsFor(input, cursor, rt), "mode ")
+	input, cursor = applyCompletion(input, cursor, item)
+	if input != "/sandbox mode " {
+		t.Fatalf("mode completion = %q", input)
+	}
+
+	modes := completionValues(completionsFor(input, cursor, rt))
+	for _, want := range []string{"read-only", "workspace-write", "full-access"} {
+		if !contains(modes, want) {
+			t.Fatalf("sandbox mode completion missing %q: %v", want, modes)
+		}
+	}
+
+	network := completionValues(completionsFor("/sandbox network ", len("/sandbox network "), rt))
+	if !contains(network, "on") || !contains(network, "off") {
+		t.Fatalf("sandbox network completions = %v", network)
+	}
+	prefixed := completionValues(completionsFor("/sandbox mode fu", len("/sandbox mode fu"), rt))
+	if len(prefixed) != 1 || prefixed[0] != "full-access" {
+		t.Fatalf("sandbox mode prefix completions = %v", prefixed)
+	}
+}
+
 func TestHighlightsCoreInputPatterns(t *testing.T) {
 	spans := highlightInput("/web search @image:<shot.png> @clipboard rm -rf / api_key")
 	styles := map[inputStyle]bool{}
@@ -507,6 +548,17 @@ func completionValues(items []CompletionItem) []string {
 	return out
 }
 
+func completionItemByValue(t *testing.T, items []CompletionItem, value string) CompletionItem {
+	t.Helper()
+	for _, item := range items {
+		if item.Value == value {
+			return item
+		}
+	}
+	t.Fatalf("completion %q not found in %v", value, completionValues(items))
+	return CompletionItem{}
+}
+
 func contains(values []string, value string) bool {
 	for _, candidate := range values {
 		if candidate == value {
@@ -522,6 +574,7 @@ func testRuntime(t *testing.T) *integrated.Runtime {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = rt.Close() })
 	return rt
 }
 

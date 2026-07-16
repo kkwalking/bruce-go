@@ -22,6 +22,7 @@ import (
 	"bruce-go/internal/planning"
 	"bruce-go/internal/render"
 	"bruce-go/internal/runtime"
+	"bruce-go/internal/sandbox"
 	"bruce-go/internal/session"
 	"bruce-go/internal/skill"
 	"bruce-go/internal/tool"
@@ -55,6 +56,7 @@ type Runtime struct {
 	Parallel   bool
 	Concurrent runtime.ConcurrencyConfig
 	StartMCP   bool
+	Sandbox    *sandbox.Manager
 
 	react      *agent.Agent
 	planning   *agent.Agent
@@ -109,7 +111,21 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 
 	hitl := approval.NewAutoHandler(false, approval.Approve())
 	concurrency := runtime.DefaultConcurrency()
-	registry := tool.NewRegistry(workspace).WithHITL(hitl).WithConcurrency(concurrency)
+	sandboxMode, err := sandbox.ParseMode(settings.Sandbox.Mode)
+	if err != nil {
+		return nil, err
+	}
+	sandboxManager, err := sandbox.New(ctx, sandbox.Options{
+		Workspace:     workspace,
+		HomeDir:       home,
+		Mode:          sandboxMode,
+		NetworkAccess: settings.Sandbox.NetworkAccess,
+		AllowedEnv:    settings.Sandbox.AllowedEnv,
+	})
+	if err != nil {
+		return nil, err
+	}
+	registry := tool.NewRegistry(workspace).WithHITL(hitl).WithConcurrency(concurrency).WithSandbox(sandboxManager)
 	webManager := web.NewManager(settings.WebSearch, nil)
 	web.RegisterTools(registry, webManager)
 	skills := skill.NewCatalog(home, workspace)
@@ -118,6 +134,7 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 
 	store, err := session.CreateNew(home, workspace, runtime.ModeReact)
 	if err != nil {
+		_ = sandboxManager.Close()
 		return nil, err
 	}
 	bus := event.NewBus()
@@ -139,12 +156,20 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		Parallel:   true,
 		Concurrent: concurrency,
 		StartMCP:   opts.StartMCP,
+		Sandbox:    sandboxManager,
 	}
 	r.planStore = planning.NewStore(home, store)
 	r.subscribeSessionRecorder()
 	r.refreshMCPTools()
 	r.rebuildAgents()
 	return r, nil
+}
+
+func (r *Runtime) Close() error {
+	if r == nil || r.Sandbox == nil {
+		return nil
+	}
+	return r.Sandbox.Close()
 }
 
 func (r *Runtime) Start(ctx context.Context) {
@@ -280,6 +305,8 @@ func (r *Runtime) HandleCommand(ctx context.Context, command cli.Command) cli.Re
 		result.Output, result.Err = r.handleSkill(command.Args)
 	case "hitl":
 		result.Output, result.Err = r.handleToggle(command.Args, "HITL", r.HITL.Enabled(), func(v bool) { r.HITL.SetEnabled(v) })
+	case "sandbox":
+		result.Output, result.Err = r.handleSandbox(command.Args)
 	case "parallel":
 		result.Output, result.Err = r.handleParallel(command.Args)
 	case "status":
@@ -336,6 +363,7 @@ func (r *Runtime) Status() runtime.Status {
 	toolNames := r.Tools.ToolNames()
 	sort.Strings(toolNames)
 	mcpSummary := render.MCP(r.MCP.Status())
+	sandboxStatus := r.Sandbox.Status()
 	return runtime.Status{
 		Mode:              r.Mode,
 		Model:             r.Client.ModelName(),
@@ -346,6 +374,11 @@ func (r *Runtime) Status() runtime.Status {
 		WebSearchProvider: strings.TrimSpace(r.Settings.WebSearch.Provider),
 		MCPSummary:        mcpSummary,
 		HITLEnabled:       r.HITL.Enabled(),
+		SandboxMode:       string(sandboxStatus.Mode),
+		SandboxBackend:    sandboxStatus.Capabilities.Backend,
+		SandboxNetwork:    sandboxStatus.NetworkAccess,
+		SandboxAvailable:  sandboxStatus.Capabilities.Available || sandboxStatus.Mode == sandbox.ModeFullAccess,
+		SandboxReason:     sandboxStatus.Capabilities.Reason,
 		ParallelEnabled:   r.Parallel,
 		MaxParallelism:    r.Concurrent.MaxParallelism,
 		BatchTimeout:      r.Concurrent.BatchTimeout,
@@ -353,6 +386,49 @@ func (r *Runtime) Status() runtime.Status {
 		SkillCount:        len(r.Skills.Skills()),
 		ToolNames:         toolNames,
 		ActivePlan:        r.currentPlanState(),
+	}
+}
+
+func (r *Runtime) handleSandbox(args []string) (string, error) {
+	if r.Sandbox == nil {
+		return "", errors.New("sandbox 未初始化")
+	}
+	statusText := func() string {
+		status := r.Sandbox.Status()
+		available := status.Capabilities.Available || status.Mode == sandbox.ModeFullAccess
+		text := fmt.Sprintf("Sandbox: mode=%s, backend=%s, network=%s, available=%s",
+			status.Mode, status.Capabilities.Backend, onOff(status.NetworkAccess), onOff(available))
+		if !available && strings.TrimSpace(status.Capabilities.Reason) != "" {
+			text += "\nReason: " + status.Capabilities.Reason
+		}
+		return text
+	}
+	if len(args) == 0 || args[0] == "status" {
+		return statusText(), nil
+	}
+	switch args[0] {
+	case "mode":
+		if len(args) != 2 {
+			return "", errors.New("用法: /sandbox mode read-only|workspace-write|full-access")
+		}
+		mode, err := sandbox.ParseMode(args[1])
+		if err != nil {
+			return "", err
+		}
+		if err := r.Sandbox.SetMode(mode); err != nil {
+			return "", err
+		}
+		return statusText(), nil
+	case "network":
+		if len(args) != 2 || (args[1] != "on" && args[1] != "off") {
+			return "", errors.New("用法: /sandbox network on|off")
+		}
+		if err := r.Sandbox.SetNetworkAccess(args[1] == "on"); err != nil {
+			return "", err
+		}
+		return statusText(), nil
+	default:
+		return "", errors.New("用法: /sandbox [status|mode <mode>|network on|off]")
 	}
 }
 

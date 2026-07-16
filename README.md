@@ -6,7 +6,9 @@ RAG、Embedding、SQLite 向量库、代码索引、RAG slash 命令和 RAG 测�
 
 ## 环境要求
 
-- Go 1.24.2
+- Go 1.26.5
+- macOS：系统自带 `/usr/bin/sandbox-exec`（Seatbelt）
+- Linux：系统安装的 Bubblewrap（`bwrap`）以及可用的 user/PID/mount namespace
 - 可选：`~/.bruce/setting.json` 配置 LLM、WebSearch、MCP
 - 可选：MCP server 命令或 Streamable HTTP endpoint
 
@@ -59,11 +61,31 @@ go run ./cmd/bruce --no-mcp
     "reserveTokens": 16384,
     "keepRecentTokens": 20000
   },
+  "sandbox": {
+    "mode": "full-access",
+    "networkAccess": false,
+    "allowedEnv": []
+  },
   "variables": {}
 }
 ```
 
 `llm.providers` 支持 `deepseek`、`glm` 和 `openai_compatiable`。测试使用 fake/mock，不依赖真实 API key。
+
+`sandbox.mode` 仅允许 `read-only`、`workspace-write`、`full-access`。旧配置没有 `sandbox` 字段时会自动采用 `full-access`，该模式下网络始终开启。`networkAccess` 保存安全模式的网络偏好，因此默认仍为 `false`，切换到 `read-only` 或 `workspace-write` 后恢复禁网。非法 mode 或非法环境变量名会在启动时报错。`allowedEnv` 只接受精确环境变量名，列出的变量会追加到安全环境允许列表中。
+
+Linux 不捆绑 Bubblewrap，也不会自动回退到 Docker。可按发行版安装：
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install bubblewrap
+
+# Fedora
+sudo dnf install bubblewrap
+
+# Arch Linux
+sudo pacman -S bubblewrap
+```
 
 ## Slash 命令
 
@@ -77,6 +99,9 @@ go run ./cmd/bruce --no-mcp
 - `/skill list|show <name>|reload`
 - `/hitl on|off|status`
 - `/parallel on|off|status`
+- `/sandbox status`
+- `/sandbox mode read-only|workspace-write|full-access`
+- `/sandbox network on|off`
 - `/status`
 - `/session`
 - `/sessions`
@@ -91,6 +116,18 @@ go run ./cmd/bruce --no-mcp
 不提供 `/rag`、`/index`、`/graph` 等 RAG 入口。
 
 `/plan` 是只读 planning workflow：Planning Agent 可以读取和搜索项目、维护 `~/.bruce/plans/` 下的 markdown 计划，并把计划生命周期写入 session JSONL。只有执行 `/plan approve` 批准计划后，Bruce 才会切回 ReAct 并按批准计划执行；具体文件修改和命令仍受 HITL 设置约束。
+
+## 原生沙箱
+
+默认的 `full-access` 使用完整宿主环境、宿主网络和兼容 Shell 行为，网络在该模式下始终开启，但仍保留命令黑名单、超时、输出限制和进程树回收。需要原生隔离时可切换到 `workspace-write`，它允许 Shell 读取宿主工具链、写入 workspace 和受控 Git 元数据，但禁止写入宿主其他位置；`read-only` 连 workspace 也不可写。切回安全模式后恢复此前保存的网络开关，默认禁网。Slash 命令的切换只影响当前进程，不会回写 `setting.json`，已经启动的命令使用启动时的策略快照。
+
+安全模式使用受限环境变量和不加载用户启动脚本的 `/bin/bash --noprofile --norc -c`。`HOME` 可读以兼容工具配置但不可写，临时目录、Go/npm cache 和 XDG runtime/cache 会重定向到每条命令独立的 Bruce 临时目录。SSH/GPG、云厂商、Kubernetes、Docker、Git/npm/PyPI/GitHub CLI 凭据、macOS Keychains 以及 Docker/Podman/Agent Socket 默认不可读或不可访问。Git 的 refs、objects、index、日志和 linked worktree 正常流程可写，但配置、hooks、alternates 和其他已有 worktree 元数据受保护；文件工具在任何模式都不能直接修改 `.git`。
+
+`/sandbox network on` 只整体放开沙箱中 `execute_command` 的 TCP/UDP 网络；Docker、Podman、SSH/GPG Agent 等 Unix Socket 仍被屏蔽。WebSearch、WebFetch、LLM 请求和 MCP 自身不经过该 Shell 沙箱，MCP stdio 进程也不在首版覆盖范围内。workspace 自身被视为任务输入，因此其中的 `.env` 不会自动隐藏。
+
+后端缺失、namespace 被系统禁用或策略构造失败时，默认的 `full-access` 仍可执行 Shell；一旦切换到 `read-only` 或 `workspace-write`，Shell 会 fail closed，且不会自动无沙箱重试。此时可查看 `/sandbox status` 获取失败原因，并显式切回 `/sandbox mode full-access`。`workspace-write` 会拒绝文件系统根、用户 HOME 及其祖先作为 workspace，避免产生过宽写权限。Plan mode 的 Shell 始终强制 `read-only`，即使当前运行时是 `full-access`。
+
+故障排查先运行 `/sandbox status` 查看 backend、availability 和失败原因。Linux 常见原因是未安装 `bwrap`、内核禁用 unprivileged user namespace，或运行环境禁止创建 PID/mount namespace；Bruce 不会把这些错误降级成不安全执行。
 
 ## 输入语法
 
@@ -126,3 +163,5 @@ go vet ./...
 ```
 
 网络、LLM 和 MCP 能力均可通过 fake 或 `httptest` 覆盖，测试不依赖真实外部服务。
+
+沙箱集成测试默认在本机后端不可用时跳过；CI 设置 `BRUCE_REQUIRE_SANDBOX_TESTS=1`，要求 macOS Seatbelt 和 Ubuntu Bubblewrap 探测及隔离矩阵真实通过。

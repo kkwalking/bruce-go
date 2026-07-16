@@ -125,6 +125,11 @@ type Status struct {
 	WebSearchProvider string
 	MCPSummary        string
 	HITLEnabled       bool
+	SandboxMode       string
+	SandboxBackend    string
+	SandboxNetwork    bool
+	SandboxAvailable  bool
+	SandboxReason     string
 	ParallelEnabled   bool
 	MaxParallelism    int
 	BatchTimeout      time.Duration
@@ -151,10 +156,14 @@ func (s Status) DisplayString() string {
 			"Web: " + onOff(s.WebEnabled) + " (provider=" + empty(s.WebSearchProvider, "unknown") + ")\n" +
 			"MCP: " + empty(s.MCPSummary, "未配置") + "\n" +
 			"HITL: " + onOff(s.HITLEnabled) + "\n" +
+			"Sandbox: " + empty(s.SandboxMode, "unknown") + " (backend=" + empty(s.SandboxBackend, "unknown") + ", network=" + onOff(s.SandboxNetwork) + ", available=" + onOff(s.SandboxAvailable) + ")\n" +
 			"Parallel: " + onOff(s.ParallelEnabled) + "\n" +
 			"Skills: " + itoa(s.SkillCount) + " 个\n" +
 			"Tools: " + strings.Join(tools, ", "),
 	)
+	if !s.SandboxAvailable && strings.TrimSpace(s.SandboxReason) != "" {
+		status += "\nSandbox reason: " + strings.TrimSpace(s.SandboxReason)
+	}
 	if s.ActivePlan.Pending() {
 		status += "\nPending Plan: " + s.ActivePlan.ID + " rev=" + itoa(s.ActivePlan.Revision) + " path=" + s.ActivePlan.Path
 	}

@@ -21,6 +21,7 @@ func TestRuntimeHandlesTaskAndSlashCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupRuntime(t, rt)
 	if rt.HITL.Enabled() {
 		t.Fatal("HITL should be disabled by default")
 	}
@@ -35,8 +36,40 @@ func TestRuntimeHandlesTaskAndSlashCommands(t *testing.T) {
 		t.Fatalf("message count = %d", rt.Session.Context(rt.Mode).MessageCount)
 	}
 	status := rt.Handle(context.Background(), "/status")
-	if !strings.Contains(status.Output, "RAG: 关闭") || !strings.Contains(status.Output, "fake-model") {
+	if !strings.Contains(status.Output, "RAG: 关闭") || !strings.Contains(status.Output, "fake-model") || !strings.Contains(status.Output, "Sandbox: full-access") {
 		t.Fatalf("status = %s", status.Output)
+	}
+	sandboxStatus := rt.Handle(context.Background(), "/sandbox status")
+	if sandboxStatus.Err != nil || !strings.Contains(sandboxStatus.Output, "mode=full-access") || !strings.Contains(sandboxStatus.Output, "network=开启") {
+		t.Fatalf("sandbox status = %+v", sandboxStatus)
+	}
+	network := rt.Handle(context.Background(), "/sandbox network on")
+	if network.Err != nil || !strings.Contains(network.Output, "network=开启") {
+		t.Fatalf("sandbox network = %+v", network)
+	}
+	readOnly := rt.Handle(context.Background(), "/sandbox mode read-only")
+	if readOnly.Err != nil || !strings.Contains(readOnly.Output, "mode=read-only") {
+		t.Fatalf("sandbox mode = %+v", readOnly)
+	}
+	networkOff := rt.Handle(context.Background(), "/sandbox network off")
+	if networkOff.Err != nil || !strings.Contains(networkOff.Output, "network=关闭") {
+		t.Fatalf("sandbox network off = %+v", networkOff)
+	}
+	fullAccess := rt.Handle(context.Background(), "/sandbox mode full-access")
+	if fullAccess.Err != nil || !strings.Contains(fullAccess.Output, "mode=full-access") || !strings.Contains(fullAccess.Output, "network=开启") {
+		t.Fatalf("sandbox full-access mode = %+v", fullAccess)
+	}
+	networkOff = rt.Handle(context.Background(), "/sandbox network off")
+	if networkOff.Err == nil || !strings.Contains(networkOff.Output, "网络始终开启") {
+		t.Fatalf("full-access network off should fail = %+v", networkOff)
+	}
+	workspaceWrite := rt.Handle(context.Background(), "/sandbox mode workspace-write")
+	if workspaceWrite.Err != nil || !strings.Contains(workspaceWrite.Output, "network=关闭") {
+		t.Fatalf("sandbox should restore safe-mode network setting = %+v", workspaceWrite)
+	}
+	legacyMode := rt.Handle(context.Background(), "/sandbox mode danger-full-access")
+	if legacyMode.Err == nil {
+		t.Fatalf("legacy sandbox mode should fail: %+v", legacyMode)
 	}
 	parallel := rt.Handle(context.Background(), "/parallel off")
 	if parallel.Err != nil || !strings.Contains(parallel.Output, "已关闭") {
@@ -60,6 +93,7 @@ func TestRuntimeWebCommandUsesFakeSearcher(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupRuntime(t, rt)
 	rt.Web.Searcher = fakeSearcher{}
 	result := rt.Handle(context.Background(), "/web search golang")
 	if result.Err != nil {
@@ -83,6 +117,7 @@ func TestRuntimePersistsReactToolTranscriptInSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupRuntime(t, rt)
 
 	out, err := rt.RunTask(context.Background(), "读取 a.txt")
 	if err != nil {
@@ -119,6 +154,7 @@ func TestPlanModePersistsOnlyTopLevelMessagesAndPlanEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupRuntime(t, rt)
 	if result := rt.Handle(context.Background(), "/plan"); result.Err != nil {
 		t.Fatal(result.Err)
 	}
@@ -154,6 +190,7 @@ func TestPlanModeEmitsPresentedPlanEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupRuntime(t, rt)
 	var planEvents []event.PlanEventRecorded
 	unsubscribe := rt.Events.Subscribe(func(evt event.Event) {
 		if recorded, ok := evt.(event.PlanEventRecorded); ok {
@@ -187,6 +224,7 @@ func TestPlanDescriptionApproveAndRejectLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupRuntime(t, rt)
 	var assistantCompletions []string
 	unsubscribe := rt.Events.Subscribe(func(evt event.Event) {
 		completed, ok := evt.(event.MessageCompleted)
@@ -251,6 +289,7 @@ func TestPlanDescriptionApproveAndRejectLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupRuntime(t, resumed)
 	if err := resumed.Session.Resume(rt.Session.Context(rt.Mode).File); err != nil {
 		t.Fatal(err)
 	}
@@ -282,6 +321,7 @@ func TestPlanDescriptionApproveAndRejectLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupRuntime(t, rt2)
 	if result := rt2.Handle(context.Background(), "/plan 规划但不执行"); result.Err != nil {
 		t.Fatal(result.Err)
 	}
@@ -306,6 +346,7 @@ func TestPendingPlanNaturalLanguageInputIsGated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupRuntime(t, rt)
 
 	planned := rt.Handle(context.Background(), "/plan 生成计划")
 	if planned.Err != nil {
@@ -365,6 +406,7 @@ func TestPlanContinueAndResumeRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupRuntime(t, rt)
 	if result := rt.Handle(context.Background(), "/plan 初始规划"); result.Err != nil {
 		t.Fatal(result.Err)
 	}
@@ -386,6 +428,7 @@ func TestPlanContinueAndResumeRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupRuntime(t, resumed)
 	if result := resumed.Handle(context.Background(), "/resume "+rt.Session.Context(rt.Mode).SessionID); result.Err != nil {
 		t.Fatal(result.Err)
 	}
@@ -410,6 +453,7 @@ func TestModeChangePersistsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupRuntime(t, rt)
 	if result := rt.Handle(context.Background(), "/plan"); result.Err != nil {
 		t.Fatal(result.Err)
 	}
@@ -434,6 +478,7 @@ func TestHandleModelReasoningSubcommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupRuntime(t, rt)
 
 	// Query current level (no switchable → empty)
 	result := rt.Handle(context.Background(), "/model reasoning")
@@ -504,4 +549,13 @@ func messagesContainRawText(messages []string, text string) bool {
 		}
 	}
 	return false
+}
+
+func cleanupRuntime(t *testing.T, runtime *Runtime) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := runtime.Close(); err != nil {
+			t.Errorf("close runtime: %v", err)
+		}
+	})
 }

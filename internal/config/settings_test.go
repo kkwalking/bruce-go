@@ -81,6 +81,9 @@ func TestLoaderDefaultsAndSave(t *testing.T) {
 	if settings.LLM.Providers == nil || settings.MCP.Servers == nil || settings.Variables == nil {
 		t.Fatalf("maps should be initialized: %+v", settings)
 	}
+	if settings.Sandbox.Mode != "full-access" || settings.Sandbox.NetworkAccess {
+		t.Fatalf("unexpected sandbox defaults: %+v", settings.Sandbox)
+	}
 	settings.LLM.DefaultProvider = "deepseek"
 	settings.LLM.DefaultModel = "deepseek-v4-flash"
 	settings.LLM.Providers["deepseek"] = ProviderSetting{APIKey: "k"}
@@ -93,6 +96,39 @@ func TestLoaderDefaultsAndSave(t *testing.T) {
 	}
 	if reloaded.LLM.DefaultProvider != "deepseek" {
 		t.Fatalf("save/load provider = %q", reloaded.LLM.DefaultProvider)
+	}
+}
+
+func TestLoaderValidatesSandboxSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "setting.json")
+	data := `{"sandbox":{"mode":"unsafe","allowedEnv":["OK","BAD=VALUE"]}}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewLoader(path).Load(); err == nil {
+		t.Fatal("invalid sandbox settings should fail")
+	}
+	data = `{"sandbox":{"mode":"danger-full-access"}}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewLoader(path).Load(); err == nil {
+		t.Fatal("legacy danger-full-access setting should fail")
+	}
+
+	data = `{"sandbox":{"mode":"read-only","networkAccess":true,"allowedEnv":[" EXTRA_TOKEN ","EXTRA_TOKEN"]}}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := NewLoader(path).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Sandbox.Mode != "read-only" || !settings.Sandbox.NetworkAccess {
+		t.Fatalf("sandbox = %+v", settings.Sandbox)
+	}
+	if len(settings.Sandbox.AllowedEnv) != 1 || settings.Sandbox.AllowedEnv[0] != "EXTRA_TOKEN" {
+		t.Fatalf("allowedEnv = %#v", settings.Sandbox.AllowedEnv)
 	}
 }
 

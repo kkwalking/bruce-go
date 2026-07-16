@@ -19,6 +19,7 @@ import (
 	"bruce-go/internal/approval"
 	"bruce-go/internal/llm"
 	"bruce-go/internal/runtime"
+	"bruce-go/internal/sandbox"
 )
 
 type Executor func(ctx context.Context, args map[string]string) (string, error)
@@ -39,6 +40,7 @@ type Registry struct {
 	hitl          approval.Handler
 	commandGuard  CommandGuard
 	config        runtime.ConcurrencyConfig
+	sandbox       *sandbox.Manager
 }
 
 func NewRegistry(workspaceRoot string) *Registry {
@@ -70,6 +72,11 @@ func (r *Registry) WithHITL(handler approval.Handler) *Registry {
 
 func (r *Registry) WithConcurrency(config runtime.ConcurrencyConfig) *Registry {
 	r.config = config.Normalize()
+	return r
+}
+
+func (r *Registry) WithSandbox(manager *sandbox.Manager) *Registry {
+	r.sandbox = manager
 	return r
 }
 
@@ -197,6 +204,14 @@ func (r *Registry) ExecuteJSON(ctx context.Context, name, argumentsJSON string) 
 }
 
 func (r *Registry) Execute(ctx context.Context, name string, args map[string]string) string {
+	return r.execute(ctx, name, args, nil)
+}
+
+func (r *Registry) ExecuteWithSandboxMode(ctx context.Context, name string, args map[string]string, mode sandbox.Mode) string {
+	return r.execute(ctx, name, args, &mode)
+}
+
+func (r *Registry) execute(ctx context.Context, name string, args map[string]string, modeOverride *sandbox.Mode) string {
 	r.mu.RLock()
 	t, ok := r.tools[name]
 	names := make([]string, 0, len(r.tools))
@@ -208,10 +223,8 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]str
 		sort.Strings(names)
 		return "未知工具: " + name + "，可用工具: " + strings.Join(names, ", ")
 	}
-	if name == "execute_command" {
-		if result := r.commandGuard.Check(args["command"]); !result.Allowed {
-			return "命令被安全策略拒绝: " + result.Reason
-		}
+	if rejected := r.validateToolRequest(name, args, modeOverride); rejected != "" {
+		return rejected
 	}
 	if r.hitl != nil && r.hitl.Enabled() && approval.RequiresApproval(name) {
 		raw, _ := json.Marshal(args)
@@ -231,13 +244,50 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]str
 				return "工具参数解析失败: " + err.Error()
 			}
 			args = modified
+			if rejected := r.validateToolRequest(name, args, modeOverride); rejected != "" {
+				return rejected
+			}
 		}
 	}
-	out, err := t.Exec(ctx, args)
+	var out string
+	var err error
+	if name == "execute_command" && modeOverride != nil {
+		out, err = r.executeCommandWithMode(ctx, args, modeOverride)
+	} else {
+		out, err = t.Exec(ctx, args)
+	}
 	if err != nil {
 		return "工具执行失败: " + err.Error()
 	}
 	return r.config.Truncate(out)
+}
+
+func (r *Registry) validateToolRequest(name string, args map[string]string, modeOverride *sandbox.Mode) string {
+	if name == "execute_command" {
+		if result := r.commandGuard.Check(args["command"]); !result.Allowed {
+			return "命令被安全策略拒绝: " + result.Reason
+		}
+		if r.sandbox != nil {
+			if err := r.sandbox.Preflight(modeOverride); err != nil {
+				return "命令被 sandbox 拒绝: " + err.Error()
+			}
+		}
+	}
+	if name == "write_file" || name == "edit_file" {
+		rel, err := r.relativePath(args["path"])
+		if err != nil {
+			return "工具执行失败: " + err.Error()
+		}
+		if err := rejectGitMetadata(rel); err != nil {
+			return "命令被 sandbox 拒绝: " + err.Error()
+		}
+		if r.sandbox != nil {
+			if err := r.sandbox.CanWriteFile(rel); err != nil {
+				return "命令被 sandbox 拒绝: " + err.Error()
+			}
+		}
+	}
+	return ""
 }
 
 func ParseArguments(raw string) (map[string]string, error) {
@@ -293,11 +343,16 @@ func (r *Registry) RegisterBuiltins() {
 }
 
 func (r *Registry) readFile(_ context.Context, args map[string]string) (string, error) {
-	path, err := r.resolve(args["path"])
+	rel, err := r.relativePath(args["path"])
 	if err != nil {
 		return "", err
 	}
-	data, err := os.ReadFile(path)
+	root, err := os.OpenRoot(r.workspaceRoot)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	data, err := root.ReadFile(rel)
 	if err != nil {
 		return "", err
 	}
@@ -379,36 +434,50 @@ func (r *Registry) readFile(_ context.Context, args map[string]string) (string, 
 }
 
 func (r *Registry) writeFile(_ context.Context, args map[string]string) (string, error) {
-	path, err := r.resolve(args["path"])
+	rel, err := r.relativePath(args["path"])
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := rejectGitMetadata(rel); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, []byte(args["content"]), 0o644); err != nil {
+	root, err := os.OpenRoot(r.workspaceRoot)
+	if err != nil {
 		return "", err
 	}
-	rel, _ := filepath.Rel(r.workspaceRoot, path)
+	defer root.Close()
+	if err := root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
+		return "", err
+	}
+	if err := root.WriteFile(rel, []byte(args["content"]), 0o644); err != nil {
+		return "", err
+	}
 	return "文件已写入: " + rel, nil
 }
 
 func (r *Registry) editFile(_ context.Context, args map[string]string) (string, error) {
-	path, err := r.resolve(args["path"])
+	rel, err := r.relativePath(args["path"])
 	if err != nil {
 		return "", err
 	}
+	if err := rejectGitMetadata(rel); err != nil {
+		return "", err
+	}
+	root, err := os.OpenRoot(r.workspaceRoot)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
 	oldText := args["old_text"]
 	if oldText == "" {
 		return "edit_file 失败: old_text 不能为空，文件未修改", nil
 	}
-	data, err := os.ReadFile(path)
+	data, err := root.ReadFile(rel)
 	if err != nil {
 		return "", err
 	}
 	content := string(data)
 	count := strings.Count(content, oldText)
-	rel, _ := filepath.Rel(r.workspaceRoot, path)
 	if count == 0 {
 		return "edit_file 失败: old_text 未在文件中找到，文件未修改: " + rel, nil
 	}
@@ -416,16 +485,33 @@ func (r *Registry) editFile(_ context.Context, args map[string]string) (string, 
 		return fmt.Sprintf("edit_file 失败: old_text 匹配多处 (%d)，请提供更精确的 old_text，文件未修改: %s", count, rel), nil
 	}
 	updated := strings.Replace(content, oldText, args["new_text"], 1)
-	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
+	if err := root.WriteFile(rel, []byte(updated), 0o644); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("文件已编辑: %s (替换 1 处，%d -> %d 字符)", rel, len(oldText), len(args["new_text"])), nil
 }
 
 func (r *Registry) executeCommand(ctx context.Context, args map[string]string) (string, error) {
+	return r.executeCommandWithMode(ctx, args, nil)
+}
+
+func (r *Registry) executeCommandWithMode(ctx context.Context, args map[string]string, modeOverride *sandbox.Mode) (string, error) {
 	command := strings.TrimSpace(args["command"])
 	if command == "" {
 		return "命令不能为空", nil
+	}
+	if r.sandbox != nil {
+		result, err := r.sandbox.Run(ctx, command, 30*time.Second, r.config.Normalize().MaxOutputChars, modeOverride)
+		if err != nil {
+			return "", err
+		}
+		if result.TimedOut {
+			return "命令执行超时，已终止:\n" + result.Output, nil
+		}
+		if result.Canceled {
+			return "命令执行已取消:\n" + result.Output, nil
+		}
+		return fmt.Sprintf("命令执行完成 (exit code: %d)\n%s", result.ExitCode, result.Output), nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -450,20 +536,33 @@ func (r *Registry) executeCommand(ctx context.Context, args map[string]string) (
 	return fmt.Sprintf("命令执行完成 (exit code: %d)\n%s", exit, out.String()), nil
 }
 
-func (r *Registry) resolve(raw string) (string, error) {
+func (r *Registry) relativePath(raw string) (string, error) {
 	if strings.TrimSpace(raw) == "" {
 		return "", errors.New("路径不能为空")
 	}
-	var path string
+	var rel string
 	if filepath.IsAbs(raw) {
-		path = filepath.Clean(raw)
+		path := filepath.Clean(raw)
+		var err error
+		rel, err = filepath.Rel(r.workspaceRoot, path)
+		if err != nil {
+			return "", err
+		}
 	} else {
-		path = filepath.Clean(filepath.Join(r.workspaceRoot, raw))
+		rel = filepath.Clean(raw)
 	}
-	if path != r.workspaceRoot && !strings.HasPrefix(path, r.workspaceRoot+string(os.PathSeparator)) {
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
 		return "", fmt.Errorf("路径超出工作目录: %s", raw)
 	}
-	return path, nil
+	return rel, nil
+}
+
+func rejectGitMetadata(rel string) error {
+	rel = filepath.Clean(rel)
+	if rel == ".git" || strings.HasPrefix(rel, ".git"+string(os.PathSeparator)) {
+		return errors.New("文件工具禁止直接修改 .git")
+	}
+	return nil
 }
 
 type param struct {
