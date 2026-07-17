@@ -60,8 +60,8 @@ func TestRuntimeHandlesTaskAndSlashCommands(t *testing.T) {
 		t.Fatalf("sandbox full-access mode = %+v", fullAccess)
 	}
 	networkOff = rt.Handle(context.Background(), "/sandbox network off")
-	if networkOff.Err == nil || !strings.Contains(networkOff.Output, "网络始终开启") {
-		t.Fatalf("full-access network off should fail = %+v", networkOff)
+	if networkOff.Err != nil || !strings.Contains(networkOff.Output, "网络始终开启") || !strings.Contains(networkOff.Output, "network=开启 (配置=关闭)") {
+		t.Fatalf("full-access network off should persist configured value = %+v", networkOff)
 	}
 	workspaceWrite := rt.Handle(context.Background(), "/sandbox mode workspace-write")
 	if workspaceWrite.Err != nil || !strings.Contains(workspaceWrite.Output, "network=关闭") {

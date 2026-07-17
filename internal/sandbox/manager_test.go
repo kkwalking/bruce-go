@@ -110,8 +110,11 @@ func TestFullAccessForcesEffectiveNetworkAccess(t *testing.T) {
 	if !manager.Status().NetworkAccess {
 		t.Fatal("full-access should force effective network access")
 	}
-	if err := manager.SetNetworkAccess(false); !errors.Is(err, ErrPolicy) {
-		t.Fatalf("disabling network in full-access should fail: %v", err)
+	manager.SetNetworkAccess(true)
+	manager.SetNetworkAccess(false)
+	status := manager.Status()
+	if !status.NetworkAccess || status.ConfiguredNetworkAccess {
+		t.Fatalf("full-access should keep effective network on while storing configured=off: %+v", status)
 	}
 	if err := manager.SetMode(ModeWorkspaceWrite); err != nil {
 		t.Fatal(err)
@@ -162,6 +165,8 @@ type recordingRunner struct {
 	release chan struct{}
 }
 
+func (r recordingRunner) Name() string { return "recording" }
+
 func (r recordingRunner) Probe(context.Context) Capabilities {
 	return Capabilities{Backend: "recording", Available: true}
 }
@@ -210,6 +215,73 @@ func TestParallelCommandsUseIsolatedTemporaryRoots(t *testing.T) {
 		}
 		if _, statErr := os.Stat(value.root); !os.IsNotExist(statErr) {
 			t.Fatalf("command temp root was not cleaned: %s: %v", value.root, statErr)
+		}
+	}
+}
+
+type countingRunner struct {
+	probes *int
+}
+
+func (r countingRunner) Name() string { return "counting" }
+
+func (r countingRunner) Probe(context.Context) Capabilities {
+	*r.probes++
+	return Capabilities{Backend: "counting", Available: true}
+}
+
+func (r countingRunner) Run(context.Context, CommandSpec, Policy) (RunResult, error) {
+	return RunResult{}, nil
+}
+
+func TestProbeIsLazyInFullAccessMode(t *testing.T) {
+	manager, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: t.TempDir(), Mode: ModeFullAccess})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	probes := 0
+	manager.runner = countingRunner{probes: &probes}
+
+	status := manager.Status()
+	if probes != 0 {
+		t.Fatalf("Status should not trigger probe, probes=%d", probes)
+	}
+	if status.Capabilities.Backend != "counting" || status.Capabilities.Available {
+		t.Fatalf("unprobed status should report runner name and unavailable: %+v", status.Capabilities)
+	}
+	if err := manager.Preflight(nil); err != nil {
+		t.Fatalf("full-access preflight should not need probe: %v", err)
+	}
+	if probes != 0 {
+		t.Fatalf("full-access preflight should not trigger probe, probes=%d", probes)
+	}
+	if err := manager.SetMode(ModeReadOnly); err != nil {
+		t.Fatal(err)
+	}
+	if probes != 1 {
+		t.Fatalf("switching to restricted mode should probe once, probes=%d", probes)
+	}
+	if err := manager.SetMode(ModeWorkspaceWrite); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Preflight(nil); err != nil {
+		t.Fatal(err)
+	}
+	if probes != 1 {
+		t.Fatalf("probe should run at most once, probes=%d", probes)
+	}
+}
+
+func TestIsGitMetadataPath(t *testing.T) {
+	for _, path := range []string{".git", ".GIT", ".Git/config", filepath.Join(".git", "hooks", "pre-commit"), filepath.Join("vendor", "repo", ".GiT", "config")} {
+		if !IsGitMetadataPath(path) {
+			t.Fatalf("IsGitMetadataPath(%q) should be true", path)
+		}
+	}
+	for _, path := range []string{".", "src/main.go", ".gitignore", ".github/workflows/ci.yml", "git/config"} {
+		if IsGitMetadataPath(path) {
+			t.Fatalf("IsGitMetadataPath(%q) should be false", path)
 		}
 	}
 }

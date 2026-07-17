@@ -274,12 +274,12 @@ func (r *Registry) validateToolRequest(name string, args map[string]string, mode
 		}
 	}
 	if name == "write_file" || name == "edit_file" {
-		rel, err := r.relativePath(args["path"])
+		rel, err := r.writeTargetRelativePath(args["path"])
 		if err != nil {
+			if errors.Is(err, sandbox.ErrPolicy) {
+				return "命令被 sandbox 拒绝: " + err.Error()
+			}
 			return "工具执行失败: " + err.Error()
-		}
-		if err := rejectGitMetadata(rel); err != nil {
-			return "命令被 sandbox 拒绝: " + err.Error()
 		}
 		if r.sandbox != nil {
 			if err := r.sandbox.CanWriteFile(rel); err != nil {
@@ -288,6 +288,10 @@ func (r *Registry) validateToolRequest(name string, args map[string]string, mode
 		}
 	}
 	return ""
+}
+
+func (r *Registry) SandboxCanEnforce(mode sandbox.Mode) bool {
+	return r.sandbox != nil && r.sandbox.Preflight(&mode) == nil
 }
 
 func ParseArguments(raw string) (map[string]string, error) {
@@ -434,11 +438,8 @@ func (r *Registry) readFile(_ context.Context, args map[string]string) (string, 
 }
 
 func (r *Registry) writeFile(_ context.Context, args map[string]string) (string, error) {
-	rel, err := r.relativePath(args["path"])
+	rel, err := r.writeTargetRelativePath(args["path"])
 	if err != nil {
-		return "", err
-	}
-	if err := rejectGitMetadata(rel); err != nil {
 		return "", err
 	}
 	root, err := os.OpenRoot(r.workspaceRoot)
@@ -456,11 +457,8 @@ func (r *Registry) writeFile(_ context.Context, args map[string]string) (string,
 }
 
 func (r *Registry) editFile(_ context.Context, args map[string]string) (string, error) {
-	rel, err := r.relativePath(args["path"])
+	rel, err := r.writeTargetRelativePath(args["path"])
 	if err != nil {
-		return "", err
-	}
-	if err := rejectGitMetadata(rel); err != nil {
 		return "", err
 	}
 	root, err := os.OpenRoot(r.workspaceRoot)
@@ -500,8 +498,9 @@ func (r *Registry) executeCommandWithMode(ctx context.Context, args map[string]s
 	if command == "" {
 		return "命令不能为空", nil
 	}
+	config := r.config.Normalize()
 	if r.sandbox != nil {
-		result, err := r.sandbox.Run(ctx, command, 30*time.Second, r.config.Normalize().MaxOutputChars, modeOverride)
+		result, err := r.sandbox.Run(ctx, command, config.CommandTimeout, config.MaxOutputChars, modeOverride)
 		if err != nil {
 			return "", err
 		}
@@ -513,7 +512,7 @@ func (r *Registry) executeCommandWithMode(ctx context.Context, args map[string]s
 		}
 		return fmt.Sprintf("命令执行完成 (exit code: %d)\n%s", result.ExitCode, result.Output), nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, config.CommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", "-lc", command)
 	cmd.Dir = r.workspaceRoot
@@ -558,11 +557,43 @@ func (r *Registry) relativePath(raw string) (string, error) {
 }
 
 func rejectGitMetadata(rel string) error {
-	rel = filepath.Clean(rel)
-	if rel == ".git" || strings.HasPrefix(rel, ".git"+string(os.PathSeparator)) {
-		return errors.New("文件工具禁止直接修改 .git")
+	if sandbox.IsGitMetadataPath(rel) {
+		return fmt.Errorf("%w: 文件工具禁止直接修改 .git", sandbox.ErrPolicy)
 	}
 	return nil
+}
+
+// writeTargetRelativePath 校验写目标：路径必须位于 workspace 内、不得直接命中 .git，
+// 且经符号链接解析后仍不得落入 .git 或逃出 workspace。
+func (r *Registry) writeTargetRelativePath(raw string) (string, error) {
+	rel, err := r.relativePath(raw)
+	if err != nil {
+		return "", err
+	}
+	if err := rejectGitMetadata(rel); err != nil {
+		return "", err
+	}
+	resolved, err := r.resolveWithinWorkspace(rel)
+	if err != nil {
+		return "", err
+	}
+	if err := rejectGitMetadata(resolved); err != nil {
+		return "", err
+	}
+	return rel, nil
+}
+
+func (r *Registry) resolveWithinWorkspace(rel string) (string, error) {
+	rootCanonical := sandbox.CanonicalizeAllowMissing(r.workspaceRoot)
+	targetCanonical := sandbox.CanonicalizeAllowMissing(filepath.Join(rootCanonical, rel))
+	resolved, err := filepath.Rel(rootCanonical, targetCanonical)
+	if err != nil {
+		return "", err
+	}
+	if resolved == ".." || strings.HasPrefix(resolved, ".."+string(os.PathSeparator)) || filepath.IsAbs(resolved) {
+		return "", fmt.Errorf("路径经符号链接解析后超出工作目录: %s", rel)
+	}
+	return resolved, nil
 }
 
 type param struct {

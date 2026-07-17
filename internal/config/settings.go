@@ -21,9 +21,10 @@ type Settings struct {
 }
 
 type SandboxSettings struct {
-	Mode          string   `json:"mode"`
-	NetworkAccess bool     `json:"networkAccess"`
-	AllowedEnv    []string `json:"allowedEnv,omitempty"`
+	Mode                  string   `json:"mode"`
+	NetworkAccess         bool     `json:"networkAccess"`
+	AllowedEnv            []string `json:"allowedEnv,omitempty"`
+	CommandTimeoutSeconds int      `json:"commandTimeoutSeconds,omitempty"`
 }
 
 type LLMSettings struct {
@@ -245,6 +246,9 @@ func validateSandbox(settings SandboxSettings) error {
 		if !environmentNamePattern.MatchString(name) {
 			return fmt.Errorf("sandbox.allowedEnv 包含非法环境变量名: %q", name)
 		}
+	}
+	if settings.CommandTimeoutSeconds < 0 {
+		return fmt.Errorf("sandbox.commandTimeoutSeconds 不能为负数: %d", settings.CommandTimeoutSeconds)
 	}
 	return nil
 }

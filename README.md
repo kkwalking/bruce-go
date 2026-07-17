@@ -72,7 +72,7 @@ go run ./cmd/bruce --no-mcp
 
 `llm.providers` 支持 `deepseek`、`glm` 和 `openai_compatiable`。测试使用 fake/mock，不依赖真实 API key。
 
-`sandbox.mode` 仅允许 `read-only`、`workspace-write`、`full-access`。旧配置没有 `sandbox` 字段时会自动采用 `full-access`，该模式下网络始终开启。`networkAccess` 保存安全模式的网络偏好，因此默认仍为 `false`，切换到 `read-only` 或 `workspace-write` 后恢复禁网。非法 mode 或非法环境变量名会在启动时报错。`allowedEnv` 只接受精确环境变量名，列出的变量会追加到安全环境允许列表中。
+`sandbox.mode` 仅允许 `read-only`、`workspace-write`、`full-access`。旧配置没有 `sandbox` 字段时会自动采用 `full-access`，该模式下网络始终开启。`networkAccess` 保存安全模式的网络偏好，因此默认仍为 `false`，切换到 `read-only` 或 `workspace-write` 后恢复禁网。非法 mode 或非法环境变量名会在启动时报错。`allowedEnv` 只接受精确环境变量名，列出的变量会追加到安全环境允许列表中。`commandTimeoutSeconds` 可选，设置 execute_command 的单命令超时（默认 30 秒，不能为负数）。
 
 Linux 不捆绑 Bubblewrap，也不会自动回退到 Docker。可按发行版安装：
 
@@ -125,7 +125,7 @@ sudo pacman -S bubblewrap
 
 `/sandbox network on` 只整体放开沙箱中 `execute_command` 的 TCP/UDP 网络；Docker、Podman、SSH/GPG Agent 等 Unix Socket 仍被屏蔽。WebSearch、WebFetch、LLM 请求和 MCP 自身不经过该 Shell 沙箱，MCP stdio 进程也不在首版覆盖范围内。workspace 自身被视为任务输入，因此其中的 `.env` 不会自动隐藏。
 
-后端缺失、namespace 被系统禁用或策略构造失败时，默认的 `full-access` 仍可执行 Shell；一旦切换到 `read-only` 或 `workspace-write`，Shell 会 fail closed，且不会自动无沙箱重试。此时可查看 `/sandbox status` 获取失败原因，并显式切回 `/sandbox mode full-access`。`workspace-write` 会拒绝文件系统根、用户 HOME 及其祖先作为 workspace，避免产生过宽写权限。Plan mode 的 Shell 始终强制 `read-only`，即使当前运行时是 `full-access`。
+后端缺失、namespace 被系统禁用或策略构造失败时，默认的 `full-access` 仍可执行 Shell；一旦切换到 `read-only` 或 `workspace-write`，Shell 会 fail closed，且不会自动无沙箱重试。此时可查看 `/sandbox status` 获取失败原因，并显式切回 `/sandbox mode full-access`。`workspace-write` 会拒绝文件系统根、用户 HOME 及其祖先作为 workspace，避免产生过宽写权限。Plan mode 的 Shell 在原生后端可用时强制 `read-only`（即使当前运行时是 `full-access`）；后端不可用且运行时为 `full-access` 时退回纯文本只读白名单校验，保持 plan mode 可用。
 
 故障排查先运行 `/sandbox status` 查看 backend、availability 和失败原因。Linux 常见原因是未安装 `bwrap`、内核禁用 unprivileged user namespace，或运行环境禁止创建 PID/mount namespace；Bruce 不会把这些错误降级成不安全执行。
 

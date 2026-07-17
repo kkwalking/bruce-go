@@ -4,6 +4,8 @@ import "context"
 
 type hostRunner struct{}
 
+func (hostRunner) Name() string { return "none" }
+
 func (hostRunner) Probe(context.Context) Capabilities {
 	return Capabilities{Backend: "none", Available: true}
 }

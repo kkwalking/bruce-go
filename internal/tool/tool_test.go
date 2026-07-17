@@ -181,6 +181,47 @@ func TestFileToolsRejectTraversalSymlinksAndGitMetadata(t *testing.T) {
 	}
 }
 
+func TestFileToolsRejectGitMetadataCaseVariants(t *testing.T) {
+	registry := NewRegistry(t.TempDir())
+	for _, path := range []string{".GIT/config", ".Git/hooks/pre-commit", "sub/.gIt/config"} {
+		out := registry.Execute(context.Background(), "write_file", map[string]string{"path": path, "content": "bad"})
+		if !strings.Contains(out, "禁止直接修改 .git") {
+			t.Fatalf("case variant %q output = %q", path, out)
+		}
+		out = registry.Execute(context.Background(), "edit_file", map[string]string{"path": path, "old_text": "a", "new_text": "b"})
+		if !strings.Contains(out, "禁止直接修改 .git") {
+			t.Fatalf("case variant edit %q output = %q", path, out)
+		}
+	}
+}
+
+func TestFileToolsRejectSymlinkIntoGitMetadata(t *testing.T) {
+	workspace := t.TempDir()
+	hooks := filepath.Join(workspace, ".git", "hooks")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(workspace, ".git"), filepath.Join(workspace, "innocent")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(workspace, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(hooks, filepath.Join(workspace, "nested", "link")); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry(workspace)
+	for _, path := range []string{"innocent/hooks/pre-commit", "nested/link/pre-commit"} {
+		out := registry.Execute(context.Background(), "write_file", map[string]string{"path": path, "content": "#!/bin/sh\necho pwned"})
+		if !strings.Contains(out, "禁止直接修改 .git") {
+			t.Fatalf("symlinked git write %q output = %q", path, out)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(hooks, "pre-commit")); !os.IsNotExist(err) {
+		t.Fatalf("hook file must not exist: %v", err)
+	}
+}
+
 func TestReadOnlySandboxRejectsFileWritesBeforeExecution(t *testing.T) {
 	workspace := t.TempDir()
 	manager, err := sandbox.New(context.Background(), sandbox.Options{Workspace: workspace, HomeDir: t.TempDir(), Mode: sandbox.ModeReadOnly})
