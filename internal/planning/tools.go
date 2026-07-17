@@ -111,7 +111,10 @@ func planExecuteCommand(base *tool.Registry) tool.Executor {
 		if result := CheckReadOnlyCommand(command); !result.Allowed {
 			return "命令被 plan mode 安全策略拒绝: " + result.Reason, nil
 		}
-		return base.ExecuteWithSandboxMode(ctx, "execute_command", map[string]string{"command": command}, sandbox.ModeReadOnly), nil
+		if base.SandboxCanEnforce(sandbox.ModeReadOnly) {
+			return base.ExecuteWithSandboxMode(ctx, "execute_command", map[string]string{"command": command}, sandbox.ModeReadOnly), nil
+		}
+		return base.Execute(ctx, "execute_command", map[string]string{"command": command}), nil
 	}
 }
 

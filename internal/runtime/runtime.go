@@ -77,10 +77,11 @@ type ConcurrencyConfig struct {
 	MaxParallelism int
 	BatchTimeout   time.Duration
 	MaxOutputChars int
+	CommandTimeout time.Duration
 }
 
 func DefaultConcurrency() ConcurrencyConfig {
-	return ConcurrencyConfig{MaxParallelism: 4, BatchTimeout: 30 * time.Second, MaxOutputChars: 8000}
+	return ConcurrencyConfig{MaxParallelism: 4, BatchTimeout: 30 * time.Second, MaxOutputChars: 8000, CommandTimeout: 30 * time.Second}
 }
 
 func (c ConcurrencyConfig) Normalize() ConcurrencyConfig {
@@ -92,6 +93,9 @@ func (c ConcurrencyConfig) Normalize() ConcurrencyConfig {
 	}
 	if c.MaxOutputChars <= 0 {
 		c.MaxOutputChars = DefaultConcurrency().MaxOutputChars
+	}
+	if c.CommandTimeout <= 0 {
+		c.CommandTimeout = DefaultConcurrency().CommandTimeout
 	}
 	return c
 }

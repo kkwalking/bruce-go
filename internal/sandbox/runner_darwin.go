@@ -15,6 +15,8 @@ type seatbeltRunner struct{}
 
 func newPlatformRunner(string) Runner { return seatbeltRunner{} }
 
+func (seatbeltRunner) Name() string { return "seatbelt" }
+
 func (seatbeltRunner) Probe(ctx context.Context) Capabilities {
 	spec := CommandSpec{
 		Directory:      "/",

@@ -130,6 +130,25 @@ func TestLoaderValidatesSandboxSettings(t *testing.T) {
 	if len(settings.Sandbox.AllowedEnv) != 1 || settings.Sandbox.AllowedEnv[0] != "EXTRA_TOKEN" {
 		t.Fatalf("allowedEnv = %#v", settings.Sandbox.AllowedEnv)
 	}
+
+	data = `{"sandbox":{"mode":"read-only","commandTimeoutSeconds":-5}}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewLoader(path).Load(); err == nil {
+		t.Fatal("negative commandTimeoutSeconds should fail")
+	}
+	data = `{"sandbox":{"mode":"read-only","commandTimeoutSeconds":120}}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settings, err = NewLoader(path).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Sandbox.CommandTimeoutSeconds != 120 {
+		t.Fatalf("commandTimeoutSeconds = %d", settings.Sandbox.CommandTimeoutSeconds)
+	}
 }
 
 func TestLoaderReasoningEffortField(t *testing.T) {

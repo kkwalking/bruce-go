@@ -30,6 +30,8 @@ type Manager struct {
 	allowedEnv     []string
 	runner         Runner
 	capabilities   Capabilities
+	probed         bool
+	probeOnce      sync.Once
 	sensitivePaths []string
 	socketPaths    []string
 	git            GitLayout
@@ -90,8 +92,20 @@ func New(ctx context.Context, opts Options) (*Manager, error) {
 		}
 	}
 	m.runner = newPlatformRunner(workspace)
-	m.capabilities = m.runner.Probe(ctx)
+	if mode != ModeFullAccess {
+		m.ensureProbed(ctx)
+	}
 	return m, nil
+}
+
+func (m *Manager) ensureProbed(ctx context.Context) {
+	m.probeOnce.Do(func() {
+		capabilities := m.runner.Probe(ctx)
+		m.mu.Lock()
+		m.capabilities = capabilities
+		m.probed = true
+		m.mu.Unlock()
+	})
 }
 
 func (m *Manager) Close() error {
@@ -107,11 +121,19 @@ func (m *Manager) Status() Status {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	capabilities := m.capabilities
+	if !m.probed {
+		capabilities = Capabilities{Backend: m.runner.Name(), Reason: "backend 尚未探测，首次进入受限模式时探测"}
+	}
 	if m.policyErr != nil && m.mode != ModeFullAccess {
 		capabilities.Available = false
 		capabilities.Reason = m.policyErr.Error()
 	}
-	return Status{Mode: m.mode, NetworkAccess: effectiveNetworkAccess(m.mode, m.networkAccess), Capabilities: capabilities}
+	return Status{
+		Mode:                    m.mode,
+		NetworkAccess:           effectiveNetworkAccess(m.mode, m.networkAccess),
+		ConfiguredNetworkAccess: m.networkAccess,
+		Capabilities:            capabilities,
+	}
 }
 
 func (m *Manager) Mode() Mode {
@@ -123,6 +145,9 @@ func (m *Manager) Mode() Mode {
 func (m *Manager) SetMode(mode Mode) error {
 	if _, err := ParseMode(string(mode)); err != nil {
 		return err
+	}
+	if mode != ModeFullAccess {
+		m.ensureProbed(context.Background())
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -138,19 +163,14 @@ func (m *Manager) SetMode(mode Mode) error {
 	return nil
 }
 
-func (m *Manager) SetNetworkAccess(enabled bool) error {
+func (m *Manager) SetNetworkAccess(enabled bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.mode == ModeFullAccess && !enabled {
-		return fmt.Errorf("%w: full-access 模式下网络始终开启", ErrPolicy)
-	}
 	m.networkAccess = enabled
-	return nil
 }
 
 func (m *Manager) CanWriteFile(relativePath string) error {
-	relativePath = filepath.Clean(relativePath)
-	if relativePath == ".git" || strings.HasPrefix(relativePath, ".git"+string(os.PathSeparator)) {
+	if IsGitMetadataPath(relativePath) {
 		return fmt.Errorf("%w: 文件工具禁止直接修改 .git", ErrPolicy)
 	}
 	if m.Mode() == ModeReadOnly {
@@ -230,13 +250,22 @@ func (m *Manager) newCommandTempRoot() (string, error) {
 }
 
 func (m *Manager) snapshot(modeOverride *Mode) (Mode, bool, Capabilities, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	mode := m.mode
-	if modeOverride != nil {
-		mode = *modeOverride
+	for {
+		m.mu.RLock()
+		mode := m.mode
+		if modeOverride != nil {
+			mode = *modeOverride
+		}
+		network := effectiveNetworkAccess(mode, m.networkAccess)
+		capabilities := m.capabilities
+		probed := m.probed
+		policyErr := m.policyErr
+		m.mu.RUnlock()
+		if mode == ModeFullAccess || probed {
+			return mode, network, capabilities, policyErr
+		}
+		m.ensureProbed(context.Background())
 	}
-	return mode, effectiveNetworkAccess(mode, m.networkAccess), m.capabilities, m.policyErr
 }
 
 func effectiveNetworkAccess(mode Mode, configured bool) bool {

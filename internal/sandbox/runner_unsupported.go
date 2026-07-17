@@ -11,6 +11,8 @@ type unsupportedRunner struct{}
 
 func newPlatformRunner(string) Runner { return unsupportedRunner{} }
 
+func (unsupportedRunner) Name() string { return "unsupported" }
+
 func (unsupportedRunner) Probe(context.Context) Capabilities {
 	return Capabilities{Backend: "unsupported", Reason: "当前平台暂不支持原生 sandbox: " + runtime.GOOS}
 }

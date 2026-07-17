@@ -149,13 +149,3 @@ func ownedDirectory(path string) error {
 	}
 	return nil
 }
-
-func existingPaths(paths []string) []string {
-	out := make([]string, 0, len(paths))
-	for _, path := range paths {
-		if _, err := os.Lstat(path); err == nil {
-			out = append(out, path)
-		}
-	}
-	return out
-}

@@ -65,12 +65,14 @@ type Capabilities struct {
 }
 
 type Status struct {
-	Mode          Mode
-	NetworkAccess bool
-	Capabilities  Capabilities
+	Mode                    Mode
+	NetworkAccess           bool
+	ConfiguredNetworkAccess bool
+	Capabilities            Capabilities
 }
 
 type Runner interface {
+	Name() string
 	Probe(ctx context.Context) Capabilities
 	Run(ctx context.Context, spec CommandSpec, policy Policy) (RunResult, error)
 }

@@ -65,6 +65,8 @@ func validateSystemBubblewrap(path string) error {
 	return nil
 }
 
+func (r bubblewrapRunner) Name() string { return "bubblewrap" }
+
 func (r bubblewrapRunner) Probe(ctx context.Context) Capabilities {
 	if r.path == "" {
 		return Capabilities{Backend: "bubblewrap", Reason: r.reason}

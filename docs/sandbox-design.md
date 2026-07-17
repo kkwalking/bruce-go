@@ -166,7 +166,7 @@ effectiveNetwork = mode == full-access || configuredNetwork
 - 安全模式使用用户配置或 Slash 命令保存的网络偏好。
 - 从 `full-access` 切回安全模式时恢复此前偏好。
 
-`SetNetworkAccess(false)` 在 `full-access` 下直接返回 `ErrPolicy`，避免 UI 显示一个不会生效的关闭状态。`SetNetworkAccess(true)` 可以记录偏好，切回安全模式后继续生效。
+`SetNetworkAccess` 只保存网络偏好：在 `full-access` 下保存 `off` 不会改变有效网络（始终开启），UI 会以 `network=开启 (配置=关闭)` 的形式展示差异，并在切换到安全模式后生效。
 
 ### 6.2 模式切换
 
@@ -195,8 +195,12 @@ sequenceDiagram
     Manager->>Manager: 规范化 workspace/HOME
     Manager->>Manager: 创建 bruce-sandbox-* 临时根
     Manager->>Manager: 发现敏感路径与 Git 布局
-    Manager->>Backend: Probe(ctx)
-    Backend-->>Manager: Capabilities
+    alt 初始 mode 为安全模式
+        Manager->>Backend: Probe(ctx)
+        Backend-->>Manager: Capabilities
+    else 初始 mode 为 full-access
+        Note over Manager,Backend: 懒探测：首次进入安全模式时才 Probe（sync.Once，仅一次）
+    end
     Manager-->>Runtime: 可运行的 Manager
     Note over Runtime,Manager: Probe 失败不阻止 TUI 启动
     Main->>Runtime: Close()

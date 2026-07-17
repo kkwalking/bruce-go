@@ -78,6 +78,9 @@ type modelSwitcher interface {
 
 func New(ctx context.Context, opts Options) (*Runtime, error) {
 	workspace := abs(opts.Workspace)
+	if canonical, err := sandbox.CanonicalAbsolute(workspace); err == nil {
+		workspace = canonical
+	}
 	home := opts.HomeDir
 	if home == "" {
 		var err error
@@ -111,6 +114,9 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 
 	hitl := approval.NewAutoHandler(false, approval.Approve())
 	concurrency := runtime.DefaultConcurrency()
+	if settings.Sandbox.CommandTimeoutSeconds > 0 {
+		concurrency.CommandTimeout = time.Duration(settings.Sandbox.CommandTimeoutSeconds) * time.Second
+	}
 	sandboxMode, err := sandbox.ParseMode(settings.Sandbox.Mode)
 	if err != nil {
 		return nil, err
@@ -396,8 +402,12 @@ func (r *Runtime) handleSandbox(args []string) (string, error) {
 	statusText := func() string {
 		status := r.Sandbox.Status()
 		available := status.Capabilities.Available || status.Mode == sandbox.ModeFullAccess
+		network := onOff(status.NetworkAccess)
+		if status.NetworkAccess != status.ConfiguredNetworkAccess {
+			network += fmt.Sprintf(" (配置=%s)", onOff(status.ConfiguredNetworkAccess))
+		}
 		text := fmt.Sprintf("Sandbox: mode=%s, backend=%s, network=%s, available=%s",
-			status.Mode, status.Capabilities.Backend, onOff(status.NetworkAccess), onOff(available))
+			status.Mode, status.Capabilities.Backend, network, onOff(available))
 		if !available && strings.TrimSpace(status.Capabilities.Reason) != "" {
 			text += "\nReason: " + status.Capabilities.Reason
 		}
@@ -423,10 +433,13 @@ func (r *Runtime) handleSandbox(args []string) (string, error) {
 		if len(args) != 2 || (args[1] != "on" && args[1] != "off") {
 			return "", errors.New("用法: /sandbox network on|off")
 		}
-		if err := r.Sandbox.SetNetworkAccess(args[1] == "on"); err != nil {
-			return "", err
+		enabled := args[1] == "on"
+		r.Sandbox.SetNetworkAccess(enabled)
+		text := statusText()
+		if !enabled && r.Sandbox.Mode() == sandbox.ModeFullAccess {
+			text += "\n注意: full-access 模式下网络始终开启，该设置将在切换到受限模式后生效"
 		}
-		return statusText(), nil
+		return text, nil
 	default:
 		return "", errors.New("用法: /sandbox [status|mode <mode>|network on|off]")
 	}
@@ -616,7 +629,11 @@ func (r *Runtime) handleParallel(args []string) (string, error) {
 	return r.handleToggle(args, "Parallel", r.Parallel, func(v bool) {
 		r.Parallel = v
 		if v {
+			timeout := r.Concurrent.CommandTimeout
 			r.Concurrent = runtime.DefaultConcurrency()
+			if timeout > 0 {
+				r.Concurrent.CommandTimeout = timeout
+			}
 		} else {
 			r.Concurrent.MaxParallelism = 1
 		}
