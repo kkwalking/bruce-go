@@ -4,3 +4,4 @@
 
 ## 开发guideline
 需求开发或者bug修复时先新开分支，然后改动，开发完成之后不要提交，等我审阅
+重大功能更新要更新minor version,修复bug则要更新patch version
