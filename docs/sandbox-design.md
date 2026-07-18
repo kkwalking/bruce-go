@@ -114,7 +114,7 @@ type Capabilities struct {
 }
 ```
 
-能力在 Manager 初始化时探测并缓存。状态栏在 `full-access` 下仍展示探测到的平台后端，但实际命令走 `hostRunner`。
+能力在 Manager 初始化时探测并缓存。`/sandbox status` 和 `/status` 在 `full-access` 下仍展示探测到的平台后端，但实际命令走 `hostRunner`；TUI 底部状态栏只展示当前 mode。
 
 ### 4.5 `Runner`
 
@@ -500,7 +500,7 @@ MCP Manager 使用独立 `transitionMu`、`transitioning` gate 和 generation �
 4. 按新 snapshot 重启已启用 server，重新发现并过滤工具。
 5. Runtime 刷新 Registry、重建 agent prompt，再报告切换结果。
 
-重启失败只影响对应 server：新 sandbox mode 保持生效，旧高权限 transport 不恢复，状态记录稳定 error/blocked 原因。`/mcp`、`/sandbox status`、`/status` 和 TUI 状态栏展示 transport、enforcement、generation、可用/阻止工具数；配置 Header 和环境变量值不进入状态。
+重启失败只影响对应 server：新 sandbox mode 保持生效，旧高权限 transport 不恢复，状态记录稳定 error/blocked 原因。`/mcp`、`/sandbox status` 和 `/status` 展示 transport、enforcement、generation、可用/阻止工具数；配置 Header 和环境变量值不进入状态。TUI 底部状态栏不展示 MCP 状态。
 
 ## 16. Plan mode 设计
 
@@ -540,7 +540,7 @@ Tab 在唯一候选时直接补全，在多个候选时展开选择列表。这�
 
 ### 17.3 状态格式
 
-Sandbox 状态由 `Manager.Status()` 统一生成，包含 mode、generation、有效 network 和 Capabilities。MCP 状态补充 transport、enforcement、generation、可用/阻止工具数和 policy/error。`/mcp`、`/status`、`/sandbox status` 与 TUI 状态栏复用同一语义，既避免网络展示冲突，也不会把 `full-access` 或 trusted remote 误报为原生隔离。
+Sandbox 状态由 `Manager.Status()` 统一生成，包含 mode、generation、有效 network 和 Capabilities。MCP 状态补充 transport、enforcement、generation、可用/阻止工具数和 policy/error。`/mcp`、`/status` 与 `/sandbox status` 复用完整状态语义，既避免网络展示冲突，也不会把 `full-access` 或 trusted remote 误报为原生隔离。TUI 底部状态栏只显示 `sandbox <mode>`，详细 backend、network 和 MCP 信息由上述命令提供。
 
 ## 18. 错误模型
 

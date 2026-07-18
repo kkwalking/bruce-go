@@ -1087,26 +1087,19 @@ func (m *Model) drawStatus(canvas []string, columns, row int) {
 		permission = " HITL off "
 		permissionStyle = warnStyle
 	}
-	details := statusDetails(status, m.elapsedMillis)
+	details := statusDetails(status, m.runtime.HomeDir, m.elapsedMillis)
 	left := permissionStyle.Render(permission)
 	remaining := max(0, columns-runewidth.StringWidth(permission))
 	setRow(canvas, row, columns, left+dimStyle.Render(fit(details, remaining)))
 }
 
-func statusDetails(status bruntime.Status, elapsedMillis int64) string {
+func statusDetails(status bruntime.Status, homeDir string, elapsedMillis int64) string {
 	details := fmt.Sprintf(" bruce · %s · mode %s · %s",
 		empty(status.Model, "auto"),
 		strings.ToLower(string(status.Mode)),
-		compactPath(status.WorkspaceRoot),
+		compactPath(status.WorkspaceRoot, homeDir),
 	)
-	network := "no-net"
-	if status.SandboxNetwork {
-		network = "net"
-	}
-	details += fmt.Sprintf(" · sandbox %s/%s/%s", status.SandboxBackend, status.SandboxMode, network)
-	if status.MCPState != "" {
-		details += " · mcp " + status.MCPState
-	}
+	details += " · sandbox " + empty(status.SandboxMode, "unknown")
 	if elapsedMillis > 0 {
 		details += fmt.Sprintf(" · %dms", elapsedMillis)
 	}
@@ -1322,7 +1315,7 @@ func welcomeLines(rt *integrated.Runtime) []string {
 	workspace := ""
 	if rt != nil {
 		model = empty(rt.Client.ModelName(), "auto")
-		workspace = compactPath(rt.Workspace)
+		workspace = compactPath(rt.Workspace, rt.HomeDir)
 	}
 	// title is ASCII-only so runewidth.StringWidth matches terminal cell width;
 	// box-drawing runes like ─ are mis-measured by runewidth (counted as 2,
@@ -1409,15 +1402,26 @@ func builtinToolSummary(name, rawArgs string) string {
 	return strings.TrimSpace(value)
 }
 
-func compactPath(path string) string {
+func compactPath(path, homeDir string) string {
 	if path == "" {
 		return ""
 	}
-	base := filepath.Base(path)
-	if base == "." || base == string(filepath.Separator) {
+	path = filepath.Clean(path)
+	if homeDir == "" {
 		return path
 	}
-	return "~/" + base
+	homeDir = filepath.Clean(homeDir)
+	relative, err := filepath.Rel(homeDir, path)
+	if err != nil || filepath.IsAbs(relative) {
+		return path
+	}
+	if relative == "." {
+		return "~"
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return path
+	}
+	return "~/" + filepath.ToSlash(relative)
 }
 
 func wrap(text string, width int) []string {

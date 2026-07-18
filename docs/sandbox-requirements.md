@@ -222,7 +222,7 @@ Bruce 的 Shell、内置文件工具和 MCP 工具能够直接或间接读写本
 
 ### FR-010 状态展示
 
-`/sandbox status`、`/status` 和 TUI 状态栏必须展示：
+`/sandbox status` 和 `/status` 必须展示：
 
 - 当前模式。
 - 探测到的平台后端。
@@ -231,7 +231,9 @@ Bruce 的 Shell、内置文件工具和 MCP 工具能够直接或间接读写本
 - 后端不可用或探测失败的原因。
 - MCP transport、原生隔离/可信远端/未隔离状态、policy generation 和 blocked 摘要。
 
-`full-access` 下展示的平台后端仅代表探测结果，不代表当前命令经过该后端。
+TUI 底部状态栏只展示当前 sandbox mode，不展示平台后端、网络或 MCP 状态；详细信息通过 `/sandbox status`、`/status` 和 `/mcp` 查询。
+
+`full-access` 下状态命令展示的平台后端仅代表探测结果，不代表当前命令经过该后端。
 
 ## 10. 后端与执行需求
 

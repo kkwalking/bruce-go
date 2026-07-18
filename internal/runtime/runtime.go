@@ -128,7 +128,6 @@ type Status struct {
 	WebEnabled        bool
 	WebSearchProvider string
 	MCPSummary        string
-	MCPState          string
 	HITLEnabled       bool
 	SandboxMode       string
 	SandboxBackend    string

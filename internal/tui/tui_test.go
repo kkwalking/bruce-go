@@ -123,23 +123,63 @@ func TestLayoutKeepsInputAndStatusDockedAtBottom(t *testing.T) {
 	}
 }
 
-func TestStatusDetailsShowsMCPEnforcement(t *testing.T) {
+func TestStatusDetailsShowsCompactSandboxWithoutMCP(t *testing.T) {
 	details := statusDetails(bruntime.Status{
 		Mode:           bruntime.ModeReact,
 		Model:          "test-model",
-		WorkspaceRoot:  "/workspace",
+		WorkspaceRoot:  "/home/test/code/bruce-cli",
 		SandboxBackend: "seatbelt",
-		SandboxMode:    "read-only",
-		MCPState:       "local=seatbelt/read-only,remote=trusted-remote",
-	}, 12)
+		SandboxMode:    "full-access",
+		SandboxNetwork: true,
+	}, "/home/test", 12)
 	for _, expected := range []string{
-		"sandbox seatbelt/read-only/no-net",
-		"mcp local=seatbelt/read-only,remote=trusted-remote",
+		"~/code/bruce-cli",
+		"sandbox full-access",
 		"12ms",
 	} {
 		if !strings.Contains(details, expected) {
 			t.Fatalf("status details missing %q: %s", expected, details)
 		}
+	}
+	for _, unexpected := range []string{"seatbelt", "net", "mcp"} {
+		if strings.Contains(details, unexpected) {
+			t.Fatalf("status details unexpectedly contains %q: %s", unexpected, details)
+		}
+	}
+}
+
+func TestStatusDetailsShowsEachSandboxMode(t *testing.T) {
+	for _, mode := range []string{"read-only", "workspace-write", "full-access"} {
+		details := statusDetails(bruntime.Status{SandboxMode: mode}, "", 0)
+		if !strings.Contains(details, "sandbox "+mode) {
+			t.Fatalf("status details missing sandbox mode %q: %s", mode, details)
+		}
+		if strings.Contains(details, "net") {
+			t.Fatalf("status details unexpectedly contains network state for %q: %s", mode, details)
+		}
+	}
+}
+
+func TestCompactPathRelativeToHome(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		homeDir string
+		want    string
+	}{
+		{name: "empty", homeDir: "/home/test", want: ""},
+		{name: "home", path: "/home/test", homeDir: "/home/test", want: "~"},
+		{name: "nested", path: "/home/test/code/bruce-cli", homeDir: "/home/test", want: "~/code/bruce-cli"},
+		{name: "outside home", path: "/opt/bruce-cli", homeDir: "/home/test", want: "/opt/bruce-cli"},
+		{name: "similar prefix", path: "/home/test-other/bruce-cli", homeDir: "/home/test", want: "/home/test-other/bruce-cli"},
+		{name: "missing home", path: "/home/test/code/bruce-cli", want: "/home/test/code/bruce-cli"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := compactPath(tt.path, tt.homeDir); got != tt.want {
+				t.Fatalf("compactPath(%q, %q) = %q, want %q", tt.path, tt.homeDir, got, tt.want)
+			}
+		})
 	}
 }
 

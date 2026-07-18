@@ -387,7 +387,6 @@ func (r *Runtime) Status() runtime.Status {
 		WebEnabled:        r.Web != nil && r.Web.Enabled,
 		WebSearchProvider: strings.TrimSpace(r.Settings.WebSearch.Provider),
 		MCPSummary:        mcpSummary,
-		MCPState:          compactMCPState(mcpStatuses),
 		HITLEnabled:       r.HITL.Enabled(),
 		SandboxMode:       string(sandboxStatus.Mode),
 		SandboxBackend:    sandboxStatus.Capabilities.Backend,
@@ -402,24 +401,6 @@ func (r *Runtime) Status() runtime.Status {
 		ToolNames:         toolNames,
 		ActivePlan:        r.currentPlanState(),
 	}
-}
-
-func compactMCPState(statuses []mcp.ServerStatus) string {
-	parts := make([]string, 0, len(statuses))
-	for _, status := range statuses {
-		if !status.Enabled {
-			continue
-		}
-		state := status.Enforcement
-		if !status.Ready || status.BlockedReason != "" || status.Error != "" {
-			state = "blocked"
-		}
-		if state == "" {
-			state = "unknown"
-		}
-		parts = append(parts, status.Name+"="+state)
-	}
-	return strings.Join(parts, ",")
 }
 
 func (r *Runtime) handleSandbox(ctx context.Context, args []string) (string, error) {
