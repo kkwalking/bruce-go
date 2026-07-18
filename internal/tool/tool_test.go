@@ -236,6 +236,97 @@ func TestReadOnlySandboxRejectsFileWritesBeforeExecution(t *testing.T) {
 	}
 }
 
+func TestSandboxPolicyHidesAndRejectsUnknownToolBeforeHITL(t *testing.T) {
+	workspace := t.TempDir()
+	manager, err := sandbox.New(context.Background(), sandbox.Options{Workspace: workspace, HomeDir: t.TempDir(), Mode: sandbox.ModeReadOnly})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	var executed atomic.Int32
+	hitl := &countingApprovalHandler{}
+	registry := EmptyRegistry(workspace).WithSandbox(manager).WithHITL(hitl)
+	registry.Register(Tool{
+		Name:          "extension_write",
+		Description:   "unclassified extension",
+		Parameters:    mustSchema(t, `{"type":"object","properties":{}}`),
+		PromptSnippet: "must stay hidden",
+		Exec: func(context.Context, map[string]string) (string, error) {
+			executed.Add(1)
+			return "bad", nil
+		},
+	})
+	if defs := registry.Definitions(); len(defs) != 0 {
+		t.Fatalf("definitions = %+v", defs)
+	}
+	if prompt := registry.BuildPrompt(); strings.Contains(prompt, "extension_write") {
+		t.Fatalf("hidden tool leaked into prompt: %s", prompt)
+	}
+	out := registry.Execute(context.Background(), "extension_write", nil)
+	if !strings.Contains(out, "需要=full-access") {
+		t.Fatalf("policy output = %q", out)
+	}
+	if got := executed.Load(); got != 0 {
+		t.Fatalf("executor calls = %d", got)
+	}
+	if got := hitl.requests.Load(); got != 0 {
+		t.Fatalf("HITL requests = %d", got)
+	}
+}
+
+func TestSandboxPolicyAllowsWorkspaceToolAndRevalidatesGeneration(t *testing.T) {
+	workspace := t.TempDir()
+	manager, err := sandbox.New(context.Background(), sandbox.Options{Workspace: workspace, HomeDir: t.TempDir(), Mode: sandbox.ModeWorkspaceWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	var executed atomic.Int32
+	hitl := &modeChangingApprovalHandler{manager: manager}
+	registry := EmptyRegistry(workspace).WithSandbox(manager).WithHITL(hitl)
+	registry.Register(Tool{
+		Name:        "mcp_write",
+		Description: "workspace writer",
+		Parameters:  mustSchema(t, `{"type":"object","properties":{}}`),
+		Policy:      Policy{Source: SourceMCP, MinimumMode: sandbox.ModeWorkspaceWrite},
+		Exec: func(context.Context, map[string]string) (string, error) {
+			executed.Add(1)
+			return "bad", nil
+		},
+	})
+	out := registry.Execute(context.Background(), "mcp_write", nil)
+	if !strings.Contains(out, "read-only 模式") {
+		t.Fatalf("generation revalidation output = %q", out)
+	}
+	if got := executed.Load(); got != 0 {
+		t.Fatalf("executor calls = %d", got)
+	}
+}
+
+type countingApprovalHandler struct {
+	requests atomic.Int32
+}
+
+func (*countingApprovalHandler) Enabled() bool     { return true }
+func (*countingApprovalHandler) SetEnabled(bool)   {}
+func (*countingApprovalHandler) ClearApprovedAll() {}
+func (h *countingApprovalHandler) Request(approval.Request) approval.Result {
+	h.requests.Add(1)
+	return approval.Approve()
+}
+
+type modeChangingApprovalHandler struct {
+	manager *sandbox.Manager
+}
+
+func (*modeChangingApprovalHandler) Enabled() bool     { return true }
+func (*modeChangingApprovalHandler) SetEnabled(bool)   {}
+func (*modeChangingApprovalHandler) ClearApprovedAll() {}
+func (h *modeChangingApprovalHandler) Request(approval.Request) approval.Result {
+	_ = h.manager.SetMode(sandbox.ModeReadOnly)
+	return approval.Approve()
+}
+
 func TestParallelToolCallExecutor(t *testing.T) {
 	registry := EmptyRegistry(t.TempDir())
 	var running int32

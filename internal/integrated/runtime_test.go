@@ -2,6 +2,7 @@ package integrated
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,9 +10,12 @@ import (
 	"testing"
 
 	"bruce-go/internal/agent"
+	"bruce-go/internal/config"
 	"bruce-go/internal/event"
 	"bruce-go/internal/llm"
+	"bruce-go/internal/mcp"
 	bruntime "bruce-go/internal/runtime"
+	"bruce-go/internal/sandbox"
 	"bruce-go/internal/web"
 )
 
@@ -86,6 +90,96 @@ func TestRuntimeHandlesTaskAndSlashCommands(t *testing.T) {
 	if rt.Session.Context(rt.Mode).MessageCount != 0 {
 		t.Fatalf("new session message count = %d", rt.Session.Context(rt.Mode).MessageCount)
 	}
+}
+
+func TestRuntimeSandboxTransitionRefreshesMCPToolsAndSafeStatus(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	settingsPath := filepath.Join(t.TempDir(), "setting.json")
+	settings := config.DefaultSettings()
+	settings.MCP.Servers["demo"] = config.MCPServerSetting{
+		Type:    "stdio",
+		Command: "fake",
+		Env:     map[string]string{"MCP_SECRET": "should-not-render"},
+		Headers: map[string]string{"Authorization": "Bearer should-not-render"},
+		ToolAccess: map[string]string{
+			"read":  "read-only",
+			"write": "workspace-write",
+		},
+	}
+	if err := config.NewLoader(settingsPath).Save(settings); err != nil {
+		t.Fatal(err)
+	}
+	rt, err := New(context.Background(), Options{
+		Workspace: workspace, HomeDir: home, SettingsPath: settingsPath, Client: &agent.FakeClient{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupRuntime(t, rt)
+	if err := rt.Sandbox.ValidateMode(sandbox.ModeReadOnly); err != nil {
+		t.Skipf("sandbox backend unavailable: %v", err)
+	}
+	rt.MCP.WithFactory(func(context.Context, string, config.MCPServerSetting, string) (mcp.Transport, error) {
+		return runtimePolicyTransport{}, nil
+	})
+	if err := rt.MCP.Enable(context.Background(), "demo"); err != nil {
+		t.Fatal(err)
+	}
+	rt.refreshMCPTools()
+	if !containsTool(rt.Tools.ToolNames(), "mcp_demo_write") || !containsTool(rt.Tools.ToolNames(), "mcp_demo_hinted") {
+		t.Fatalf("full-access MCP tools = %v", rt.Tools.ToolNames())
+	}
+
+	result := rt.Handle(context.Background(), "/sandbox mode read-only")
+	if result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	names := rt.Tools.ToolNames()
+	if !containsTool(names, "mcp_demo_read") || containsTool(names, "mcp_demo_write") || containsTool(names, "mcp_demo_hinted") {
+		t.Fatalf("read-only MCP tools = %v", names)
+	}
+	for _, output := range []string{
+		result.Output,
+		rt.Handle(context.Background(), "/mcp").Output,
+		rt.Handle(context.Background(), "/status").Output,
+	} {
+		if !strings.Contains(output, "tools=1") || !strings.Contains(output, "blocked=2") || !strings.Contains(output, "generation=") {
+			t.Fatalf("MCP policy diagnostics missing:\n%s", output)
+		}
+		if strings.Contains(output, "should-not-render") || strings.Contains(output, "Authorization") || strings.Contains(output, "MCP_SECRET") {
+			t.Fatalf("MCP status leaked configuration secret:\n%s", output)
+		}
+	}
+}
+
+type runtimePolicyTransport struct{}
+
+func (runtimePolicyTransport) Call(_ context.Context, method string, _ any) (json.RawMessage, error) {
+	switch method {
+	case "initialize":
+		return json.RawMessage(`{}`), nil
+	case "tools/list":
+		return json.RawMessage(`{"tools":[
+			{"name":"read","description":"read","inputSchema":{"type":"object"}},
+			{"name":"write","description":"write","inputSchema":{"type":"object"}},
+			{"name":"hinted","description":"hint only","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":true}}
+		]}`), nil
+	default:
+		return json.RawMessage(`{}`), nil
+	}
+}
+
+func (runtimePolicyTransport) Close() error   { return nil }
+func (runtimePolicyTransport) Logs() []string { return nil }
+
+func containsTool(names []string, expected string) bool {
+	for _, name := range names {
+		if name == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRuntimeWebCommandUsesFakeSearcher(t *testing.T) {

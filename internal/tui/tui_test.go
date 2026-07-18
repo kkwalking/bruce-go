@@ -123,6 +123,26 @@ func TestLayoutKeepsInputAndStatusDockedAtBottom(t *testing.T) {
 	}
 }
 
+func TestStatusDetailsShowsMCPEnforcement(t *testing.T) {
+	details := statusDetails(bruntime.Status{
+		Mode:           bruntime.ModeReact,
+		Model:          "test-model",
+		WorkspaceRoot:  "/workspace",
+		SandboxBackend: "seatbelt",
+		SandboxMode:    "read-only",
+		MCPState:       "local=seatbelt/read-only,remote=trusted-remote",
+	}, 12)
+	for _, expected := range []string{
+		"sandbox seatbelt/read-only/no-net",
+		"mcp local=seatbelt/read-only,remote=trusted-remote",
+		"12ms",
+	} {
+		if !strings.Contains(details, expected) {
+			t.Fatalf("status details missing %q: %s", expected, details)
+		}
+	}
+}
+
 func TestLayoutExpandsInputRowsUpward(t *testing.T) {
 	layout := layoutFor(24, 3)
 	if layout.messageRows != 17 || layout.indexStatusRow != 17 || layout.inputTop != 18 || layout.inputLine != 19 || layout.inputBottom != 22 || layout.inputRows != 3 || layout.statusRow != 23 {

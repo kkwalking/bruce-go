@@ -106,7 +106,35 @@ func (r bubblewrapRunner) Run(ctx context.Context, spec CommandSpec, policy Poli
 	return result, nil
 }
 
+func (r bubblewrapRunner) PrepareProcess(spec ProcessSpec, policy Policy) (PreparedProcess, error) {
+	if r.path == "" {
+		return PreparedProcess{}, fmt.Errorf("%w: %s", ErrUnavailable, r.reason)
+	}
+	if strings.TrimSpace(spec.Program) == "" {
+		return PreparedProcess{}, fmt.Errorf("%w: program 不能为空", ErrPolicy)
+	}
+	args, err := buildBubblewrapProcessArgs(spec, policy)
+	if err != nil {
+		return PreparedProcess{}, err
+	}
+	return PreparedProcess{
+		Program:     r.path,
+		Args:        args,
+		Directory:   spec.Directory,
+		Environment: append([]string(nil), spec.Environment...),
+	}, nil
+}
+
 func buildBubblewrapArgs(spec CommandSpec, policy Policy) ([]string, error) {
+	return buildBubblewrapProcessArgs(ProcessSpec{
+		Program:     "/bin/bash",
+		Args:        []string{"--noprofile", "--norc", "-c", spec.Command},
+		Directory:   spec.Directory,
+		Environment: spec.Environment,
+	}, policy)
+}
+
+func buildBubblewrapProcessArgs(spec ProcessSpec, policy Policy) ([]string, error) {
 	args := []string{
 		"--die-with-parent", "--new-session", "--unshare-user", "--unshare-pid",
 		"--unshare-ipc", "--unshare-uts",
@@ -161,6 +189,7 @@ func buildBubblewrapArgs(spec CommandSpec, policy Policy) ([]string, error) {
 			args = append(args, "--setenv", name, value)
 		}
 	}
-	args = append(args, "--chdir", spec.Directory, "--", "/bin/bash", "--noprofile", "--norc", "-c", spec.Command)
+	args = append(args, "--chdir", spec.Directory, "--", spec.Program)
+	args = append(args, spec.Args...)
 	return args, nil
 }

@@ -74,13 +74,14 @@ type MCPSettings struct {
 }
 
 type MCPServerSetting struct {
-	Type     string            `json:"type"`
-	Command  string            `json:"command"`
-	Args     []string          `json:"args"`
-	Env      map[string]string `json:"env"`
-	URL      string            `json:"url"`
-	Headers  map[string]string `json:"headers"`
-	Disabled bool              `json:"disabled"`
+	Type       string            `json:"type"`
+	Command    string            `json:"command"`
+	Args       []string          `json:"args"`
+	Env        map[string]string `json:"env"`
+	URL        string            `json:"url"`
+	Headers    map[string]string `json:"headers"`
+	Disabled   bool              `json:"disabled"`
+	ToolAccess map[string]string `json:"toolAccess,omitempty"`
 }
 
 type Compaction struct {
@@ -161,6 +162,9 @@ func (l Loader) Load() (Settings, error) {
 	if err := validateSandbox(settings.Sandbox); err != nil {
 		return settings, err
 	}
+	if err := validateAndNormalizeMCP(&settings.MCP); err != nil {
+		return settings, err
+	}
 	return settings, nil
 }
 
@@ -170,6 +174,9 @@ func (l Loader) Save(settings Settings) error {
 	}
 	normalize(&settings)
 	if err := validateSandbox(settings.Sandbox); err != nil {
+		return err
+	}
+	if err := validateAndNormalizeMCP(&settings.MCP); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(l.Path), 0o755); err != nil {
@@ -265,4 +272,51 @@ func normalizeAllowedEnv(values []string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+func validateAndNormalizeMCP(settings *MCPSettings) error {
+	if settings == nil {
+		return nil
+	}
+	for serverName, server := range settings.Servers {
+		normalized := make(map[string]string, len(server.ToolAccess))
+		for rawName, rawAccess := range server.ToolAccess {
+			name := strings.TrimSpace(rawName)
+			access := strings.TrimSpace(rawAccess)
+			if name == "" {
+				return fmt.Errorf("mcp.servers.%s.toolAccess 包含空工具名", serverName)
+			}
+			if strings.ContainsAny(name, "*?[]") {
+				return fmt.Errorf("mcp.servers.%s.toolAccess 不支持通配符工具名: %q", serverName, rawName)
+			}
+			if _, exists := normalized[name]; exists {
+				return fmt.Errorf("mcp.servers.%s.toolAccess 工具名去除空白后重复: %q", serverName, name)
+			}
+			switch access {
+			case "read-only", "workspace-write", "full-access":
+			default:
+				return fmt.Errorf("mcp.servers.%s.toolAccess[%q] 无效: %q（允许 read-only、workspace-write、full-access）", serverName, name, rawAccess)
+			}
+			if isHTTPMCPType(server.Type) && access == "workspace-write" {
+				return fmt.Errorf("mcp.servers.%s.toolAccess[%q] 不能设为 workspace-write：HTTP MCP 无法强制 workspace 文件边界", serverName, name)
+			}
+			normalized[name] = access
+		}
+		if len(normalized) == 0 {
+			server.ToolAccess = nil
+		} else {
+			server.ToolAccess = normalized
+		}
+		settings.Servers[serverName] = server
+	}
+	return nil
+}
+
+func isHTTPMCPType(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "http", "streamable_http", "streamable-http", "streamablehttp":
+		return true
+	default:
+		return false
+	}
 }

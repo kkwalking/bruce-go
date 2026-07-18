@@ -136,7 +136,7 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	web.RegisterTools(registry, webManager)
 	skills := skill.NewCatalog(home, workspace)
 	skill.RegisterTools(registry, skills)
-	mcpManager := mcp.NewManager(settings.MCP, workspace)
+	mcpManager := mcp.NewManager(settings.MCP, workspace).WithSandbox(sandboxManager)
 
 	store, err := session.CreateNew(home, workspace, runtime.ModeReact)
 	if err != nil {
@@ -172,10 +172,17 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 }
 
 func (r *Runtime) Close() error {
-	if r == nil || r.Sandbox == nil {
+	if r == nil {
 		return nil
 	}
-	return r.Sandbox.Close()
+	var errs []error
+	if r.MCP != nil {
+		errs = append(errs, r.MCP.Close())
+	}
+	if r.Sandbox != nil {
+		errs = append(errs, r.Sandbox.Close())
+	}
+	return errors.Join(errs...)
 }
 
 func (r *Runtime) Start(ctx context.Context) {
@@ -312,7 +319,7 @@ func (r *Runtime) HandleCommand(ctx context.Context, command cli.Command) cli.Re
 	case "hitl":
 		result.Output, result.Err = r.handleToggle(command.Args, "HITL", r.HITL.Enabled(), func(v bool) { r.HITL.SetEnabled(v) })
 	case "sandbox":
-		result.Output, result.Err = r.handleSandbox(command.Args)
+		result.Output, result.Err = r.handleSandbox(ctx, command.Args)
 	case "parallel":
 		result.Output, result.Err = r.handleParallel(command.Args)
 	case "status":
@@ -368,7 +375,8 @@ func (r *Runtime) HandleCommand(ctx context.Context, command cli.Command) cli.Re
 func (r *Runtime) Status() runtime.Status {
 	toolNames := r.Tools.ToolNames()
 	sort.Strings(toolNames)
-	mcpSummary := render.MCP(r.MCP.Status())
+	mcpStatuses := r.MCP.Status()
+	mcpSummary := render.MCP(mcpStatuses)
 	sandboxStatus := r.Sandbox.Status()
 	return runtime.Status{
 		Mode:              r.Mode,
@@ -379,6 +387,7 @@ func (r *Runtime) Status() runtime.Status {
 		WebEnabled:        r.Web != nil && r.Web.Enabled,
 		WebSearchProvider: strings.TrimSpace(r.Settings.WebSearch.Provider),
 		MCPSummary:        mcpSummary,
+		MCPState:          compactMCPState(mcpStatuses),
 		HITLEnabled:       r.HITL.Enabled(),
 		SandboxMode:       string(sandboxStatus.Mode),
 		SandboxBackend:    sandboxStatus.Capabilities.Backend,
@@ -395,7 +404,25 @@ func (r *Runtime) Status() runtime.Status {
 	}
 }
 
-func (r *Runtime) handleSandbox(args []string) (string, error) {
+func compactMCPState(statuses []mcp.ServerStatus) string {
+	parts := make([]string, 0, len(statuses))
+	for _, status := range statuses {
+		if !status.Enabled {
+			continue
+		}
+		state := status.Enforcement
+		if !status.Ready || status.BlockedReason != "" || status.Error != "" {
+			state = "blocked"
+		}
+		if state == "" {
+			state = "unknown"
+		}
+		parts = append(parts, status.Name+"="+state)
+	}
+	return strings.Join(parts, ",")
+}
+
+func (r *Runtime) handleSandbox(ctx context.Context, args []string) (string, error) {
 	if r.Sandbox == nil {
 		return "", errors.New("sandbox 未初始化")
 	}
@@ -411,6 +438,9 @@ func (r *Runtime) handleSandbox(args []string) (string, error) {
 		if !available && strings.TrimSpace(status.Capabilities.Reason) != "" {
 			text += "\nReason: " + status.Capabilities.Reason
 		}
+		if r.MCP != nil {
+			text += "\nMCP:\n" + render.MCP(r.MCP.Status())
+		}
 		return text
 	}
 	if len(args) == 0 || args[0] == "status" {
@@ -425,16 +455,30 @@ func (r *Runtime) handleSandbox(args []string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if err := r.Sandbox.SetMode(mode); err != nil {
+		if err := r.Sandbox.ValidateMode(mode); err != nil {
 			return "", err
 		}
+		if err := r.MCP.Reconfigure(ctx, func() error {
+			return r.Sandbox.SetMode(mode)
+		}); err != nil {
+			return "", err
+		}
+		r.refreshMCPTools()
+		r.rebuildAgents()
 		return statusText(), nil
 	case "network":
 		if len(args) != 2 || (args[1] != "on" && args[1] != "off") {
 			return "", errors.New("用法: /sandbox network on|off")
 		}
 		enabled := args[1] == "on"
-		r.Sandbox.SetNetworkAccess(enabled)
+		if err := r.MCP.Reconfigure(ctx, func() error {
+			r.Sandbox.SetNetworkAccess(enabled)
+			return nil
+		}); err != nil {
+			return "", err
+		}
+		r.refreshMCPTools()
+		r.rebuildAgents()
 		text := statusText()
 		if !enabled && r.Sandbox.Mode() == sandbox.ModeFullAccess {
 			text += "\n注意: full-access 模式下网络始终开启，该设置将在切换到受限模式后生效"

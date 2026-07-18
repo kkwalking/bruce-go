@@ -24,6 +24,23 @@ import (
 
 type Executor func(ctx context.Context, args map[string]string) (string, error)
 
+type Source string
+
+const (
+	SourceBuiltin Source = "builtin"
+	SourceWeb     Source = "web"
+	SourceSkill   Source = "skill"
+	SourcePlan    Source = "plan"
+	SourceMCP     Source = "mcp"
+	SourceUnknown Source = "unknown"
+)
+
+type Policy struct {
+	Source          Source
+	MinimumMode     sandbox.Mode
+	RequiresNetwork bool
+}
+
 type Tool struct {
 	Name             string
 	Description      string
@@ -31,6 +48,7 @@ type Tool struct {
 	Exec             Executor
 	PromptSnippet    string
 	PromptGuidelines []string
+	Policy           Policy
 }
 
 type Registry struct {
@@ -112,29 +130,27 @@ func (r *Registry) Lookup(name string) (Tool, bool) {
 }
 
 func (r *Registry) Definitions() []llm.ToolDefinition {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	defs := make([]llm.ToolDefinition, 0, len(r.tools))
-	for _, t := range r.sortedToolsLocked() {
+	tools := r.availableTools(nil)
+	defs := make([]llm.ToolDefinition, 0, len(tools))
+	for _, t := range tools {
 		defs = append(defs, llm.ToolDefinition{Name: t.Name, Description: t.Description, Parameters: t.Parameters})
 	}
 	return defs
 }
 
 func (r *Registry) BuildPrompt() string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	tools := r.availableTools(nil)
 	var b strings.Builder
 	b.WriteString("Available tools:\n")
-	if len(r.tools) == 0 {
+	if len(tools) == 0 {
 		b.WriteString("(none)\n")
 	}
-	for _, t := range r.sortedToolsLocked() {
+	for _, t := range tools {
 		if strings.TrimSpace(t.PromptSnippet) != "" {
 			b.WriteString("- " + t.Name + ": " + t.PromptSnippet + "\n")
 		}
 	}
-	guidelines := r.defaultGuidelinesLocked()
+	guidelines := defaultGuidelines(tools)
 	if len(guidelines) > 0 {
 		b.WriteString("\nGuidelines:\n")
 		for _, guideline := range guidelines {
@@ -157,8 +173,25 @@ func (r *Registry) sortedToolsLocked() []Tool {
 	return tools
 }
 
-func (r *Registry) defaultGuidelinesLocked() []string {
+func (r *Registry) availableTools(modeOverride *sandbox.Mode) []Tool {
+	r.mu.RLock()
+	tools := append([]Tool(nil), r.sortedToolsLocked()...)
+	r.mu.RUnlock()
+	available := tools[:0]
+	for _, candidate := range tools {
+		if _, rejected := r.validateToolPolicy(candidate, modeOverride); rejected == "" {
+			available = append(available, candidate)
+		}
+	}
+	return available
+}
+
+func defaultGuidelines(tools []Tool) []string {
 	seen := map[string]bool{}
+	byName := make(map[string]Tool, len(tools))
+	for _, candidate := range tools {
+		byName[candidate.Name] = candidate
+	}
 	var guidelines []string
 	add := func(text string) {
 		text = strings.TrimSpace(text)
@@ -168,26 +201,26 @@ func (r *Registry) defaultGuidelinesLocked() []string {
 		seen[text] = true
 		guidelines = append(guidelines, text)
 	}
-	if _, ok := r.tools["execute_command"]; ok {
+	if _, ok := byName["execute_command"]; ok {
 		add("本地目录浏览、文件发现和全文搜索优先使用 execute_command 运行 ls、rg --files、rg <pattern> 或 find。")
 		add("构建、测试、Git 操作和脚本执行使用 execute_command。")
 	}
-	if _, ok := r.tools["read_file"]; ok {
+	if _, ok := byName["read_file"]; ok {
 		add("读取已知路径的单个文件用 read_file；大文件按返回提示继续使用 offset/limit 读取。")
 	}
-	if _, ok := r.tools["edit_file"]; ok {
+	if _, ok := byName["edit_file"]; ok {
 		add("小范围修改已有文件用 edit_file，old_text 必须精确且唯一匹配。")
 	}
-	if _, ok := r.tools["write_file"]; ok {
+	if _, ok := byName["write_file"]; ok {
 		add("新建文件或完整覆盖文件用 write_file，不要用它做小范围修改。")
 	}
-	for _, tool := range r.tools {
-		for _, guideline := range tool.PromptGuidelines {
+	for _, candidate := range tools {
+		for _, guideline := range candidate.PromptGuidelines {
 			add(guideline)
 		}
 	}
-	for name := range r.tools {
-		if strings.HasPrefix(name, "mcp__filesystem__") {
+	for _, candidate := range tools {
+		if strings.HasPrefix(candidate.Name, "mcp_") {
 			add("mcp__* 只在用户明确要求 MCP、内置工具无法满足，或需要该 MCP server 特有能力时使用。")
 			break
 		}
@@ -223,7 +256,7 @@ func (r *Registry) execute(ctx context.Context, name string, args map[string]str
 		sort.Strings(names)
 		return "未知工具: " + name + "，可用工具: " + strings.Join(names, ", ")
 	}
-	if rejected := r.validateToolRequest(name, args, modeOverride); rejected != "" {
+	if _, rejected := r.validateToolRequest(t, args, modeOverride); rejected != "" {
 		return rejected
 	}
 	if r.hitl != nil && r.hitl.Enabled() && approval.RequiresApproval(name) {
@@ -244,10 +277,13 @@ func (r *Registry) execute(ctx context.Context, name string, args map[string]str
 				return "工具参数解析失败: " + err.Error()
 			}
 			args = modified
-			if rejected := r.validateToolRequest(name, args, modeOverride); rejected != "" {
+			if _, rejected := r.validateToolRequest(t, args, modeOverride); rejected != "" {
 				return rejected
 			}
 		}
+	}
+	if _, rejected := r.validateToolRequest(t, args, modeOverride); rejected != "" {
+		return rejected
 	}
 	var out string
 	var err error
@@ -262,14 +298,19 @@ func (r *Registry) execute(ctx context.Context, name string, args map[string]str
 	return r.config.Truncate(out)
 }
 
-func (r *Registry) validateToolRequest(name string, args map[string]string, modeOverride *sandbox.Mode) string {
+func (r *Registry) validateToolRequest(t Tool, args map[string]string, modeOverride *sandbox.Mode) (uint64, string) {
+	generation, rejected := r.validateToolPolicy(t, modeOverride)
+	if rejected != "" {
+		return generation, rejected
+	}
+	name := t.Name
 	if name == "execute_command" {
 		if result := r.commandGuard.Check(args["command"]); !result.Allowed {
-			return "命令被安全策略拒绝: " + result.Reason
+			return generation, "命令被安全策略拒绝: " + result.Reason
 		}
 		if r.sandbox != nil {
 			if err := r.sandbox.Preflight(modeOverride); err != nil {
-				return "命令被 sandbox 拒绝: " + err.Error()
+				return generation, "命令被 sandbox 拒绝: " + err.Error()
 			}
 		}
 	}
@@ -277,17 +318,68 @@ func (r *Registry) validateToolRequest(name string, args map[string]string, mode
 		rel, err := r.writeTargetRelativePath(args["path"])
 		if err != nil {
 			if errors.Is(err, sandbox.ErrPolicy) {
-				return "命令被 sandbox 拒绝: " + err.Error()
+				return generation, "命令被 sandbox 拒绝: " + err.Error()
 			}
-			return "工具执行失败: " + err.Error()
+			return generation, "工具执行失败: " + err.Error()
 		}
 		if r.sandbox != nil {
 			if err := r.sandbox.CanWriteFile(rel); err != nil {
-				return "命令被 sandbox 拒绝: " + err.Error()
+				return generation, "命令被 sandbox 拒绝: " + err.Error()
 			}
 		}
 	}
-	return ""
+	return generation, ""
+}
+
+func (r *Registry) validateToolPolicy(t Tool, modeOverride *sandbox.Mode) (uint64, string) {
+	if r.sandbox == nil {
+		return 0, ""
+	}
+	status := r.sandbox.Status()
+	mode := status.Mode
+	network := status.NetworkAccess
+	if modeOverride != nil {
+		mode = *modeOverride
+		network = mode == sandbox.ModeFullAccess || status.ConfiguredNetworkAccess
+	}
+	required := normalizedMinimumMode(t.Policy.MinimumMode)
+	if !modeAllows(mode, required) {
+		source := t.Policy.Source
+		if source == "" {
+			source = SourceUnknown
+		}
+		return status.Generation, fmt.Sprintf(
+			"命令被 sandbox 拒绝: %s 模式不允许工具 %s（来源=%s，需要=%s）",
+			mode, t.Name, source, required,
+		)
+	}
+	if t.Policy.RequiresNetwork && !network {
+		return status.Generation, fmt.Sprintf(
+			"命令被 sandbox 拒绝: sandbox network 已关闭，工具 %s 需要网络",
+			t.Name,
+		)
+	}
+	return status.Generation, ""
+}
+
+func normalizedMinimumMode(mode sandbox.Mode) sandbox.Mode {
+	switch mode {
+	case sandbox.ModeReadOnly, sandbox.ModeWorkspaceWrite, sandbox.ModeFullAccess:
+		return mode
+	default:
+		return sandbox.ModeFullAccess
+	}
+}
+
+func modeAllows(current, required sandbox.Mode) bool {
+	switch required {
+	case sandbox.ModeReadOnly:
+		return true
+	case sandbox.ModeWorkspaceWrite:
+		return current == sandbox.ModeWorkspaceWrite || current == sandbox.ModeFullAccess
+	default:
+		return current == sandbox.ModeFullAccess
+	}
 }
 
 func (r *Registry) SandboxCanEnforce(mode sandbox.Mode) bool {
@@ -322,6 +414,7 @@ func (r *Registry) RegisterBuiltins() {
 		Parameters:    params(param{"path", "string", "文件路径", true}, param{"offset", "integer", "起始行号", false}, param{"limit", "integer", "最多读取行数", false}),
 		Exec:          r.readFile,
 		PromptSnippet: "Read known file contents with optional offset/limit",
+		Policy:        Policy{Source: SourceBuiltin, MinimumMode: sandbox.ModeReadOnly},
 	})
 	r.Register(Tool{
 		Name:          "write_file",
@@ -329,6 +422,7 @@ func (r *Registry) RegisterBuiltins() {
 		Parameters:    params(param{"path", "string", "文件路径", true}, param{"content", "string", "文件内容", true}),
 		Exec:          r.writeFile,
 		PromptSnippet: "Create new files or completely overwrite existing files",
+		Policy:        Policy{Source: SourceBuiltin, MinimumMode: sandbox.ModeWorkspaceWrite},
 	})
 	r.Register(Tool{
 		Name:          "edit_file",
@@ -336,6 +430,7 @@ func (r *Registry) RegisterBuiltins() {
 		Parameters:    params(param{"path", "string", "文件路径", true}, param{"old_text", "string", "要替换的原文", true}, param{"new_text", "string", "替换后的文本", true}),
 		Exec:          r.editFile,
 		PromptSnippet: "Make precise small edits by replacing one unique exact text block",
+		Policy:        Policy{Source: SourceBuiltin, MinimumMode: sandbox.ModeWorkspaceWrite},
 	})
 	r.Register(Tool{
 		Name:          "execute_command",
@@ -343,6 +438,7 @@ func (r *Registry) RegisterBuiltins() {
 		Parameters:    params(param{"command", "string", "要执行的命令", true}),
 		Exec:          r.executeCommand,
 		PromptSnippet: "Execute shell commands for ls, rg, find, git, build, test, and scripts",
+		Policy:        Policy{Source: SourceBuiltin, MinimumMode: sandbox.ModeReadOnly},
 	})
 }
 

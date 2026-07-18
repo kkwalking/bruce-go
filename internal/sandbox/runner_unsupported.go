@@ -20,3 +20,7 @@ func (unsupportedRunner) Probe(context.Context) Capabilities {
 func (unsupportedRunner) Run(context.Context, CommandSpec, Policy) (RunResult, error) {
 	return RunResult{}, ErrUnavailable
 }
+
+func (unsupportedRunner) PrepareProcess(ProcessSpec, Policy) (PreparedProcess, error) {
+	return PreparedProcess{}, ErrUnavailable
+}

@@ -1,8 +1,10 @@
 package sandbox
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,6 +97,25 @@ func TestManagerFileWritePolicy(t *testing.T) {
 	}
 }
 
+func TestManagerValidatesWorkspaceBeforeDynamicWorkspaceWrite(t *testing.T) {
+	home := t.TempDir()
+	manager, err := New(context.Background(), Options{
+		Workspace: home,
+		HomeDir:   home,
+		Mode:      ModeFullAccess,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	if err := manager.SetMode(ModeWorkspaceWrite); err == nil || !strings.Contains(err.Error(), "过宽") {
+		t.Fatalf("dynamic workspace-write should reject HOME workspace: %v", err)
+	}
+	if manager.Mode() != ModeFullAccess {
+		t.Fatalf("failed mode transition changed mode to %s", manager.Mode())
+	}
+}
+
 func TestFullAccessForcesEffectiveNetworkAccess(t *testing.T) {
 	manager, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: t.TempDir(), Mode: ModeWorkspaceWrite})
 	if err != nil {
@@ -177,6 +198,10 @@ func (r recordingRunner) Run(_ context.Context, spec CommandSpec, policy Policy)
 	return RunResult{}, nil
 }
 
+func (recordingRunner) PrepareProcess(spec ProcessSpec, _ Policy) (PreparedProcess, error) {
+	return PreparedProcess{Program: spec.Program, Args: spec.Args, Directory: spec.Directory, Environment: spec.Environment}, nil
+}
+
 func TestParallelCommandsUseIsolatedTemporaryRoots(t *testing.T) {
 	manager, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: t.TempDir(), Mode: ModeWorkspaceWrite})
 	if err != nil {
@@ -219,6 +244,115 @@ func TestParallelCommandsUseIsolatedTemporaryRoots(t *testing.T) {
 	}
 }
 
+func TestManagerStartsLongRunningArgvProcess(t *testing.T) {
+	manager, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: t.TempDir(), Mode: ModeFullAccess})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	process, err := manager.StartProcess(context.Background(), ProcessSpec{
+		Program:     "/bin/sh",
+		Args:        []string{"-c", `IFS= read -r line; printf '%s:%s\n' "$line" "$MCP_TOKEN"`},
+		Environment: []string{"MCP_TOKEN=explicit"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if process.PID() <= 0 {
+		t.Fatalf("PID = %d", process.PID())
+	}
+	if _, err := io.WriteString(process.Stdin(), "hello\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = process.Stdin().Close()
+	line, err := bufio.NewReader(process.Stdout()).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "hello:explicit\n" {
+		t.Fatalf("output = %q", line)
+	}
+	if err := process.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRestrictedLongRunningProcessUsesSafeEnvironmentAndCleansTemp(t *testing.T) {
+	t.Setenv("BRUCE_TEST_HIDDEN", "secret")
+	manager, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: t.TempDir(), Mode: ModeReadOnly})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	manager.runner = recordingRunner{}
+	manager.capabilities = Capabilities{Backend: "recording", Available: true}
+	manager.probed = true
+	process, err := manager.StartProcess(context.Background(), ProcessSpec{
+		Program:     "/usr/bin/env",
+		Environment: []string{"MCP_EXPLICIT=ok"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(process.Stdout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	env := string(data)
+	if strings.Contains(env, "BRUCE_TEST_HIDDEN=secret") {
+		t.Fatalf("hidden host environment leaked:\n%s", env)
+	}
+	if !strings.Contains(env, "MCP_EXPLICIT=ok") {
+		t.Fatalf("explicit MCP environment missing:\n%s", env)
+	}
+	var tempRoot string
+	for _, line := range strings.Split(env, "\n") {
+		if strings.HasPrefix(line, "TMPDIR=") {
+			tempRoot = filepath.Dir(strings.TrimPrefix(line, "TMPDIR="))
+		}
+	}
+	if tempRoot == "" {
+		t.Fatalf("TMPDIR missing:\n%s", env)
+	}
+	if _, err := os.Stat(tempRoot); !os.IsNotExist(err) {
+		t.Fatalf("process temp root was not cleaned: %s: %v", tempRoot, err)
+	}
+}
+
+func TestRestrictedLongRunningProcessFailsClosedWhenBackendUnavailable(t *testing.T) {
+	manager, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: t.TempDir(), Mode: ModeFullAccess})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	manager.runner = unavailableTestRunner{}
+	manager.capabilities = Capabilities{Backend: "unavailable-test", Reason: "disabled"}
+	manager.probed = true
+	manager.mode = ModeReadOnly
+	if _, err := manager.StartProcess(context.Background(), ProcessSpec{Program: "/usr/bin/true"}, nil); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("StartProcess error = %v", err)
+	}
+}
+
+type unavailableTestRunner struct{}
+
+func (unavailableTestRunner) Name() string { return "unavailable-test" }
+func (unavailableTestRunner) Probe(context.Context) Capabilities {
+	return Capabilities{Backend: "unavailable-test", Reason: "disabled"}
+}
+func (unavailableTestRunner) Run(context.Context, CommandSpec, Policy) (RunResult, error) {
+	return RunResult{}, ErrUnavailable
+}
+func (unavailableTestRunner) PrepareProcess(ProcessSpec, Policy) (PreparedProcess, error) {
+	return PreparedProcess{}, ErrUnavailable
+}
+
 type countingRunner struct {
 	probes *int
 }
@@ -232,6 +366,10 @@ func (r countingRunner) Probe(context.Context) Capabilities {
 
 func (r countingRunner) Run(context.Context, CommandSpec, Policy) (RunResult, error) {
 	return RunResult{}, nil
+}
+
+func (countingRunner) PrepareProcess(spec ProcessSpec, _ Policy) (PreparedProcess, error) {
+	return PreparedProcess{Program: spec.Program, Args: spec.Args, Directory: spec.Directory, Environment: spec.Environment}, nil
 }
 
 func TestProbeIsLazyInFullAccessMode(t *testing.T) {

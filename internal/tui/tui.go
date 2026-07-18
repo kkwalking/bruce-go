@@ -1087,6 +1087,13 @@ func (m *Model) drawStatus(canvas []string, columns, row int) {
 		permission = " HITL off "
 		permissionStyle = warnStyle
 	}
+	details := statusDetails(status, m.elapsedMillis)
+	left := permissionStyle.Render(permission)
+	remaining := max(0, columns-runewidth.StringWidth(permission))
+	setRow(canvas, row, columns, left+dimStyle.Render(fit(details, remaining)))
+}
+
+func statusDetails(status bruntime.Status, elapsedMillis int64) string {
 	details := fmt.Sprintf(" bruce · %s · mode %s · %s",
 		empty(status.Model, "auto"),
 		strings.ToLower(string(status.Mode)),
@@ -1097,12 +1104,13 @@ func (m *Model) drawStatus(canvas []string, columns, row int) {
 		network = "net"
 	}
 	details += fmt.Sprintf(" · sandbox %s/%s/%s", status.SandboxBackend, status.SandboxMode, network)
-	if m.elapsedMillis > 0 {
-		details += fmt.Sprintf(" · %dms", m.elapsedMillis)
+	if status.MCPState != "" {
+		details += " · mcp " + status.MCPState
 	}
-	left := permissionStyle.Render(permission)
-	remaining := max(0, columns-runewidth.StringWidth(permission))
-	setRow(canvas, row, columns, left+dimStyle.Render(fit(details, remaining)))
+	if elapsedMillis > 0 {
+		details += fmt.Sprintf(" · %dms", elapsedMillis)
+	}
+	return details
 }
 
 func (m *Model) drawApproval(canvas []string, columns, rows int) {

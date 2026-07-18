@@ -89,7 +89,11 @@ func MCP(statuses []mcp.ServerStatus) string {
 		if s.Enabled {
 			enabled = "enabled"
 		}
-		fmt.Fprintf(&b, "- %s: %s, %s, tools=%d", s.Name, enabled, ready, s.ToolCount)
+		fmt.Fprintf(&b, "- %s: %s, %s, transport=%s, enforcement=%s, generation=%d, tools=%d, blocked=%d",
+			s.Name, enabled, ready, s.Transport, s.Enforcement, s.Generation, s.ToolCount, s.BlockedToolCount)
+		if s.BlockedReason != "" {
+			b.WriteString(", policy=" + s.BlockedReason)
+		}
 		if s.Error != "" {
 			b.WriteString(", error=" + s.Error)
 		}

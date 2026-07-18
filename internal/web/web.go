@@ -17,6 +17,7 @@ import (
 	"github.com/PuerkitoBio/goquery"
 
 	"bruce-go/internal/config"
+	"bruce-go/internal/sandbox"
 	"bruce-go/internal/tool"
 )
 
@@ -253,6 +254,7 @@ func RegisterTools(registry *tool.Registry, manager *Manager) {
 			return formatResults(results), nil
 		},
 		PromptSnippet: "Search the web when local context is insufficient or freshness matters",
+		Policy:        tool.Policy{Source: tool.SourceWeb, MinimumMode: sandbox.ModeReadOnly},
 	})
 	registry.Register(tool.Tool{
 		Name:        "web_fetch",
@@ -266,6 +268,7 @@ func RegisterTools(registry *tool.Registry, manager *Manager) {
 			return formatPage(page), nil
 		},
 		PromptSnippet: "Fetch and extract readable page text from a URL",
+		Policy:        tool.Policy{Source: tool.SourceWeb, MinimumMode: sandbox.ModeReadOnly},
 	})
 }
 

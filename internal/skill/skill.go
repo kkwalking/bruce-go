@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"bruce-go/internal/sandbox"
 	"bruce-go/internal/tool"
 )
 
@@ -305,6 +306,7 @@ func RegisterTools(registry *tool.Registry, catalog *Catalog) {
 		Exec: func(_ context.Context, args map[string]string) (string, error) {
 			return catalog.LoadSkill(args["name"])
 		},
+		Policy: tool.Policy{Source: tool.SourceSkill, MinimumMode: sandbox.ModeReadOnly},
 	})
 	registry.Register(tool.Tool{
 		Name:        ResourceToolName,
@@ -313,6 +315,7 @@ func RegisterTools(registry *tool.Registry, catalog *Catalog) {
 		Exec: func(_ context.Context, args map[string]string) (string, error) {
 			return catalog.ReadResource(args["skill"], args["path"])
 		},
+		Policy: tool.Policy{Source: tool.SourceSkill, MinimumMode: sandbox.ModeReadOnly},
 	})
 }
 

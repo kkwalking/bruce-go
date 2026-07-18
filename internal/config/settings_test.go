@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -31,7 +32,11 @@ func TestLoaderLoadsCompatibleSettingJSON(t *testing.T) {
         "type": "stdio",
         "command": "demo-mcp",
         "args": ["--json"],
-        "env": {"TOKEN": "x"}
+        "env": {"TOKEN": "x"},
+        "toolAccess": {
+          " read_file ": " read-only ",
+          "write_file": "workspace-write"
+        }
       }
     }
   },
@@ -64,11 +69,70 @@ func TestLoaderLoadsCompatibleSettingJSON(t *testing.T) {
 	if got := settings.MCP.Servers["demo"].Args[0]; got != "--json" {
 		t.Fatalf("mcp arg = %q", got)
 	}
+	if got := settings.MCP.Servers["demo"].ToolAccess["read_file"]; got != "read-only" {
+		t.Fatalf("mcp read_file access = %q", got)
+	}
 	if settings.Compaction.ReserveTokens != 1000 || settings.Compaction.KeepRecentTokens != 2000 {
 		t.Fatalf("unexpected compaction: %+v", settings.Compaction)
 	}
 	if got := settings.Variables["demoToken"]; got != "replace_me" {
 		t.Fatalf("variable = %q", got)
+	}
+}
+
+func TestLoaderValidatesMCPToolAccess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "setting.json")
+	cases := []struct {
+		name string
+		data string
+		want string
+	}{
+		{
+			name: "invalid mode",
+			data: `{"mcp":{"servers":{"demo":{"type":"stdio","toolAccess":{"write":"unsafe"}}}}}`,
+			want: "mcp.servers.demo.toolAccess",
+		},
+		{
+			name: "wildcard",
+			data: `{"mcp":{"servers":{"demo":{"type":"stdio","toolAccess":{"read_*":"read-only"}}}}}`,
+			want: "不支持通配符",
+		},
+		{
+			name: "trim collision",
+			data: `{"mcp":{"servers":{"demo":{"type":"stdio","toolAccess":{"read":"read-only"," read ":"read-only"}}}}}`,
+			want: "重复",
+		},
+		{
+			name: "http workspace write",
+			data: `{"mcp":{"servers":{"remote":{"type":"streamable-http","toolAccess":{"write":"workspace-write"}}}}}`,
+			want: "HTTP MCP 无法强制 workspace",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(tc.data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := NewLoader(path).Load()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLegacyMCPConfigKeepsToolAccessEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "setting.json")
+	data := `{"mcp":{"servers":{"demo":{"type":"stdio","command":"demo"}}}}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := NewLoader(path).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.MCP.Servers["demo"].ToolAccess != nil {
+		t.Fatalf("legacy toolAccess = %#v", settings.MCP.Servers["demo"].ToolAccess)
 	}
 }
 

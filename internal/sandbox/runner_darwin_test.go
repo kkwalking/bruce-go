@@ -63,6 +63,54 @@ func TestSeatbeltWorkspaceAndSensitivePaths(t *testing.T) {
 	}
 }
 
+func TestSeatbeltPrepareProcessPreservesArgv(t *testing.T) {
+	workspace := t.TempDir()
+	prepared, err := (seatbeltRunner{}).PrepareProcess(ProcessSpec{
+		Program:     "/bin/echo",
+		Args:        []string{"semi;colon", "$(not-expanded)", "two words"},
+		Directory:   workspace,
+		Environment: []string{"PATH=/usr/bin:/bin"},
+	}, Policy{Mode: ModeReadOnly, WorkspaceRoot: workspace, TempRoot: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Program != seatbeltExecutable {
+		t.Fatalf("program = %q", prepared.Program)
+	}
+	wantTail := []string{"--", "/bin/echo", "semi;colon", "$(not-expanded)", "two words"}
+	if len(prepared.Args) < len(wantTail) {
+		t.Fatalf("args = %#v", prepared.Args)
+	}
+	gotTail := prepared.Args[len(prepared.Args)-len(wantTail):]
+	for i := range wantTail {
+		if gotTail[i] != wantTail[i] {
+			t.Fatalf("argv tail = %#v, want %#v", gotTail, wantTail)
+		}
+	}
+}
+
+func TestSeatbeltLongRunningProcessUsesReadOnlyPolicy(t *testing.T) {
+	workspace := t.TempDir()
+	manager, err := New(context.Background(), Options{Workspace: workspace, HomeDir: t.TempDir(), Mode: ModeReadOnly})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	process, err := manager.StartProcess(context.Background(), ProcessSpec{
+		Program: "/bin/sh",
+		Args:    []string{"-c", "printf blocked > denied.txt"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Wait(); err == nil {
+		t.Fatal("read-only process write should exit non-zero")
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "denied.txt")); !os.IsNotExist(err) {
+		t.Fatalf("denied file exists: %v", err)
+	}
+}
+
 func TestSeatbeltNetworkToggle(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("network-ok")) }))
 	defer server.Close()

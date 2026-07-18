@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"io"
 	"time"
 )
 
@@ -50,6 +51,20 @@ type CommandSpec struct {
 	MaxOutputChars int
 }
 
+type ProcessSpec struct {
+	Program     string
+	Args        []string
+	Directory   string
+	Environment []string
+}
+
+type PreparedProcess struct {
+	Program     string
+	Args        []string
+	Directory   string
+	Environment []string
+}
+
 type RunResult struct {
 	Output    string
 	ExitCode  int
@@ -69,12 +84,23 @@ type Status struct {
 	NetworkAccess           bool
 	ConfiguredNetworkAccess bool
 	Capabilities            Capabilities
+	Generation              uint64
 }
 
 type Runner interface {
 	Name() string
 	Probe(ctx context.Context) Capabilities
 	Run(ctx context.Context, spec CommandSpec, policy Policy) (RunResult, error)
+	PrepareProcess(spec ProcessSpec, policy Policy) (PreparedProcess, error)
+}
+
+type LongRunningProcess interface {
+	Stdin() io.WriteCloser
+	Stdout() io.ReadCloser
+	Stderr() io.ReadCloser
+	PID() int
+	Wait() error
+	Close() error
 }
 
 var (

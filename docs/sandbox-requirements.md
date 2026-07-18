@@ -3,14 +3,14 @@
 ## 文档信息
 
 - 文档状态：当前实现基线
-- 更新日期：2026-07-16
-- 实现分支：`zzk/add-native-sandbox`
+- 更新日期：2026-07-17
+- 实现分支：`zzk/enforce-mcp-sandbox-boundaries`
 - 适用平台：macOS、Linux
 - 配套设计：[`sandbox-design.md`](sandbox-design.md)
 
 ## 1. 背景
 
-Bruce 的 Shell 与内置文件工具能够直接读写本机文件。仅依靠命令黑名单、HITL 和路径字符串校验，无法阻止子进程、Shell 重定向、软链接或工具链间接访问宿主资源，因此需要在操作系统层增加原生沙箱边界。
+Bruce 的 Shell、内置文件工具和 MCP 工具能够直接或间接读写本机文件。仅依靠命令黑名单、模型提示、HITL 和路径字符串校验，无法阻止子进程、Shell 重定向、软链接、MCP 初始化副作用或工具链间接访问宿主资源，因此需要统一授权和操作系统原生沙箱边界。
 
 本功能在 macOS 使用 Seatbelt，在 Linux 使用 Bubblewrap，并保留 `full-access` 兼容模式。当前产品默认选择 `full-access`，以保持现有使用体验；用户需要主动切换到 `read-only` 或 `workspace-write` 才会获得原生文件系统与网络隔离。
 
@@ -35,6 +35,7 @@ Bruce 的 Shell 与内置文件工具能够直接读写本机文件。仅依靠�
 | 配置网络值 | `sandbox.networkAccess` 或 `/sandbox network` 保存的运行时偏好 |
 | 有效网络值 | 当前模式实际采用的网络状态；`full-access` 下始终为开启 |
 | 受保护 Git 元数据 | `config`、hooks、alternates 以及可能影响 Git 执行行为或其他 worktree 的元数据 |
+| `toolAccess` | 按 MCP 远端工具原名精确声明的最低 sandbox mode；缺失时按 `full-access` 处理 |
 
 ## 4. 功能范围
 
@@ -42,6 +43,9 @@ Bruce 的 Shell 与内置文件工具能够直接读写本机文件。仅依靠�
 
 - `execute_command`。
 - 内置 `read_file`、`write_file`、`edit_file`。
+- MCP stdio server 的启动、初始化、后台任务、工具调用、文件系统和网络访问。
+- HTTP MCP 的显式只读信任策略、网络门禁与工具过滤。
+- MCP policy generation、模式切换重启和统一工具执行授权。
 - macOS Seatbelt 后端。
 - Linux Bubblewrap 后端。
 - Sandbox 配置、Slash 命令、TUI 状态与补全。
@@ -52,8 +56,8 @@ Bruce 的 Shell 与内置文件工具能够直接读写本机文件。仅依靠�
 ### 4.2 本期不包含
 
 - Windows 原生沙箱。
-- MCP stdio 工具及 MCP 服务自身的文件访问。
-- WebSearch、WebFetch、LLM 请求和 MCP 服务自身的网络访问。
+- WebSearch、WebFetch、LLM 请求和 Bruce 自身网络访问。
+- HTTP MCP 远端服务进程的文件系统或内部行为隔离。
 - 域名级网络白名单、逐命令网络审批或网络代理。
 - seccomp、cgroup、CPU、内存、磁盘和进程数配额。
 - 自动安装或捆绑 Bubblewrap。
@@ -65,6 +69,19 @@ Bruce 的 Shell 与内置文件工具能够直接读写本机文件。仅依靠�
 
 ```json
 {
+  "mcp": {
+    "servers": {
+      "filesystem": {
+        "type": "stdio",
+        "command": "mcp-server-filesystem",
+        "args": ["${PROJECT_DIR}"],
+        "toolAccess": {
+          "read_file": "read-only",
+          "write_file": "workspace-write"
+        }
+      }
+    }
+  },
   "sandbox": {
     "mode": "full-access",
     "networkAccess": false,
@@ -76,6 +93,7 @@ Bruce 的 Shell 与内置文件工具能够直接读写本机文件。仅依靠�
 - 旧配置缺少 `sandbox` 或 `sandbox.mode` 时，必须补齐为 `full-access`。
 - `networkAccess` 默认值为 `false`，它是切换到安全模式后使用的网络偏好；`full-access` 的有效网络仍始终开启。
 - `allowedEnv` 默认为空，只在安全模式中追加允许透传的环境变量。
+- 旧 MCP 配置缺少 `toolAccess` 时必须正常加载；其工具在安全模式按 `full-access` 处理，在 `full-access` 保持兼容。
 - 配置文件只提供启动值；Slash 命令修改的状态不得回写配置文件。
 
 ## 6. 模式需求
@@ -90,7 +108,7 @@ Bruce 的 Shell 与内置文件工具能够直接读写本机文件。仅依靠�
 
 - `sandbox.mode` 只允许 `read-only`、`workspace-write`、`full-access`。
 - 已废弃的 `danger-full-access` 和其他非法值必须在启动配置校验阶段报错。
-- 模式切换只影响切换后启动的命令；正在运行的命令继续使用其启动时的策略快照。
+- 一次性命令继续使用启动时的不可变策略快照；MCP transport 在模式切换完成前必须关闭旧进程并按新策略重启。
 
 ### FR-002 `read-only`
 
@@ -124,7 +142,7 @@ Bruce 的 Shell 与内置文件工具能够直接读写本机文件。仅依靠�
 - 安全模式网络关闭时，沙箱中的命令不得访问主机网络，包括本机监听端口。
 - 安全模式网络开启时可以使用 TCP、UDP、DNS 和 TLS，但 Docker、Podman、D-Bus、SSH Agent、GPG Agent 等本地 Socket 仍必须不可访问。
 - `full-access` 下网络强制开启；切换回安全模式后恢复使用此前保存的配置网络值。
-- 网络开关只控制沙箱中的 `execute_command`，不控制 Bruce 自身、LLM、Web 工具或 MCP。
+- 网络开关控制安全模式中的 `execute_command`、stdio MCP 和 HTTP MCP 初始化/调用，不控制 Bruce 自身、LLM 或 Web 工具。
 
 ## 8. 配置与环境需求
 
@@ -142,6 +160,39 @@ Bruce 的 Shell 与内置文件工具能够直接读写本机文件。仅依靠�
 - `HOME` 保持真实路径以允许读取工具配置，但沙箱策略不得允许写入。
 - `TMPDIR`、`TMP`、`TEMP`、`XDG_CACHE_HOME`、`XDG_RUNTIME_DIR`、`GOCACHE` 和 npm cache 必须指向当前命令的隔离临时目录。
 - `full-access` 必须保留完整 `os.Environ()`。
+
+### FR-022 MCP `toolAccess`
+
+- `toolAccess` 必须使用远端工具原名精确匹配，只接受 `read-only`、`workspace-write`、`full-access`。
+- 配置加载必须 trim 工具名和权限值，并拒绝空名称、通配符、trim 后重复和非法权限。
+- 缺失、空白、未知或未匹配的策略必须按 `full-access` fail closed。
+- MCP annotation 只能作为不可信风险提示，不得授予访问权限。
+- 统一 Tool Registry 必须在 HITL 前、HITL 修改参数后和最终执行前按当前 generation 校验权限。
+- LLM tool definitions 和 prompt 必须只包含当前策略可执行的工具，陈旧或直接调用仍必须在执行入口拒绝。
+
+### FR-023 stdio MCP 原生隔离
+
+- 安全模式必须通过 Sandbox Manager 的 argv 型长驻进程接口启动 stdio server，不得使用宿主权限重试。
+- server 启动、初始化、后台任务和工具调用必须共用同一策略快照、专用临时根和安全环境。
+- `read-only` 只暴露显式只读工具，且原生后端必须阻止进程写 workspace 和宿主。
+- `workspace-write` 可暴露只读和工作区写工具，但进程只能写 workspace、允许的 Git 元数据和专用临时根。
+- server 显式 `env` 可在安全环境基础上追加并完成变量展开，但不得导致其他宿主变量被继承。
+
+### FR-024 HTTP MCP 信任边界
+
+- 安全模式只允许用户在 `toolAccess` 中精确声明为 `read-only` 的 HTTP 工具。
+- HTTP 工具配置为 `workspace-write` 必须在配置加载时报错，因为 Bruce 无法强制远端 workspace 边界。
+- annotation 声明 `readOnlyHint=true` 不得替代用户授权。
+- 安全模式有效网络关闭时不得初始化或调用 HTTP MCP。
+- 状态必须标记 `trusted-remote`，不得把 HTTP 工具展示为受本机原生沙箱隔离。
+
+### FR-025 MCP policy transition
+
+- mode 或有效网络变化时，MCP Manager 必须进入 transitioning，拒绝新调用并关闭旧 transport。
+- 旧 stdio 进程和进程树必须在切换完成前退出；正在执行的调用必须被取消或等待结束。
+- 新策略提交后按新 snapshot 重启已启用 server、刷新 Registry，并重建 agent prompt。
+- 更严格模式下部分 server 重启失败时必须保留新模式，失败 server 保持 blocked/error，不得恢复旧 transport。
+- MCP 状态必须展示 transport、enforcement、policy generation、可用/阻止工具数和稳定原因，不得输出 env、Header 或凭据值。
 
 ## 9. 命令与交互需求
 
@@ -178,6 +229,7 @@ Bruce 的 Shell 与内置文件工具能够直接读写本机文件。仅依靠�
 - 有效网络状态。
 - 后端是否可用。
 - 后端不可用或探测失败的原因。
+- MCP transport、原生隔离/可信远端/未隔离状态、policy generation 和 blocked 摘要。
 
 `full-access` 下展示的平台后端仅代表探测结果，不代表当前命令经过该后端。
 
@@ -199,8 +251,8 @@ Bruce 的 Shell 与内置文件工具能够直接读写本机文件。仅依靠�
 
 ### FR-013 进程管理
 
-- 命令必须支持超时和 context 取消。
-- Unix 命令必须使用独立进程组，超时或取消后回收子进程和孙进程。
+- 命令与 stdio MCP 长驻进程必须支持 context 取消或显式关闭。
+- Unix 进程必须使用独立进程组，超时、取消或 transport 关闭后回收子进程和孙进程。
 - Bubblewrap 必须启用 `--die-with-parent`。
 - 命令输出必须在执行期间有界，不得先无限缓存再截断。
 - 结果必须区分正常退出、非零退出、超时、取消、输出截断和沙箱启动失败。
@@ -273,6 +325,7 @@ workspace 内的内容视为任务输入，不默认遮蔽其中的 `.env` 或�
 - Runtime 初始化时创建唯一的 Sandbox Manager。
 - Manager 必须线程安全地保存当前策略。
 - 每条命令必须获得不可变策略快照和独立临时目录。
+- 每个 stdio MCP 进程必须获得不可变策略快照和生命周期专用临时目录。
 - Manager 关闭必须幂等，并清理运行时沙箱临时根目录。
 - 主程序和测试必须显式调用 Runtime/Manager 的关闭逻辑。
 
@@ -314,12 +367,19 @@ workspace 内的内容视为任务输入，不默认遮蔽其中的 `.env` 或�
 9. 后端探测失败时安全模式拒绝执行，切换到 `full-access` 后允许执行。
 10. Plan mode 在所有运行时模式下都不能写入。
 11. `go test ./...`、`go test -race ./...`、`go vet ./...` 以及 macOS/Linux 集成测试通过。
+12. `read-only` 下 stdio MCP 初始化写和伪装只读工具写入均被原生后端拒绝。
+13. `workspace-write` 下 stdio MCP 可写 workspace，但不能写宿主外部路径。
+14. HTTP MCP 未分类工具默认拒绝，禁网时不初始化，显式只读且联网时可用。
+15. mode/network 切换会终止旧 MCP 进程、刷新工具可见性，并在重启失败时保持新策略。
 
 ## 18. 当前实现约束
 
 以下约束记录当前实现边界，后续增强时需要重新评估：
 
 - Git 仓库拓扑在 Sandbox Manager 初始化时解析；运行过程中新增仓库、执行 `git init` 或改变 worktree 布局不会自动刷新策略。
-- `workspace-write` 的宽泛 workspace 校验目前在 Manager 以该模式初始化时执行；从默认 `full-access` 运行时切换到 `workspace-write` 时尚未重新计算该校验。这是需要后续收口的安全差距。
 - Linux 对不存在的受保护目标不会预创建遮蔽挂载；运行过程中创建的新 Git 特殊路径依赖上层 Git 边界与已有父目录策略。
 - `full-access` 下 Shell 可以读取宿主凭据并访问本地 Socket，这是该兼容模式的预期行为，不属于原生沙箱保障范围。
+- `full-access` 下 MCP 保持旧配置兼容并可执行全部工具，同样不受原生沙箱保障。
+- HTTP MCP 的 `read-only` 是用户对远端实现的显式信任，不是 Bruce 能验证的本地隔离保证。
+
+`full-access` 放宽 Shell 和 MCP 兼容行为，但不放宽内置文件工具。因此即使 Shell 或 MCP 能直接修改任意文件，`write_file` 和 `edit_file` 仍被限制在 workspace 且不能直接修改 `.git`。

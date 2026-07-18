@@ -36,6 +36,7 @@ type Manager struct {
 	socketPaths    []string
 	git            GitLayout
 	policyErr      error
+	generation     uint64
 	closeOnce      sync.Once
 }
 
@@ -73,6 +74,7 @@ func New(ctx context.Context, opts Options) (*Manager, error) {
 		mode:          mode,
 		networkAccess: opts.NetworkAccess,
 		allowedEnv:    append([]string(nil), opts.AllowedEnv...),
+		generation:    1,
 	}
 	m.sensitivePaths, m.socketPaths = protectedHostPaths(home)
 	var gitErr error
@@ -133,6 +135,7 @@ func (m *Manager) Status() Status {
 		NetworkAccess:           effectiveNetworkAccess(m.mode, m.networkAccess),
 		ConfiguredNetworkAccess: m.networkAccess,
 		Capabilities:            capabilities,
+		Generation:              m.generation,
 	}
 }
 
@@ -143,14 +146,37 @@ func (m *Manager) Mode() Mode {
 }
 
 func (m *Manager) SetMode(mode Mode) error {
+	if err := m.ValidateMode(mode); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.mode != mode {
+		m.mode = mode
+		m.generation++
+	}
+	return nil
+}
+
+func (m *Manager) ValidateMode(mode Mode) error {
 	if _, err := ParseMode(string(mode)); err != nil {
 		return err
+	}
+	if mode == ModeWorkspaceWrite {
+		if err := validateWritableWorkspace(m.workspace, m.home); err != nil {
+			return err
+		}
+		for _, sensitive := range m.sensitivePaths {
+			if pathContains(sensitive, m.workspace) {
+				return fmt.Errorf("workspace 位于敏感目录内: %s", sensitive)
+			}
+		}
 	}
 	if mode != ModeFullAccess {
 		m.ensureProbed(context.Background())
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	if mode != ModeFullAccess {
 		if m.policyErr != nil {
 			return m.policyErr
@@ -159,14 +185,16 @@ func (m *Manager) SetMode(mode Mode) error {
 			return fmt.Errorf("%w: %s", ErrUnavailable, m.capabilities.Reason)
 		}
 	}
-	m.mode = mode
 	return nil
 }
 
 func (m *Manager) SetNetworkAccess(enabled bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.networkAccess = enabled
+	if m.networkAccess != enabled {
+		m.networkAccess = enabled
+		m.generation++
+	}
 }
 
 func (m *Manager) CanWriteFile(relativePath string) error {
@@ -235,8 +263,72 @@ func (m *Manager) Run(ctx context.Context, command string, timeout time.Duration
 	return m.runner.Run(ctx, spec, policy)
 }
 
+func (m *Manager) StartProcess(ctx context.Context, spec ProcessSpec, modeOverride *Mode) (LongRunningProcess, error) {
+	mode, network, capabilities, policyErr := m.snapshot(modeOverride)
+	if err := preflightSnapshot(mode, capabilities, policyErr); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(spec.Program) == "" {
+		return nil, fmt.Errorf("%w: program 不能为空", ErrPolicy)
+	}
+	if strings.TrimSpace(spec.Directory) == "" {
+		spec.Directory = m.workspace
+	}
+	processTempRoot := m.tempRoot
+	var cleanup func()
+	if mode != ModeFullAccess {
+		var err error
+		processTempRoot, err = m.newProcessTempRoot("process-")
+		if err != nil {
+			return nil, fmt.Errorf("初始化长驻进程隔离目录: %w", err)
+		}
+		cleanup = func() { _ = os.RemoveAll(processTempRoot) }
+	}
+	policy := Policy{
+		Mode:           mode,
+		NetworkAccess:  network,
+		WorkspaceRoot:  m.workspace,
+		HomeDir:        m.home,
+		TempRoot:       processTempRoot,
+		SensitivePaths: append([]string(nil), m.sensitivePaths...),
+		SocketPaths:    append([]string(nil), m.socketPaths...),
+		Git:            cloneGitLayout(m.git),
+	}
+	baseEnvironment := os.Environ()
+	runner := Runner(hostRunner{})
+	if mode != ModeFullAccess {
+		baseEnvironment = m.safeEnvironment(network, processTempRoot)
+		runner = m.runner
+	}
+	environment, err := mergeEnvironment(baseEnvironment, spec.Environment)
+	if err != nil {
+		if cleanup != nil {
+			cleanup()
+		}
+		return nil, err
+	}
+	spec.Environment = environment
+	prepared, err := runner.PrepareProcess(spec, policy)
+	if err != nil {
+		if cleanup != nil {
+			cleanup()
+		}
+		return nil, err
+	}
+	process, err := startManagedProcess(ctx, prepared, cleanup)
+	if err != nil {
+		return nil, err
+	}
+	process.startWatcher()
+	return process, nil
+}
+
 func (m *Manager) newCommandTempRoot() (string, error) {
-	root, err := os.MkdirTemp(m.tempRoot, "command-")
+	return m.newProcessTempRoot("command-")
+}
+
+func (m *Manager) newProcessTempRoot(prefix string) (string, error) {
+	root, err := os.MkdirTemp(m.tempRoot, prefix)
 	if err != nil {
 		return "", err
 	}
@@ -247,6 +339,39 @@ func (m *Manager) newCommandTempRoot() (string, error) {
 		}
 	}
 	return root, nil
+}
+
+func mergeEnvironment(base, extra []string) ([]string, error) {
+	values := make(map[string]string, len(base)+len(extra))
+	add := func(items []string, explicit bool) error {
+		for _, item := range items {
+			name, value, ok := strings.Cut(item, "=")
+			if !ok || strings.TrimSpace(name) == "" || strings.Contains(name, "=") {
+				if explicit {
+					return fmt.Errorf("%w: 非法环境变量赋值", ErrPolicy)
+				}
+				continue
+			}
+			values[name] = value
+		}
+		return nil
+	}
+	if err := add(base, false); err != nil {
+		return nil, err
+	}
+	if err := add(extra, true); err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, key+"="+values[key])
+	}
+	return out, nil
 }
 
 func (m *Manager) snapshot(modeOverride *Mode) (Mode, bool, Capabilities, error) {

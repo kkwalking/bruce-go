@@ -54,7 +54,18 @@ go run ./cmd/bruce --no-mcp
     "searxng": {"url": "http://localhost:8080"}
   },
   "mcp": {
-    "servers": {}
+    "servers": {
+      "filesystem": {
+        "type": "stdio",
+        "command": "mcp-server-filesystem",
+        "args": ["${PROJECT_DIR}"],
+        "toolAccess": {
+          "read_file": "read-only",
+          "list_directory": "read-only",
+          "write_file": "workspace-write"
+        }
+      }
+    }
   },
   "compaction": {
     "enabled": true,
@@ -73,6 +84,8 @@ go run ./cmd/bruce --no-mcp
 `llm.providers` 支持 `deepseek`、`glm` 和 `openai_compatiable`。测试使用 fake/mock，不依赖真实 API key。
 
 `sandbox.mode` 仅允许 `read-only`、`workspace-write`、`full-access`。旧配置没有 `sandbox` 字段时会自动采用 `full-access`，该模式下网络始终开启。`networkAccess` 保存安全模式的网络偏好，因此默认仍为 `false`，切换到 `read-only` 或 `workspace-write` 后恢复禁网。非法 mode 或非法环境变量名会在启动时报错。`allowedEnv` 只接受精确环境变量名，列出的变量会追加到安全环境允许列表中。`commandTimeoutSeconds` 可选，设置 execute_command 的单命令超时（默认 30 秒，不能为负数）。
+
+MCP server 的 `toolAccess` 使用远端工具原名精确声明最低权限，只接受 `read-only`、`workspace-write`、`full-access`，不支持通配符。未声明的工具在安全模式默认拒绝，但旧配置在 `full-access` 下仍保持全部工具可用。stdio MCP 在安全模式中与 Shell 一样由 Seatbelt/Bubblewrap 隔离；HTTP MCP 无法隔离远端进程，因此安全模式只允许用户显式信任为 `read-only` 的工具，配置 `workspace-write` 会在启动时报错。服务端 `readOnlyHint` 等 annotation 仅作提示，不会自动授权。
 
 Linux 不捆绑 Bubblewrap，也不会自动回退到 Docker。可按发行版安装：
 
@@ -119,15 +132,15 @@ sudo pacman -S bubblewrap
 
 ## 原生沙箱
 
-默认的 `full-access` 使用完整宿主环境、宿主网络和兼容 Shell 行为，网络在该模式下始终开启，但仍保留命令黑名单、超时、输出限制和进程树回收。需要原生隔离时可切换到 `workspace-write`，它允许 Shell 读取宿主工具链、写入 workspace 和受控 Git 元数据，但禁止写入宿主其他位置；`read-only` 连 workspace 也不可写。切回安全模式后恢复此前保存的网络开关，默认禁网。Slash 命令的切换只影响当前进程，不会回写 `setting.json`，已经启动的命令使用启动时的策略快照。
+默认的 `full-access` 使用完整宿主环境、宿主网络和兼容 Shell 行为，网络在该模式下始终开启，但仍保留命令黑名单、超时、输出限制和进程树回收。需要原生隔离时可切换到 `workspace-write`，它允许 Shell 和已授权 stdio MCP 读取宿主工具链、写入 workspace 和受控 Git 元数据，但禁止写入宿主其他位置；`read-only` 连 workspace 也不可写。切回安全模式后恢复此前保存的网络开关，默认禁网。Slash 命令的切换只影响当前进程，不会回写 `setting.json`；一次性命令继续使用启动时快照，MCP transport 会在切换完成前关闭旧进程并按新策略重启。
 
 安全模式使用受限环境变量和不加载用户启动脚本的 `/bin/bash --noprofile --norc -c`。`HOME` 可读以兼容工具配置但不可写，临时目录、Go/npm cache 和 XDG runtime/cache 会重定向到每条命令独立的 Bruce 临时目录。SSH/GPG、云厂商、Kubernetes、Docker、Git/npm/PyPI/GitHub CLI 凭据、macOS Keychains 以及 Docker/Podman/Agent Socket 默认不可读或不可访问。Git 的 refs、objects、index、日志和 linked worktree 正常流程可写，但配置、hooks、alternates 和其他已有 worktree 元数据受保护；文件工具在任何模式都不能直接修改 `.git`。
 
-`/sandbox network on` 只整体放开沙箱中 `execute_command` 的 TCP/UDP 网络；Docker、Podman、SSH/GPG Agent 等 Unix Socket 仍被屏蔽。WebSearch、WebFetch、LLM 请求和 MCP 自身不经过该 Shell 沙箱，MCP stdio 进程也不在首版覆盖范围内。workspace 自身被视为任务输入，因此其中的 `.env` 不会自动隐藏。
+`/sandbox network on` 整体放开安全模式中 `execute_command` 和 stdio MCP 的 TCP/UDP 网络；Docker、Podman、SSH/GPG Agent 等 Unix Socket 仍被屏蔽。安全模式禁网时 HTTP MCP 不会初始化。WebSearch、WebFetch、LLM 请求和 Bruce 自身网络不受该开关控制；HTTP MCP 的远端进程也不在本机原生沙箱内。workspace 自身被视为任务输入，因此其中的 `.env` 不会自动隐藏。
 
 后端缺失、namespace 被系统禁用或策略构造失败时，默认的 `full-access` 仍可执行 Shell；一旦切换到 `read-only` 或 `workspace-write`，Shell 会 fail closed，且不会自动无沙箱重试。此时可查看 `/sandbox status` 获取失败原因，并显式切回 `/sandbox mode full-access`。`workspace-write` 会拒绝文件系统根、用户 HOME 及其祖先作为 workspace，避免产生过宽写权限。Plan mode 的 Shell 在原生后端可用时强制 `read-only`（即使当前运行时是 `full-access`）；后端不可用且运行时为 `full-access` 时退回纯文本只读白名单校验，保持 plan mode 可用。
 
-故障排查先运行 `/sandbox status` 查看 backend、availability 和失败原因。Linux 常见原因是未安装 `bwrap`、内核禁用 unprivileged user namespace，或运行环境禁止创建 PID/mount namespace；Bruce 不会把这些错误降级成不安全执行。
+故障排查先运行 `/sandbox status` 查看 backend、availability、MCP enforcement、可用/阻止工具数和失败原因。Linux 常见原因是未安装 `bwrap`、内核禁用 unprivileged user namespace，或运行环境禁止创建 PID/mount namespace；Bruce 不会把这些错误降级成不安全执行。
 
 ## 输入语法
 

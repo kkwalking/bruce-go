@@ -19,21 +19,35 @@ import (
 	"time"
 
 	"bruce-go/internal/config"
+	"bruce-go/internal/sandbox"
 	"bruce-go/internal/tool"
 )
 
+type ToolAnnotations struct {
+	ReadOnlyHint    *bool `json:"readOnlyHint,omitempty"`
+	DestructiveHint *bool `json:"destructiveHint,omitempty"`
+	IdempotentHint  *bool `json:"idempotentHint,omitempty"`
+	OpenWorldHint   *bool `json:"openWorldHint,omitempty"`
+}
+
 type Tool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema json.RawMessage `json:"inputSchema"`
+	Name        string           `json:"name"`
+	Description string           `json:"description"`
+	InputSchema json.RawMessage  `json:"inputSchema"`
+	Annotations *ToolAnnotations `json:"annotations,omitempty"`
 }
 
 type ServerStatus struct {
-	Name      string
-	Enabled   bool
-	Ready     bool
-	ToolCount int
-	Error     string
+	Name             string
+	Enabled          bool
+	Ready            bool
+	ToolCount        int
+	BlockedToolCount int
+	Transport        string
+	Enforcement      string
+	Generation       uint64
+	BlockedReason    string
+	Error            string
 }
 
 type Transport interface {
@@ -43,10 +57,16 @@ type Transport interface {
 }
 
 type Manager struct {
-	mu        sync.RWMutex
-	servers   map[string]*Server
-	workspace string
-	factory   TransportFactory
+	mu            sync.RWMutex
+	transitionMu  sync.Mutex
+	servers       map[string]*Server
+	workspace     string
+	factory       TransportFactory
+	sandbox       *sandbox.Manager
+	transitioning bool
+	generation    uint64
+	started       bool
+	calls         sync.WaitGroup
 }
 
 type TransportFactory func(ctx context.Context, name string, cfg config.MCPServerSetting, workspace string) (Transport, error)
@@ -58,15 +78,23 @@ type Server struct {
 	Ready     bool
 	Tools     []Tool
 	LastError string
+	Blocked   string
 	transport Transport
 }
 
 func NewManager(settings config.MCPSettings, workspace string) *Manager {
-	m := &Manager{servers: map[string]*Server{}, workspace: workspace, factory: DefaultTransportFactory}
+	m := &Manager{servers: map[string]*Server{}, workspace: workspace, generation: 1}
 	for name, cfg := range settings.Servers {
 		server := &Server{Name: name, Config: cfg, Enabled: !cfg.Disabled}
 		m.servers[name] = server
 	}
+	return m
+}
+
+func (m *Manager) WithSandbox(manager *sandbox.Manager) *Manager {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sandbox = manager
 	return m
 }
 
@@ -80,6 +108,15 @@ func (m *Manager) WithFactory(factory TransportFactory) *Manager {
 }
 
 func (m *Manager) StartEnabled(ctx context.Context) {
+	m.transitionMu.Lock()
+	defer m.transitionMu.Unlock()
+	m.mu.Lock()
+	m.started = true
+	m.mu.Unlock()
+	m.startEnabled(ctx)
+}
+
+func (m *Manager) startEnabled(ctx context.Context) {
 	names := m.Names()
 	for _, name := range names {
 		m.mu.RLock()
@@ -88,7 +125,7 @@ func (m *Manager) StartEnabled(ctx context.Context) {
 		if !enabled {
 			continue
 		}
-		_ = m.Enable(ctx, name)
+		_ = m.enable(ctx, name)
 	}
 }
 
@@ -104,17 +141,49 @@ func (m *Manager) Names() []string {
 }
 
 func (m *Manager) Status() []ServerStatus {
+	policy := m.sandboxStatus()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	statuses := make([]ServerStatus, 0, len(m.servers))
 	for _, server := range m.servers {
-		statuses = append(statuses, ServerStatus{Name: server.Name, Enabled: server.Enabled, Ready: server.Ready, ToolCount: len(server.Tools), Error: server.LastError})
+		available := 0
+		for _, candidate := range server.Tools {
+			if toolAllowed(server.Config, candidate.Name, policy) {
+				available++
+			}
+		}
+		blockedTools := len(server.Tools) - available
+		blockedReason := server.Blocked
+		if blockedTools > 0 && blockedReason == "" {
+			blockedReason = "部分工具因当前 sandbox policy 或缺少精确 toolAccess 被阻止"
+		}
+		statuses = append(statuses, ServerStatus{
+			Name:             server.Name,
+			Enabled:          server.Enabled,
+			Ready:            server.Ready,
+			ToolCount:        available,
+			BlockedToolCount: blockedTools,
+			Transport:        normalizedTransport(server.Config.Type),
+			Enforcement:      enforcementText(server.Config, policy),
+			Generation:       m.generation,
+			BlockedReason:    blockedReason,
+			Error:            server.LastError,
+		})
 	}
 	sort.Slice(statuses, func(i, j int) bool { return statuses[i].Name < statuses[j].Name })
 	return statuses
 }
 
 func (m *Manager) Enable(ctx context.Context, name string) error {
+	m.transitionMu.Lock()
+	defer m.transitionMu.Unlock()
+	m.mu.Lock()
+	m.started = true
+	m.mu.Unlock()
+	return m.enable(ctx, name)
+}
+
+func (m *Manager) enable(ctx context.Context, name string) error {
 	m.mu.Lock()
 	server := m.servers[name]
 	if server == nil {
@@ -128,10 +197,22 @@ func (m *Manager) Enable(ctx context.Context, name string) error {
 	}
 	cfg := server.Config
 	factory := m.factory
+	sandboxManager := m.sandbox
 	workspace := m.workspace
 	m.mu.Unlock()
 
-	transport, err := factory(ctx, name, cfg, workspace)
+	policy := m.sandboxStatus()
+	if reason := serverStartBlock(cfg, policy); reason != "" {
+		m.recordBlocked(name, reason)
+		return nil
+	}
+	var transport Transport
+	var err error
+	if factory != nil {
+		transport, err = factory(ctx, name, cfg, workspace)
+	} else {
+		transport, err = defaultTransportFactory(ctx, name, cfg, workspace, sandboxManager)
+	}
 	if err != nil {
 		m.recordError(name, err)
 		return err
@@ -157,11 +238,18 @@ func (m *Manager) Enable(ctx context.Context, name string) error {
 	server.Tools = tools
 	server.Ready = true
 	server.Enabled = true
+	server.Blocked = ""
 	server.LastError = ""
 	return nil
 }
 
 func (m *Manager) Disable(name string) error {
+	m.transitionMu.Lock()
+	defer m.transitionMu.Unlock()
+	return m.disable(name)
+}
+
+func (m *Manager) disable(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	server := m.servers[name]
@@ -175,14 +263,17 @@ func (m *Manager) Disable(name string) error {
 	server.Enabled = false
 	server.Ready = false
 	server.Tools = nil
+	server.Blocked = ""
 	return nil
 }
 
 func (m *Manager) Restart(ctx context.Context, name string) error {
-	if err := m.Disable(name); err != nil {
+	m.transitionMu.Lock()
+	defer m.transitionMu.Unlock()
+	if err := m.disable(name); err != nil {
 		return err
 	}
-	return m.Enable(ctx, name)
+	return m.enable(ctx, name)
 }
 
 func (m *Manager) Logs(name string) []string {
@@ -196,6 +287,7 @@ func (m *Manager) Logs(name string) []string {
 }
 
 func (m *Manager) Tools() []RegisteredTool {
+	policy := m.sandboxStatus()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var out []RegisteredTool
@@ -204,7 +296,15 @@ func (m *Manager) Tools() []RegisteredTool {
 			continue
 		}
 		for _, t := range server.Tools {
-			out = append(out, RegisteredTool{Server: server.Name, Tool: t})
+			if !toolAllowed(server.Config, t.Name, policy) {
+				continue
+			}
+			out = append(out, RegisteredTool{
+				Server:          server.Name,
+				Tool:            t,
+				MinimumMode:     configuredToolMode(server.Config, t.Name),
+				RequiresNetwork: isHTTPTransport(server.Config.Type),
+			})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -217,19 +317,33 @@ func (m *Manager) Tools() []RegisteredTool {
 }
 
 type RegisteredTool struct {
-	Server string
-	Tool   Tool
+	Server          string
+	Tool            Tool
+	MinimumMode     sandbox.Mode
+	RequiresNetwork bool
 }
 
 func (m *Manager) CallTool(ctx context.Context, serverName, toolName string, args map[string]string) (string, error) {
+	policy := m.sandboxStatus()
 	m.mu.RLock()
 	server := m.servers[serverName]
+	if m.transitioning {
+		m.mu.RUnlock()
+		return "", errors.New("MCP policy transition 正在进行")
+	}
 	if server == nil || !server.Enabled || !server.Ready || server.transport == nil {
 		m.mu.RUnlock()
 		return "", errors.New("MCP server 未就绪: " + serverName)
 	}
+	if !toolAllowed(server.Config, toolName, policy) {
+		required := configuredToolMode(server.Config, toolName)
+		m.mu.RUnlock()
+		return "", fmt.Errorf("MCP 工具被 sandbox policy 拒绝: %s/%s 需要 %s，当前 %s", serverName, toolName, required, policy.Mode)
+	}
 	transport := server.transport
+	m.calls.Add(1)
 	m.mu.RUnlock()
+	defer m.calls.Done()
 
 	raw, err := transport.Call(ctx, "tools/call", map[string]any{"name": toolName, "arguments": args})
 	if err != nil {
@@ -248,20 +362,211 @@ func RegisterTools(registry *tool.Registry, manager *Manager) {
 		}
 		registry.Register(tool.Tool{
 			Name:        localName,
-			Description: "[MCP " + serverName + "] " + item.Tool.Description,
+			Description: "[MCP " + serverName + "] " + item.Tool.Description + annotationSummary(item.Tool.Annotations),
 			Parameters:  schema,
 			Exec: func(ctx context.Context, args map[string]string) (string, error) {
 				return manager.CallTool(ctx, serverName, remoteName, args)
 			},
 			PromptSnippet: "Call MCP tool " + serverName + "/" + remoteName,
+			Policy: tool.Policy{
+				Source:          tool.SourceMCP,
+				MinimumMode:     item.MinimumMode,
+				RequiresNetwork: item.RequiresNetwork,
+			},
 		})
 	}
 }
 
+func annotationSummary(annotations *ToolAnnotations) string {
+	if annotations == nil {
+		return ""
+	}
+	var hints []string
+	if annotations.ReadOnlyHint != nil {
+		hints = append(hints, fmt.Sprintf("readOnlyHint=%t", *annotations.ReadOnlyHint))
+	}
+	if annotations.DestructiveHint != nil {
+		hints = append(hints, fmt.Sprintf("destructiveHint=%t", *annotations.DestructiveHint))
+	}
+	if annotations.OpenWorldHint != nil {
+		hints = append(hints, fmt.Sprintf("openWorldHint=%t", *annotations.OpenWorldHint))
+	}
+	if len(hints) == 0 {
+		return ""
+	}
+	return " [untrusted server hints: " + strings.Join(hints, ", ") + "]"
+}
+
+func (m *Manager) Reconfigure(ctx context.Context, apply func() error) error {
+	m.transitionMu.Lock()
+	defer m.transitionMu.Unlock()
+
+	m.mu.Lock()
+	m.transitioning = true
+	m.generation++
+	started := m.started
+	transports := make([]Transport, 0, len(m.servers))
+	for _, server := range m.servers {
+		if server.transport != nil {
+			transports = append(transports, server.transport)
+		}
+		server.transport = nil
+		server.Ready = false
+		server.Tools = nil
+		server.Blocked = ""
+	}
+	m.mu.Unlock()
+
+	for _, transport := range transports {
+		_ = transport.Close()
+	}
+	m.calls.Wait()
+
+	var applyErr error
+	if apply != nil {
+		applyErr = apply()
+	}
+	if started {
+		m.startEnabled(ctx)
+	}
+	m.mu.Lock()
+	m.transitioning = false
+	m.generation++
+	m.mu.Unlock()
+	return applyErr
+}
+
+func (m *Manager) Close() error {
+	m.transitionMu.Lock()
+	defer m.transitionMu.Unlock()
+	m.mu.Lock()
+	m.transitioning = true
+	m.started = false
+	transports := make([]Transport, 0, len(m.servers))
+	for _, server := range m.servers {
+		if server.transport != nil {
+			transports = append(transports, server.transport)
+		}
+		server.transport = nil
+		server.Ready = false
+		server.Tools = nil
+	}
+	m.mu.Unlock()
+	var first error
+	for _, transport := range transports {
+		if err := transport.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	m.calls.Wait()
+	return first
+}
+
+func (m *Manager) sandboxStatus() sandbox.Status {
+	m.mu.RLock()
+	manager := m.sandbox
+	m.mu.RUnlock()
+	if manager == nil {
+		return sandbox.Status{
+			Mode:                    sandbox.ModeFullAccess,
+			NetworkAccess:           true,
+			ConfiguredNetworkAccess: true,
+			Capabilities:            sandbox.Capabilities{Backend: "none", Available: true},
+		}
+	}
+	return manager.Status()
+}
+
+func configuredToolMode(cfg config.MCPServerSetting, toolName string) sandbox.Mode {
+	raw := strings.TrimSpace(cfg.ToolAccess[toolName])
+	mode, err := sandbox.ParseMode(raw)
+	if err != nil {
+		return sandbox.ModeFullAccess
+	}
+	return mode
+}
+
+func toolAllowed(cfg config.MCPServerSetting, toolName string, status sandbox.Status) bool {
+	if status.Mode == sandbox.ModeFullAccess {
+		return true
+	}
+	required := configuredToolMode(cfg, toolName)
+	if isHTTPTransport(cfg.Type) {
+		return status.NetworkAccess && required == sandbox.ModeReadOnly
+	}
+	switch required {
+	case sandbox.ModeReadOnly:
+		return true
+	case sandbox.ModeWorkspaceWrite:
+		return status.Mode == sandbox.ModeWorkspaceWrite
+	default:
+		return false
+	}
+}
+
+func serverStartBlock(cfg config.MCPServerSetting, status sandbox.Status) string {
+	if status.Mode == sandbox.ModeFullAccess {
+		return ""
+	}
+	if isHTTPTransport(cfg.Type) && !status.NetworkAccess {
+		return "sandbox network 已关闭，HTTP MCP 未初始化"
+	}
+	for _, access := range cfg.ToolAccess {
+		required, err := sandbox.ParseMode(strings.TrimSpace(access))
+		if err != nil {
+			continue
+		}
+		if isHTTPTransport(cfg.Type) {
+			if required == sandbox.ModeReadOnly {
+				return ""
+			}
+			continue
+		}
+		if required == sandbox.ModeReadOnly || (required == sandbox.ModeWorkspaceWrite && status.Mode == sandbox.ModeWorkspaceWrite) {
+			return ""
+		}
+	}
+	return "当前 sandbox policy 下没有通过 toolAccess 授权的 MCP 工具"
+}
+
+func normalizedTransport(raw string) string {
+	if isHTTPTransport(raw) {
+		return "http"
+	}
+	return "stdio"
+}
+
+func isHTTPTransport(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "http", "streamable_http", "streamable-http", "streamablehttp":
+		return true
+	default:
+		return false
+	}
+}
+
+func enforcementText(cfg config.MCPServerSetting, status sandbox.Status) string {
+	if status.Mode == sandbox.ModeFullAccess {
+		return "unrestricted"
+	}
+	if isHTTPTransport(cfg.Type) {
+		return "trusted-remote"
+	}
+	backend := status.Capabilities.Backend
+	if backend == "" {
+		backend = "native"
+	}
+	return backend + "/" + string(status.Mode)
+}
+
 func DefaultTransportFactory(ctx context.Context, _ string, cfg config.MCPServerSetting, workspace string) (Transport, error) {
+	return defaultTransportFactory(ctx, "", cfg, workspace, nil)
+}
+
+func defaultTransportFactory(ctx context.Context, _ string, cfg config.MCPServerSetting, workspace string, launcher *sandbox.Manager) (Transport, error) {
 	switch strings.ToLower(strings.TrimSpace(cfg.Type)) {
 	case "", "stdio":
-		return NewStdioTransport(ctx, cfg, workspace)
+		return newStdioTransport(ctx, cfg, workspace, launcher)
 	case "http", "streamable_http", "streamable-http", "streamablehttp":
 		return NewHTTPTransport(cfg), nil
 	default:
@@ -353,12 +658,12 @@ func (*HTTPTransport) Logs() []string { return nil }
 type StdioTransport struct {
 	mu      sync.Mutex
 	cmd     *exec.Cmd
+	process sandbox.LongRunningProcess
 	stdin   io.WriteCloser
 	scanner *bufio.Scanner
 	logs    *LogRingBuffer
 	nextID  int64
 }
-
 
 var mcpVarRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_.]*)\}`)
 
@@ -376,6 +681,10 @@ func expandMCPVars(s string, workspace, home string) string {
 	})
 }
 func NewStdioTransport(ctx context.Context, cfg config.MCPServerSetting, workspace string) (*StdioTransport, error) {
+	return newStdioTransport(ctx, cfg, workspace, nil)
+}
+
+func newStdioTransport(ctx context.Context, cfg config.MCPServerSetting, workspace string, launcher *sandbox.Manager) (*StdioTransport, error) {
 	if strings.TrimSpace(cfg.Command) == "" {
 		return nil, errors.New("MCP stdio command 不能为空")
 	}
@@ -385,12 +694,40 @@ func NewStdioTransport(ctx context.Context, cfg config.MCPServerSetting, workspa
 	for i, arg := range cfg.Args {
 		args[i] = expandMCPVars(arg, workspace, home)
 	}
-	cmd := exec.CommandContext(ctx, command, args...)
-	cmd.Dir = workspace
-	cmd.Env = os.Environ()
+	extraEnv := make([]string, 0, len(cfg.Env))
 	for key, value := range cfg.Env {
-		cmd.Env = append(cmd.Env, key+"="+expandMCPVars(value, workspace, home))
+		extraEnv = append(extraEnv, key+"="+expandMCPVars(value, workspace, home))
 	}
+	sort.Strings(extraEnv)
+	if launcher != nil {
+		process, err := launcher.StartProcess(ctx, sandbox.ProcessSpec{
+			Program:     command,
+			Args:        args,
+			Directory:   workspace,
+			Environment: extraEnv,
+		}, nil)
+		if err != nil {
+			return nil, err
+		}
+		logs := NewLogRingBuffer(200)
+		go readLines(process.Stderr(), logs)
+		scanner := bufio.NewScanner(process.Stdout())
+		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		return &StdioTransport{
+			process: process,
+			stdin:   process.Stdin(),
+			scanner: scanner,
+			logs:    logs,
+		}, nil
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	cmd := exec.Command(command, args...)
+	cmd.Dir = workspace
+	cmd.Env = append(os.Environ(), extraEnv...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -462,7 +799,13 @@ func (t *StdioTransport) Call(ctx context.Context, method string, params any) (j
 }
 
 func (t *StdioTransport) Close() error {
-	if t == nil || t.cmd == nil || t.cmd.Process == nil {
+	if t == nil {
+		return nil
+	}
+	if t.process != nil {
+		return t.process.Close()
+	}
+	if t.cmd == nil || t.cmd.Process == nil {
 		return nil
 	}
 	_ = t.stdin.Close()
@@ -630,7 +973,7 @@ func foldUnion(schema map[string]any, field string) {
 	var desc strings.Builder
 	if existing, _ := schema["description"].(string); existing != "" {
 		desc.WriteString(existing)
-			desc.WriteByte('\n')
+		desc.WriteByte('\n')
 	}
 	desc.WriteString(field + " options: ")
 	for _, option := range union {
@@ -698,7 +1041,19 @@ func (m *Manager) recordError(name string, err error) {
 	defer m.mu.Unlock()
 	if server := m.servers[name]; server != nil {
 		server.LastError = err.Error()
+		server.Blocked = ""
 		server.Ready = false
+	}
+}
+
+func (m *Manager) recordBlocked(name, reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if server := m.servers[name]; server != nil {
+		server.LastError = ""
+		server.Blocked = reason
+		server.Ready = false
+		server.Tools = nil
 	}
 }
 

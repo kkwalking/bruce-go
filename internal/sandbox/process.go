@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"sync"
 	"time"
@@ -93,4 +94,139 @@ func runProcess(ctx context.Context, program string, args []string, spec Command
 		return result, nil
 	}
 	return result, runErr
+}
+
+type managedProcess struct {
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	stdout  io.ReadCloser
+	stderr  io.ReadCloser
+	done    chan struct{}
+	cleanup func()
+
+	watchOnce sync.Once
+	closeOnce sync.Once
+	mu        sync.Mutex
+	waitErr   error
+}
+
+func startManagedProcess(ctx context.Context, prepared PreparedProcess, cleanup func()) (*managedProcess, error) {
+	if prepared.Program == "" {
+		if cleanup != nil {
+			cleanup()
+		}
+		return nil, errors.New("启动 sandbox 长驻进程: program 不能为空")
+	}
+	select {
+	case <-ctx.Done():
+		if cleanup != nil {
+			cleanup()
+		}
+		return nil, ctx.Err()
+	default:
+	}
+	cmd := exec.Command(prepared.Program, prepared.Args...)
+	cmd.Dir = prepared.Directory
+	cmd.Env = prepared.Environment
+	configureProcess(cmd)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		if cleanup != nil {
+			cleanup()
+		}
+		return nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		if cleanup != nil {
+			cleanup()
+		}
+		return nil, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		if cleanup != nil {
+			cleanup()
+		}
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
+		if cleanup != nil {
+			cleanup()
+		}
+		return nil, fmt.Errorf("启动 sandbox 长驻进程: %w", err)
+	}
+	return &managedProcess{
+		cmd:     cmd,
+		stdin:   stdin,
+		stdout:  stdout,
+		stderr:  stderr,
+		done:    make(chan struct{}),
+		cleanup: cleanup,
+	}, nil
+}
+
+func (p *managedProcess) startWatcher() {
+	p.watchOnce.Do(func() {
+		go func() {
+			err := p.cmd.Wait()
+			p.mu.Lock()
+			p.waitErr = err
+			p.mu.Unlock()
+			if p.cleanup != nil {
+				p.cleanup()
+			}
+			close(p.done)
+		}()
+	})
+}
+
+func (p *managedProcess) Stdin() io.WriteCloser { return p.stdin }
+func (p *managedProcess) Stdout() io.ReadCloser { return p.stdout }
+func (p *managedProcess) Stderr() io.ReadCloser { return p.stderr }
+
+func (p *managedProcess) PID() int {
+	if p == nil || p.cmd == nil || p.cmd.Process == nil {
+		return 0
+	}
+	return p.cmd.Process.Pid
+}
+
+func (p *managedProcess) Wait() error {
+	if p == nil {
+		return nil
+	}
+	p.startWatcher()
+	<-p.done
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.waitErr
+}
+
+func (p *managedProcess) Close() error {
+	if p == nil {
+		return nil
+	}
+	p.closeOnce.Do(func() {
+		_ = p.stdin.Close()
+		p.startWatcher()
+		select {
+		case <-p.done:
+			return
+		default:
+		}
+		killProcessTree(p.cmd)
+	})
+	err := p.Wait()
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return nil
+	}
+	return err
 }

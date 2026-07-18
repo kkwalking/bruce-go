@@ -3,13 +3,13 @@
 ## 文档信息
 
 - 文档状态：当前实现基线
-- 更新日期：2026-07-16
-- 实现分支：`zzk/add-native-sandbox`
+- 更新日期：2026-07-17
+- 实现分支：`zzk/enforce-mcp-sandbox-boundaries`
 - 配套需求：[`sandbox-requirements.md`](sandbox-requirements.md)
 
 ## 1. 设计概述
 
-Bruce 在 Runtime 内持有一个 `sandbox.Manager`，由 Manager 统一管理模式、网络偏好、平台能力、敏感路径、Git 布局和临时目录。Shell 命令经过 Manager 获取不可变策略快照，再被分发到宿主、Seatbelt 或 Bubblewrap Runner；内置文件工具不启动子进程，而是通过 Go `os.Root` 将所有访问限制在 workspace 内。
+Bruce 在 Runtime 内持有一个 `sandbox.Manager`，由 Manager 统一管理模式、网络偏好、policy generation、平台能力、敏感路径、Git 布局和临时目录。Shell 命令与 stdio MCP 长驻进程经过 Manager 获取不可变策略快照，再被分发到宿主、Seatbelt 或 Bubblewrap Runner；内置文件工具通过 Go `os.Root` 将访问限制在 workspace 内，全部工具还要经过 Registry 的统一策略门禁。
 
 当前默认模式为 `full-access`。它直接走宿主 Runner，网络强制开启，不使用平台原生沙箱。`read-only` 和 `workspace-write` 才会调用 Seatbelt 或 Bubblewrap，并在后端不可用时 fail closed。
 
@@ -25,6 +25,10 @@ flowchart TD
     RT --> TOOLS["内置文件工具"]
     TOOLS --> ROOT["os.Root workspace 边界"]
     ROOT --> GITDENY[".git 禁写 + 模式检查"]
+    RT --> MCP["MCP Manager"]
+    MCP -->|stdio| SNAP
+    MCP -->|HTTP 安全模式| TRUST["显式 trusted read-only"]
+    MCP --> GATE["Registry policy gate"]
 ```
 
 ## 2. 设计原则
@@ -36,12 +40,13 @@ flowchart TD
 5. **兼容模式显式化**：`full-access` 明确表示无原生隔离，并强制显示网络开启。
 6. **最小动态授权**：安全模式只授权 workspace、命令临时目录和经验证的当前 Git 元数据。
 7. **可诊断但不泄密**：状态中展示后端与错误原因，错误中不包含环境变量值或凭据内容。
+8. **MCP 默认拒绝**：安全模式仅授权精确 `toolAccess`，缺失策略和服务端 annotation 不能提升权限。
 
 ## 3. 模块划分
 
 | 模块 | 责任 |
 | --- | --- |
-| `internal/config` | Sandbox 配置结构、默认值、mode 与 `allowedEnv` 校验 |
+| `internal/config` | Sandbox 与 MCP `toolAccess` 配置、默认值和确定性校验 |
 | `internal/sandbox/types.go` | 公共类型、模式、策略、执行结果、能力和错误定义 |
 | `internal/sandbox/manager.go` | 策略状态、后端探测、环境构造、预检、命令调度和生命周期 |
 | `internal/sandbox/runner_host.go` | `full-access` 宿主命令执行 |
@@ -50,8 +55,9 @@ flowchart TD
 | `internal/sandbox/runner_unsupported.go` | 不支持平台的不可用实现 |
 | `internal/sandbox/process*.go` | 有界输出、超时、取消和进程树回收 |
 | `internal/sandbox/git_*.go` | 普通仓库与 linked worktree 布局发现和校验 |
-| `internal/tool` | Shell 接入 Manager；文件工具接入 `os.Root` 与写策略 |
-| `internal/integrated` | Runtime 初始化、Slash 命令、状态输出、关闭清理 |
+| `internal/tool` | 统一 Tool Policy、LLM definitions/prompt 过滤和执行时 generation 门禁 |
+| `internal/mcp` | stdio/HTTP transport、工具授权、policy transition、进程重启和状态 |
+| `internal/integrated` | Runtime 初始化、MCP/Sandbox 协调切换、Slash 命令、状态输出、关闭清理 |
 | `internal/planning` | Plan mode 的只读策略覆盖 |
 | `internal/tui` | 状态栏和层级命令补全 |
 
@@ -84,7 +90,7 @@ const (
 
 每次执行都会复制切片和 Git 布局，Runner 不直接读取 Manager 的可变状态。
 
-### 4.3 `CommandSpec` 与 `RunResult`
+### 4.3 `CommandSpec`、`ProcessSpec` 与执行结果
 
 `CommandSpec` 描述命令文本、工作目录、环境、超时和最大输出字符数。`RunResult` 返回：
 
@@ -95,6 +101,8 @@ const (
 - `Truncated`。
 
 策略拒绝和启动失败通过 `error` 返回；正常启动后的非零退出主要通过退出码和输出表达。
+
+`ProcessSpec` 使用原始 program/args、工作目录和附加环境描述 stdio MCP 等长驻进程。Runner 返回 `PreparedProcess`，Manager 启动后暴露受管理的 stdin/stdout/stderr、PID、`Wait` 和幂等 `Close`。安全模式不会经过 `/bin/bash -c`，避免 MCP argv 被二次解释。
 
 ### 4.4 `Capabilities`
 
@@ -114,17 +122,30 @@ type Capabilities struct {
 type Runner interface {
     Probe(ctx context.Context) Capabilities
     Run(ctx context.Context, spec CommandSpec, policy Policy) (RunResult, error)
+    PrepareProcess(spec ProcessSpec, policy Policy) (PreparedProcess, error)
 }
 ```
 
-Runner 只负责平台探测和执行，不负责运行时模式切换。是否允许执行由 Manager 预检统一决定。
+Runner 只负责平台探测、一次性命令执行和长驻进程包装，不负责运行时模式切换。是否允许执行由 Manager 预检统一决定。
 
 ## 5. 配置设计
 
-配置位于用户 `setting.json` 的 `sandbox` 节点：
+配置位于用户 `setting.json` 的 `sandbox` 和 `mcp.servers` 节点：
 
 ```json
 {
+  "mcp": {
+    "servers": {
+      "filesystem": {
+        "type": "stdio",
+        "command": "mcp-server-filesystem",
+        "toolAccess": {
+          "read_file": "read-only",
+          "write_file": "workspace-write"
+        }
+      }
+    }
+  },
   "sandbox": {
     "mode": "full-access",
     "networkAccess": false,
@@ -138,9 +159,12 @@ Runner 只负责平台探测和执行，不负责运行时模式切换。是否�
 - 缺省值填充。
 - mode 枚举校验。
 - `allowedEnv` 精确变量名校验、trim 和去重。
+- MCP `toolAccess` 工具名 trim、精确匹配、模式校验和 HTTP `workspace-write` 拒绝。
 - 启动错误传播。
 
 Slash 命令只调用 Manager 的 setter，不修改配置对象或配置文件。
+
+安全模式下未出现在 `toolAccess` 中的 MCP 工具按 `full-access` 处理并拒绝；`full-access` 下旧配置仍暴露全部工具。服务端 annotation 只进入带有“不可信提示”标记的描述，不参与授权。
 
 ## 6. Manager 状态模型
 
@@ -148,6 +172,7 @@ Manager 使用 `sync.RWMutex` 保护以下可变状态：
 
 - `mode`。
 - `networkAccess` 配置偏好。
+- 单调递增的 policy `generation`。
 - 后端能力和策略错误的读取。
 
 后端、workspace、HOME、敏感路径、Git 布局和临时根在初始化后保持不变。
@@ -166,7 +191,7 @@ effectiveNetwork = mode == full-access || configuredNetwork
 - 安全模式使用用户配置或 Slash 命令保存的网络偏好。
 - 从 `full-access` 切回安全模式时恢复此前偏好。
 
-`SetNetworkAccess` 只保存网络偏好：在 `full-access` 下保存 `off` 不会改变有效网络（始终开启），UI 会以 `network=开启 (配置=关闭)` 的形式展示差异，并在切换到安全模式后生效。
+`SetNetworkAccess` 保存网络偏好并在值变化时增加 generation：在 `full-access` 下保存 `off` 不会改变有效网络（始终开启），UI 会以 `network=开启 (配置=关闭)` 的形式展示差异，并在切换到安全模式后生效。
 
 ### 6.2 模式切换
 
@@ -176,6 +201,8 @@ effectiveNetwork = mode == full-access || configuredNetwork
 - 原生后端能力是否可用。
 
 目标为 `full-access` 时不依赖原生后端，因此允许在后端探测失败后切换。
+
+Runtime 不直接调用 setter 后立即返回，而是通过 MCP Manager 的 `Reconfigure` 串行完成旧 transport 关闭、策略提交、server 重启、Registry 刷新和 agent prompt 重建。更严格模式已提交后即使个别 server 重启失败也不会回滚。
 
 ### 6.3 策略快照
 
@@ -208,9 +235,9 @@ sequenceDiagram
     Manager->>Manager: 幂等删除临时根
 ```
 
-Manager 的临时根由 `os.MkdirTemp` 创建，权限受当前用户控制。安全模式每条命令再创建独立的 `command-*` 子目录，其中包含 `tmp`、`cache`、`run`。命令结束立即删除子目录；Manager 关闭时删除整个运行时临时根。
+Manager 的临时根由 `os.MkdirTemp` 创建，权限受当前用户控制。安全模式每条命令创建独立的 `command-*` 子目录，每个 stdio MCP 进程创建生命周期独立的 `process-*` 子目录，其中都包含 `tmp`、`cache`、`run`。命令结束或 transport 关闭后立即删除对应子目录；Manager 关闭时删除整个运行时临时根。
 
-`Close` 使用 `sync.Once` 保证幂等。主程序通过 `defer` 关闭 Runtime，测试也显式清理。
+`Close` 使用 `sync.Once` 保证幂等。Runtime 先关闭 MCP transport 和进程树，再关闭 Sandbox Manager；测试也显式清理。
 
 ## 8. Shell 执行链路
 
@@ -286,6 +313,8 @@ Manager 遍历宿主环境，只按变量名选择，不记录或输出秘密值
 
 `HOME` 保留真实路径以兼容只读配置发现。写权限由原生文件系统策略控制，而不是通过伪造 HOME 实现。
 
+stdio MCP 在这份安全基础环境上只合并该 server 配置中显式给出的 `env`，并先展开 `${PROJECT_DIR}` 与 `${HOME}`。合并按变量名覆盖且不打印值，不会因为 server 需要某个变量而继承其余宿主环境。
+
 ### 9.3 `full-access` 环境
 
 宿主 Runner 直接使用 `os.Environ()`，不应用允许列表或缓存重定向。这是兼容模式的设计选择。
@@ -304,6 +333,7 @@ stdout 和 stderr 写入同一个 `cappedBuffer`。缓冲区在命令运行期�
 - context 超时或取消时向负 PGID 发送终止信号，并补充终止主进程。
 - `exec.Cmd.WaitDelay` 提供短暂等待，避免管道或残留子进程使 Wait 永久挂起。
 - Bubblewrap 额外使用 `--die-with-parent`。
+- stdio transport 关闭时终止独立进程组，等待主进程退出并清理专用临时根。
 
 结果分别设置 `TimedOut` 或 `Canceled`，不会把二者混为普通非零退出。
 
@@ -326,7 +356,7 @@ Profile 采用静态规则骨架，动态路径通过 `-DKEY=value` 参数传递
 - 网络只在有效网络开启时放行。
 - 未列出的 Apple Events、LaunchServices、Mach Service 和 Unix Socket 保持拒绝。
 
-Seatbelt 的 profile 与参数作为 argv 传给 `sandbox-exec`，其后执行安全 Bash。
+Seatbelt 的 profile 与参数作为 argv 传给 `sandbox-exec`；一次性命令执行安全 Bash，stdio MCP 则直接追加原始 program/args。
 
 ## 12. Linux Bubblewrap 设计
 
@@ -366,7 +396,7 @@ Bubblewrap 参数遵循由宽到窄的覆盖顺序：
 6. 覆盖 Git 受保护路径。
 7. 以空目录或不可用文件遮蔽敏感路径与 Socket。
 8. 清空环境并逐项设置安全环境。
-9. 设置工作目录并执行安全 Bash。
+9. 设置工作目录并执行安全 Bash 或 stdio MCP 原始 program/args。
 
 网络关闭时追加 `--unshare-net`；网络开启时不隔离 network namespace，但敏感 Socket 遮蔽仍生效。
 
@@ -438,11 +468,41 @@ Linked worktree 的 `.git` 是指向 common dir 下某个 `worktrees/<name>` 的
 6. 工具层补充拒绝最终组件软链接、尾部斜杠越界和 `.git` 修改。
 7. Manager 在 `read-only` 模式下通过 `CanWriteFile` 提前拒绝写工具。
 
-`full-access` 只放宽 Shell，不放宽内置文件工具。因此即使 Shell 能直接修改任意文件，`write_file` 和 `edit_file` 仍被限制在 workspace 且不能直接修改 `.git`。
+对内置文件工具而言，`full-access` 不放宽其 workspace 边界。因此即使 Shell 或 MCP 能直接修改任意文件，`write_file` 和 `edit_file` 仍被限制在 workspace 且不能直接修改 `.git`。
 
 HITL 如果修改了命令或文件参数，工具必须使用修改后的参数重新执行 CommandGuard、workspace 归一化和沙箱写策略检查。
 
-## 15. Plan mode 设计
+## 15. MCP 沙箱设计
+
+### 15.1 统一工具策略
+
+每个 `tool.Tool` 都携带来源、最低 sandbox mode 和网络要求。零值或未知策略按 `full-access` fail closed。Registry 使用同一判定函数过滤 `Definitions()` 与 `BuildPrompt()`，并在 HITL 前、HITL 改参后和真正调用 `Exec` 前重新读取当前 generation。这样模型提示、陈旧工具闭包、直接调用和 HITL 批准都不能提升权限。
+
+MCP 工具以远端工具原名查询 server 的 `toolAccess`：`read-only` 在两个安全模式均可用，`workspace-write` 只在同名模式可用，未分类或 `full-access` 工具只在兼容模式可用。服务端 annotation 会作为 `untrusted server hints` 展示，但不参与授权。
+
+### 15.2 stdio transport
+
+安全模式的 stdio server 通过 `sandbox.Manager.StartProcess` 启动，初始化、后台任务和所有工具调用共享同一个不可变进程策略。macOS 由 Seatbelt 包装原始 argv，Linux 由 Bubblewrap 包装原始 argv；后端不可用或策略构造失败时 server 保持 blocked/error，不会调用宿主 `exec.Command` 重试。
+
+`read-only` 进程只能写专用临时根；`workspace-write` 额外获得 workspace 和经验证 Git 写根。两者都继承敏感路径、Socket 和有效网络限制。`full-access` 直接启动原程序、继承完整宿主环境并明确显示 `unrestricted`，用于兼容旧配置而不宣称已隔离。
+
+### 15.3 HTTP transport
+
+HTTP MCP 的远端进程不受 Bruce 本机 Seatbelt/Bubblewrap 控制。安全模式因此只接受用户精确配置为 `read-only` 的工具，并在状态中显示 `trusted-remote`；`workspace-write` 配置在加载阶段报错。有效网络关闭时 HTTP server 不初始化，annotation 不能替代用户信任声明。
+
+### 15.4 policy transition
+
+MCP Manager 使用独立 `transitionMu`、`transitioning` gate 和 generation 串行协调 mode/network 变化：
+
+1. 标记 transitioning，拒绝新调用并移除旧 transport 引用。
+2. 关闭旧 transport，终止 stdio 进程树，并等待已计数调用结束。
+3. 提交 Sandbox Manager 的新 mode/network。
+4. 按新 snapshot 重启已启用 server，重新发现并过滤工具。
+5. Runtime 刷新 Registry、重建 agent prompt，再报告切换结果。
+
+重启失败只影响对应 server：新 sandbox mode 保持生效，旧高权限 transport 不恢复，状态记录稳定 error/blocked 原因。`/mcp`、`/sandbox status`、`/status` 和 TUI 状态栏展示 transport、enforcement、generation、可用/阻止工具数；配置 Header 和环境变量值不进入状态。
+
+## 16. Plan mode 设计
 
 Planning 工具注册 `execute_command` 时传入 `ModeReadOnly` 覆盖，而不是临时修改全局 Manager 模式。优点是：
 
@@ -452,9 +512,9 @@ Planning 工具注册 `execute_command` 时传入 `ModeReadOnly` 覆盖，而不
 
 Plan mode 使用 Manager 当前保存的安全网络偏好；模式覆盖只改变文件系统权限和 Runner 路径，不自动开启网络。
 
-## 16. Slash 命令与 TUI
+## 17. Slash 命令与 TUI
 
-### 16.1 命令解析
+### 17.1 命令解析
 
 Runtime 命令处理器识别：
 
@@ -466,7 +526,7 @@ Runtime 命令处理器识别：
 
 `/sandbox` 直接返回状态。mode 与 network setter 成功后也返回最新状态；失败时保留原状态并展示错误。
 
-### 16.2 层级补全
+### 17.2 层级补全
 
 TUI 补全器根据已输入 token 选择候选层级：
 
@@ -478,17 +538,19 @@ TUI 补全器根据已输入 token 选择候选层级：
 
 Tab 在唯一候选时直接补全，在多个候选时展开选择列表。这样 `/sandbox` 不会被当成已完成的叶子命令。
 
-### 16.3 状态格式
+### 17.3 状态格式
 
-状态由 `Manager.Status()` 统一生成，包含 mode、有效 network 和 Capabilities。`/status`、`/sandbox status` 与 TUI 状态栏复用同一语义，避免出现网络偏好为关闭、但 `full-access` 实际有网络的展示冲突。
+Sandbox 状态由 `Manager.Status()` 统一生成，包含 mode、generation、有效 network 和 Capabilities。MCP 状态补充 transport、enforcement、generation、可用/阻止工具数和 policy/error。`/mcp`、`/status`、`/sandbox status` 与 TUI 状态栏复用同一语义，既避免网络展示冲突，也不会把 `full-access` 或 trusted remote 误报为原生隔离。
 
-## 17. 错误模型
+## 18. 错误模型
 
 | 类别 | 表达方式 | 行为 |
 | --- | --- | --- |
 | 配置非法 | 配置加载错误 | Bruce 启动失败并提示字段原因 |
 | 后端不可用 | `ErrUnavailable` + backend/reason | 安全模式拒绝；TUI 可继续运行 |
 | 策略拒绝 | `ErrPolicy` + 安全原因 | 不启动命令，不降级 |
+| MCP 工具策略拒绝 | 当前 mode、来源、所需 mode | HITL 和 transport 前拒绝 |
+| MCP transition | transitioning 或 server blocked/error | 不使用旧 transport |
 | 沙箱启动失败 | Runner 包装的启动错误 | 不重试无沙箱 |
 | 命令非零退出 | `RunResult.ExitCode` | 返回命令输出和退出状态 |
 | 超时 | `TimedOut=true` | 回收进程树 |
@@ -497,9 +559,9 @@ Tab 在唯一候选时直接补全，在多个候选时展开选择列表。这�
 
 错误信息可以包含路径和系统错误，但环境构造与校验不得打印变量值。
 
-## 18. 测试与 CI 设计
+## 19. 测试与 CI 设计
 
-### 18.1 单元测试
+### 19.1 单元测试
 
 - 配置：默认值、非法 mode、旧 mode 拒绝、`allowedEnv` 校验和去重。
 - Manager：默认 `full-access`、有效网络、模式切换、后端 fail closed、环境允许列表、宽泛 workspace、敏感 workspace、并发临时目录与幂等关闭。
@@ -508,8 +570,9 @@ Tab 在唯一候选时直接补全，在多个候选时展开选择列表。这�
 - Bubblewrap：参数顺序、系统二进制信任、网络 namespace 和遮蔽规则。
 - 文件工具：`..`、绝对越界、中间/最终软链接、尾部 `/`、`.git` 禁写和 HITL 参数重校验。
 - TUI：Slash 命令切换、状态输出和层级 Tab 补全。
+- MCP：配置校验、annotation 不授权、definitions 过滤、Registry 重校验、transition 并发门禁、重启失败和无泄密状态。
 
-### 18.2 平台集成矩阵
+### 19.2 平台集成矩阵
 
 Darwin 和 Linux 共用的验收语义包括：
 
@@ -524,8 +587,10 @@ Darwin 和 Linux 共用的验收语义包括：
 - 子孙进程继承限制并在超时/取消时退出。
 - 后端失败时安全模式拒绝、`full-access` 可执行。
 - Plan mode 始终只读。
+- stdio MCP 初始化写入、只读读取、workspace 写入、宿主越界写入和网络开关。
+- MCP mode/network 切换终止旧进程，并按新策略刷新工具。
 
-### 18.3 CI
+### 19.3 CI
 
 `.github/workflows/sandbox.yml` 提供 macOS 与 Ubuntu 矩阵：
 
@@ -534,45 +599,44 @@ Darwin 和 Linux 共用的验收语义包括：
 - 设置 `BRUCE_REQUIRE_SANDBOX_TESTS=1`。
 - 执行 `go test ./...`、`go test -race ./...`、`go vet ./...`。
 
-## 19. 安全边界与权衡
+## 20. 安全边界与权衡
 
-### 19.1 默认兼容性与安全性的权衡
+### 20.1 默认兼容性与安全性的权衡
 
 默认 `full-access` 保持既有工作流和网络体验，但意味着用户未主动切换模式时没有 Seatbelt/Bubblewrap 防护。产品和文档必须持续清晰展示这一状态，不能用“沙箱可用”误导为“当前命令已被沙箱隔离”。
 
-### 19.2 workspace 信任边界
+### 20.2 workspace 信任边界
 
 workspace 内容被视为用户主动交给 Agent 的任务输入，因此安全模式不会隐藏其中的 `.env`。原生沙箱主要保护 workspace 外的宿主资源，不负责 workspace 内秘密分级。
 
-### 19.3 HOME 读取兼容性
+### 20.3 HOME 读取兼容性
 
 安全模式允许读取大部分宿主配置以维持工具链可用性，同时显式遮蔽已知敏感凭据并拒绝 HOME 写入。这不是“HOME 完全不可见”，新增工具的凭据位置需要持续补充敏感路径清单。
 
-### 19.4 网络粒度
+### 20.4 网络粒度
 
-网络是整体开关。开启后安全命令可以访问任意网络地址，只继续屏蔽已知本地 Socket；本期不提供域名或端口 allowlist。
+网络是整体开关。开启后安全命令和 stdio MCP 可以访问任意网络地址，只继续屏蔽已知本地 Socket；HTTP MCP 也仅在有效网络开启时可用。本期不提供域名或端口 allowlist，Web/LLM/Bruce 自身网络不受该开关控制。
 
-## 20. 当前已知限制与后续方向
+## 21. 当前已知限制与后续方向
 
-### 20.1 当前限制
+### 21.1 当前限制
 
 - Git 布局和敏感路径在 Manager 初始化时快照，运行时新建仓库或改变 worktree 后不会刷新。
-- 宽泛 workspace 校验当前只在以 `workspace-write` 初始化 Manager 时计算；从默认 `full-access` 动态切换时尚未重新计算。
 - Linux 对初始化时不存在的受保护路径不创建占位遮蔽挂载。
 - Seatbelt 是 macOS 兼容接口，其策略能力和诊断信息受系统版本影响。
 - `full-access` 允许访问凭据和 Socket，不能作为安全模式使用。
-- MCP、Web 工具与 Bruce 自身网络不在该 Manager 的执行边界内。
+- HTTP MCP 远端实现无法由 Bruce 验证；`trusted-remote` 只表示用户显式声明只读信任。
+- Web 工具、LLM 与 Bruce 自身网络不在该 Manager 的网络执行边界内。
 
-### 20.2 后续方向
+### 21.2 后续方向
 
-- 在每次进入 `workspace-write` 前重新验证 workspace 宽度和敏感目录关系。
 - 在仓库状态变化后安全刷新 GitLayout，或在每条安全命令前轻量复核。
 - 增加域名/端口代理与逐命令网络授权。
-- 扩展 MCP stdio 子进程的原生隔离。
+- 为 HTTP MCP 增加更细粒度的远端授权和域名策略。
 - 增加 seccomp、cgroup 和资源配额。
 - 评估 Windows AppContainer 或其他 Windows 原生隔离后端。
 
-## 21. 代码索引
+## 22. 代码索引
 
 | 主题 | 主要文件 |
 | --- | --- |
@@ -584,7 +648,8 @@ workspace 内容被视为用户主动交给 Agent 的任务输入，因此安全
 | Bubblewrap | `internal/sandbox/runner_linux.go` |
 | 宿主与不支持平台 | `internal/sandbox/runner_host.go`、`runner_unsupported.go` |
 | 进程控制 | `internal/sandbox/process.go`、`process_unix.go`、`process_other.go` |
-| Shell 与文件工具 | `internal/tool/tool.go` |
+| Shell、文件工具与统一 Tool Policy | `internal/tool/tool.go` |
+| MCP transport、授权与 transition | `internal/mcp/mcp.go` |
 | Runtime 与 Slash 命令 | `internal/integrated/runtime.go` |
 | Plan mode | `internal/planning/tools.go` |
 | TUI 补全与状态栏 | `internal/tui/completion.go`、`internal/tui/tui.go` |

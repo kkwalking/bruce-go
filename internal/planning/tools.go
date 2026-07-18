@@ -30,6 +30,7 @@ func NewToolRegistry(base *tool.Registry, store *Store, active ActivePlanFunc) *
 		PromptGuidelines: []string{
 			"plan mode 中只能执行只读探索命令；不要运行构建、测试、安装、格式化、写文件或会修改 Git/workspace 的命令。",
 		},
+		Policy: tool.Policy{Source: tool.SourcePlan, MinimumMode: sandbox.ModeReadOnly},
 	})
 	RegisterPlanTools(registry, store, active)
 	return registry
@@ -42,6 +43,7 @@ func RegisterPlanTools(registry *tool.Registry, store *Store, active ActivePlanF
 		Parameters:    rawSchema(),
 		Exec:          readPlan(store, active),
 		PromptSnippet: "Read the current markdown plan",
+		Policy:        tool.Policy{Source: tool.SourcePlan, MinimumMode: sandbox.ModeReadOnly},
 	})
 	registry.Register(tool.Tool{
 		Name:          "replace_plan",
@@ -49,6 +51,7 @@ func RegisterPlanTools(registry *tool.Registry, store *Store, active ActivePlanF
 		Parameters:    rawSchema(param{"content", "string", "完整 markdown 计划内容", true}, param{"summary", "string", "本次修改摘要", false}),
 		Exec:          replacePlan(store, active),
 		PromptSnippet: "Create or replace the current markdown plan",
+		Policy:        tool.Policy{Source: tool.SourcePlan, MinimumMode: sandbox.ModeReadOnly},
 	})
 	registry.Register(tool.Tool{
 		Name:          "edit_plan",
@@ -56,6 +59,7 @@ func RegisterPlanTools(registry *tool.Registry, store *Store, active ActivePlanF
 		Parameters:    rawSchema(param{"old_text", "string", "要替换的原文", true}, param{"new_text", "string", "替换后的文本", true}, param{"summary", "string", "本次修改摘要", false}),
 		Exec:          editPlan(store, active),
 		PromptSnippet: "Make one exact edit to the current markdown plan",
+		Policy:        tool.Policy{Source: tool.SourcePlan, MinimumMode: sandbox.ModeReadOnly},
 	})
 }
 

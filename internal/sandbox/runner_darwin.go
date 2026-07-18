@@ -54,6 +54,25 @@ func (seatbeltRunner) Run(ctx context.Context, spec CommandSpec, policy Policy) 
 	return result, nil
 }
 
+func (seatbeltRunner) PrepareProcess(spec ProcessSpec, policy Policy) (PreparedProcess, error) {
+	if strings.TrimSpace(spec.Program) == "" {
+		return PreparedProcess{}, fmt.Errorf("%w: program 不能为空", ErrPolicy)
+	}
+	profile, definitions := buildSeatbeltProfile(policy)
+	args := []string{"-p", profile}
+	for _, definition := range definitions {
+		args = append(args, "-D"+definition)
+	}
+	args = append(args, "--", spec.Program)
+	args = append(args, spec.Args...)
+	return PreparedProcess{
+		Program:     seatbeltExecutable,
+		Args:        args,
+		Directory:   spec.Directory,
+		Environment: append([]string(nil), spec.Environment...),
+	}, nil
+}
+
 func buildSeatbeltProfile(policy Policy) (string, []string) {
 	var profile strings.Builder
 	profile.WriteString(`(version 1)
