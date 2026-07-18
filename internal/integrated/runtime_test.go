@@ -92,6 +92,43 @@ func TestRuntimeHandlesTaskAndSlashCommands(t *testing.T) {
 	}
 }
 
+func TestRuntimeAgentPromptsIncludeCanonicalWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	link := filepath.Join(t.TempDir(), "workspace-link")
+	if err := os.Symlink(workspace, link); err != nil {
+		t.Skipf("创建 workspace 符号链接失败: %v", err)
+	}
+	expected, err := sandbox.CanonicalAbsolute(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := New(context.Background(), Options{
+		Workspace: link,
+		HomeDir:   t.TempDir(),
+		Client:    &agent.FakeClient{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupRuntime(t, rt)
+
+	if rt.Workspace != expected {
+		t.Fatalf("workspace = %q, want canonical path %q", rt.Workspace, expected)
+	}
+	want := "当前工作目录: " + rt.Workspace
+	for name, prompt := range map[string]string{
+		"react": rt.react.SystemPrompt,
+		"plan":  rt.planning.SystemPrompt,
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("%s system prompt missing %q:\n%s", name, want, prompt)
+		}
+		if link != rt.Workspace && strings.Contains(prompt, "当前工作目录: "+link) {
+			t.Errorf("%s system prompt contains uncanonical workspace %q", name, link)
+		}
+	}
+}
+
 func TestRuntimeSandboxTransitionRefreshesMCPToolsAndSafeStatus(t *testing.T) {
 	workspace := t.TempDir()
 	home := t.TempDir()

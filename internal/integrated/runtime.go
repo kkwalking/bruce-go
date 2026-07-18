@@ -716,7 +716,10 @@ func (r *Runtime) refreshMCPTools() {
 }
 
 func (r *Runtime) rebuildAgents() {
-	additional := strings.TrimSpace(r.Skills.CatalogPrompt())
+	additional := "当前工作目录: " + r.Workspace
+	if catalog := strings.TrimSpace(r.Skills.CatalogPrompt()); catalog != "" {
+		additional += "\n\n" + catalog
+	}
 	r.react = agent.New(r.Client, r.Tools, additional, r.Concurrent, r.Events)
 	planRegistry := planning.NewToolRegistry(r.Tools, r.planStore, func() runtime.PlanState {
 		return r.currentPlanState()
