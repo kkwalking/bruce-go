@@ -50,6 +50,67 @@ func TestReActRunsToolCallsAndReturnsFinalAnswer(t *testing.T) {
 	}
 }
 
+func TestAgentPersistsAssistantMetadataAndUsage(t *testing.T) {
+	client := &FakeClient{Provider: "provider-x", Model: "model-y", Responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{{ID: "call", Function: llm.FunctionCall{Name: "missing", Arguments: `{}`}}}, InputTokens: 10, OutputTokens: 2, CachedInputTokens: 3, FinishReason: "tool_calls"},
+		{Content: "完成", InputTokens: 20, OutputTokens: 4, CachedInputTokens: 5, FinishReason: "stop"},
+	}}
+	a := New(client, tool.EmptyRegistry(t.TempDir()), "", runtime.DefaultConcurrency(), nil)
+	if _, err := a.Run(context.Background(), llm.PreparedInput{Message: llm.User("run")}, "", "run"); err != nil {
+		t.Fatal(err)
+	}
+	var assistants []llm.Message
+	for _, message := range a.History {
+		if message.Role == llm.RoleAssistant {
+			assistants = append(assistants, message)
+		}
+	}
+	if len(assistants) != 2 {
+		t.Fatalf("assistants = %+v", assistants)
+	}
+	if assistants[0].Provider != "provider-x" || assistants[0].Model != "model-y" || assistants[0].FinishReason != "tool_calls" || assistants[0].TotalUsageTokens() != 15 {
+		t.Fatalf("tool-call metadata = %+v", assistants[0])
+	}
+	if assistants[1].FinishReason != "stop" || assistants[1].TotalUsageTokens() != 29 {
+		t.Fatalf("final metadata = %+v", assistants[1])
+	}
+}
+
+func TestAgentOverflowIsTypedAndContinueDoesNotDuplicateUser(t *testing.T) {
+	client := &FakeClient{Err: errors.New("input exceeds the context window")}
+	a := New(client, tool.EmptyRegistry(t.TempDir()), "", runtime.DefaultConcurrency(), nil)
+	_, err := a.Run(context.Background(), llm.PreparedInput{Message: llm.User("唯一用户消息")}, "", "run")
+	if !llm.IsContextOverflowError(err) {
+		t.Fatalf("error = %v", err)
+	}
+	client.Err = nil
+	client.Responses = []llm.ChatResponse{{Content: "恢复完成", FinishReason: "stop"}}
+	if out, err := a.Continue(context.Background(), "", "run"); err != nil || out != "恢复完成" {
+		t.Fatalf("continue = %q, %v", out, err)
+	}
+	users := 0
+	for _, message := range a.History {
+		if message.Role == llm.RoleUser && message.Content == "唯一用户消息" {
+			users++
+		}
+	}
+	if users != 1 {
+		t.Fatalf("user message count = %d, history=%+v", users, a.History)
+	}
+}
+
+func TestAgentLengthOverflowReturnsTypedError(t *testing.T) {
+	a := New(&FakeClient{Responses: []llm.ChatResponse{{InputTokens: 198000, FinishReason: "length"}}}, tool.EmptyRegistry(t.TempDir()), "", runtime.DefaultConcurrency(), nil)
+	_, err := a.Run(context.Background(), llm.PreparedInput{Message: llm.User("run")}, "", "run")
+	if !llm.IsContextOverflowError(err) {
+		t.Fatalf("error = %v", err)
+	}
+	last := a.History[len(a.History)-1]
+	if last.Role != llm.RoleAssistant || last.FinishReason != "length" || last.InputTokens != 198000 {
+		t.Fatalf("persisted overflow response = %+v", last)
+	}
+}
+
 func TestReActEmitsDurableToolTranscriptInProtocolOrder(t *testing.T) {
 	registry := tool.EmptyRegistry(t.TempDir())
 	registry.Register(tool.Tool{
@@ -222,9 +283,10 @@ func (c *recordingClient) Chat(_ context.Context, messages []llm.Message, _ []ll
 func (*recordingClient) ProviderName() string        { return "fake" }
 func (*recordingClient) ModelName() string           { return "fake-model" }
 func (*recordingClient) MaxContextWindow() int       { return 200000 }
+func (*recordingClient) MaxOutputTokens() int        { return 0 }
 func (*recordingClient) SupportsTools() bool         { return true }
 func (*recordingClient) SupportsPromptCaching() bool { return false }
-func (*recordingClient) SupportsImages() bool         { return false }
+func (*recordingClient) SupportsImages() bool        { return false }
 
 func TestAgentRetriesOnNetworkError(t *testing.T) {
 	bus := event.NewBus()

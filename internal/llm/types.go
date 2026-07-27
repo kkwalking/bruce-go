@@ -15,14 +15,15 @@ const (
 type StreamOptions struct {
 	OnContent   func(delta string)
 	OnReasoning func(delta string)
+	MaxTokens   int
 }
-
 
 type ChatClient interface {
 	Chat(ctx context.Context, messages []Message, tools []ToolDefinition, opts StreamOptions) (ChatResponse, error)
 	ProviderName() string
 	ModelName() string
 	MaxContextWindow() int
+	MaxOutputTokens() int
 	SupportsTools() bool
 	SupportsPromptCaching() bool
 	SupportsImages() bool
@@ -38,6 +39,9 @@ type Message struct {
 	InputTokens       int           `json:"inputTokens,omitempty"`
 	OutputTokens      int           `json:"outputTokens,omitempty"`
 	CachedInputTokens int           `json:"cachedInputTokens,omitempty"`
+	Provider          string        `json:"provider,omitempty"`
+	Model             string        `json:"model,omitempty"`
+	FinishReason      string        `json:"finishReason,omitempty"`
 }
 
 func System(content string) Message    { return Message{Role: RoleSystem, Content: content} }
@@ -75,7 +79,7 @@ func (m Message) WithoutImages() Message {
 }
 
 func (m Message) TotalUsageTokens() int {
-	return m.InputTokens + m.OutputTokens
+	return m.InputTokens + m.OutputTokens + m.CachedInputTokens
 }
 
 type ContentPartType string
@@ -150,6 +154,9 @@ type ChatResponse struct {
 	InputTokens       int
 	OutputTokens      int
 	CachedInputTokens int
+	Provider          string
+	Model             string
+	FinishReason      string
 }
 
 func (r ChatResponse) HasToolCalls() bool { return len(r.ToolCalls) > 0 }

@@ -1,8 +1,11 @@
 package llm
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -36,7 +39,7 @@ data: {"choices":[{"delta":{"content":"你好"}}]}
 
 data: {"choices":[{"delta":{"content":"！"}}]}
 
-data: {"choices":[{"delta":{"content":""}}],"usage":{"prompt_tokens":5,"completion_tokens":2}}
+data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}
 
 data: [DONE]
 
@@ -50,14 +53,26 @@ data: [DONE]
 	if resp.InputTokens != 5 || resp.OutputTokens != 2 {
 		t.Fatalf("usage = %d/%d", resp.InputTokens, resp.OutputTokens)
 	}
+	if resp.FinishReason != "stop" {
+		t.Fatalf("finish reason = %q", resp.FinishReason)
+	}
 }
 
+func TestParseChatResponseFinishReasonAndCachedUsage(t *testing.T) {
+	resp, err := ParseChatResponse([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":4}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.FinishReason != "length" || resp.InputTokens != 6 || resp.CachedInputTokens != 4 || resp.OutputTokens != 2 {
+		t.Fatalf("response = %+v", resp)
+	}
+}
 
 func TestOpenAICompatibleClientRequestBodyHonorsReasoningEffort(t *testing.T) {
 	body, err := func() ([]byte, error) {
 		c := NewOpenAICompatibleClient("deepseek", "key", "model", "https://api.example.com/v1")
 		c.SetReasoningEffort("high")
-		return c.requestBody(nil, nil, false)
+		return c.requestBody(nil, nil, false, StreamOptions{})
 	}()
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +91,7 @@ func TestOpenAICompatibleClientRequestBodyHonorsReasoningEffort(t *testing.T) {
 	// off: no reasoning fields at all
 	c2 := NewOpenAICompatibleClient("deepseek", "key", "model", "https://api.example.com/v1")
 	c2.SetReasoningEffort("off")
-	body2, err := c2.requestBody(nil, nil, false)
+	body2, err := c2.requestBody(nil, nil, false, StreamOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +109,7 @@ func TestOpenAICompatibleClientRequestBodyHonorsReasoningEffort(t *testing.T) {
 	// glm: reasoning_effort sent, but no thinking field
 	c3 := NewOpenAICompatibleClient("glm", "key", "model", "https://api.example.com/v1")
 	c3.SetReasoningEffort("medium")
-	body3, err := c3.requestBody(nil, nil, false)
+	body3, err := c3.requestBody(nil, nil, false, StreamOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,5 +122,41 @@ func TestOpenAICompatibleClientRequestBodyHonorsReasoningEffort(t *testing.T) {
 	}
 	if _, ok := payload3["thinking"]; ok {
 		t.Fatal("glm should not include thinking")
+	}
+}
+
+func TestOpenAICompatibleRequestMaxTokensAndCapabilities(t *testing.T) {
+	c := NewGLMClient("key", "glm-4.7")
+	if c.MaxContextWindow() != 204800 || c.MaxOutputTokens() != 131072 {
+		t.Fatalf("built-in capability = %d/%d", c.MaxContextWindow(), c.MaxOutputTokens())
+	}
+	c.SetModelCapability(128000, 8192)
+	if c.MaxContextWindow() != 128000 || c.MaxOutputTokens() != 8192 {
+		t.Fatalf("overridden capability = %d/%d", c.MaxContextWindow(), c.MaxOutputTokens())
+	}
+	body, err := c.requestBody(nil, nil, false, StreamOptions{MaxTokens: 321})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["max_tokens"] != float64(321) {
+		t.Fatalf("max_tokens = %#v", payload["max_tokens"])
+	}
+}
+
+func TestOpenAICompatibleClientReturnsTypedAPIError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		_, _ = w.Write([]byte(`{"error":"request_too_large"}`))
+	}))
+	defer server.Close()
+	c := NewOpenAICompatibleClient("test", "key", "model", server.URL)
+	_, err := c.Chat(context.Background(), nil, nil, StreamOptions{})
+	var apiError *APIError
+	if !errors.As(err, &apiError) || apiError.StatusCode != http.StatusRequestEntityTooLarge || !strings.Contains(apiError.Body, "request_too_large") {
+		t.Fatalf("error = %#v", err)
 	}
 }

@@ -27,7 +27,8 @@
 - RAG 未移植：`src/main/java/com/brucecli/rag`、RAG slash 命令、Embedding、SQLite 向量库、代码索引和相关测试均按需求排除。
 - Go 版 TUI 是轻量 Bubble Tea 输入循环，核心命令和运行时可独立测试。
 - MCP Streamable HTTP 以 JSON-RPC HTTP POST 为主，并能解析简单 SSE `data:` 响应；复杂 server 特性后续可在 `internal/mcp` 扩展。
-- `/compact` 当前提供确定性本地摘要节点，自动压缩判断和 LLM 摘要能力在 `internal/session` 保留可测试接口。
+- `/compact` 已对齐 pi 核心压缩语义：安全切割 tool call/result、中文结构化 LLM 摘要、重复压缩、split-turn、文件追踪、阈值自动压缩和单次 overflow compact-and-continue。`compaction.enabled` 只控制自动压缩；Session JSONL format version 仍为 1。
+- Assistant session message 额外保存 provider、model、finish reason 和 usage；旧 JSONL 缺少这些字段时继续使用零值恢复。
 - HITL 默认关闭，需要时可通过 `/hitl on` 打开；真实交互 handler 可在 TUI 层替换。
 - `/plan` 不再自动执行 JSON/DAG；计划正文保存在 `~/.bruce/plans/`，计划生命周期通过 `plan_event` 写入 session JSONL，`/resume` 会同时恢复 mode 和 active plan state。
 

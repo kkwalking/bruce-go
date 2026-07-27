@@ -24,13 +24,15 @@ const baseSystemPrompt = `你是 Bruce Coding Agent，一个智能编程助手�
 const maxRetries = 2
 
 type Agent struct {
-	Client        llm.ChatClient
-	Tools         *tool.Registry
-	Executor      tool.ParallelExecutor
-	SystemPrompt  string
-	History       []llm.Message
-	MaxIterations int
-	Events        *event.Bus
+	Client         llm.ChatClient
+	Tools          *tool.Registry
+	Executor       tool.ParallelExecutor
+	SystemPrompt   string
+	History        []llm.Message
+	MaxIterations  int
+	Events         *event.Bus
+	BeforeChat     func([]llm.Message) error
+	skipBeforeChat bool
 }
 
 func New(client llm.ChatClient, registry *tool.Registry, additional string, config runtime.ConcurrencyConfig, events *event.Bus) *Agent {
@@ -72,6 +74,20 @@ func (a *Agent) Run(ctx context.Context, input llm.PreparedInput, taskContext st
 	if runID == "" {
 		runID = event.NewRunID()
 	}
+	a.appendDurable(runID, input.Message)
+	return a.run(ctx, taskContext, runID)
+}
+
+// Continue resumes an interrupted model turn from the existing history without
+// appending the user's message a second time.
+func (a *Agent) Continue(ctx context.Context, taskContext string, runID string) (string, error) {
+	if runID == "" {
+		runID = event.NewRunID()
+	}
+	return a.run(ctx, taskContext, runID)
+}
+
+func (a *Agent) run(ctx context.Context, taskContext string, runID string) (string, error) {
 	if taskContext != "" {
 		a.History = append(a.History, llm.System(taskContext))
 		defer func() {
@@ -84,13 +100,19 @@ func (a *Agent) Run(ctx context.Context, input llm.PreparedInput, taskContext st
 		}()
 	}
 	defer a.redactSkillToolResults()
-	a.appendDurable(runID, input.Message)
 	retryCount := 0
 	for i := 0; i < a.MaxIterations; i++ {
 		select {
 		case <-ctx.Done():
 			return "任务已被用户中断", nil
 		default:
+		}
+		if a.skipBeforeChat {
+			a.skipBeforeChat = false
+		} else if a.BeforeChat != nil {
+			if err := a.BeforeChat(a.History); err != nil {
+				return "", err
+			}
 		}
 		pruneImages(a.History)
 		a.emit(event.NewMessageStarted(runID, llm.RoleAssistant))
@@ -99,6 +121,10 @@ func (a *Agent) Run(ctx context.Context, input llm.PreparedInput, taskContext st
 			if errors.Is(err, context.Canceled) {
 				a.emit(event.NewMessageCompleted(runID, llm.Assistant(""), false))
 				return "任务已被用户中断", nil
+			}
+			if llm.IsContextOverflowError(err) {
+				a.emit(event.NewMessageCompleted(runID, llm.Assistant(""), false))
+				return "", &llm.ContextOverflowError{Cause: err}
 			}
 			if retryCount < maxRetries && isRetryable(err) {
 				retryCount++
@@ -109,13 +135,8 @@ func (a *Agent) Run(ctx context.Context, input llm.PreparedInput, taskContext st
 			return out, nil
 		}
 		retryCount = 0
+		assistant := a.assistantMessage(resp)
 		if resp.HasToolCalls() {
-			assistant := llm.Message{
-				Role:             llm.RoleAssistant,
-				Content:          resp.Content,
-				ReasoningContent: resp.ReasoningContent,
-				ToolCalls:        resp.ToolCalls,
-			}
 			a.append(assistant)
 			a.emit(event.NewMessageCompleted(runID, assistant, true))
 			for _, call := range resp.ToolCalls {
@@ -131,21 +152,59 @@ func (a *Agent) Run(ctx context.Context, input llm.PreparedInput, taskContext st
 			}
 			continue
 		}
-		msg := llm.Message{
-			Role:              llm.RoleAssistant,
-			Content:           resp.Content,
-			ReasoningContent:  resp.ReasoningContent,
-			InputTokens:       resp.InputTokens,
-			OutputTokens:      resp.OutputTokens,
-			CachedInputTokens: resp.CachedInputTokens,
+		a.append(assistant)
+		a.emit(event.NewMessageCompleted(runID, assistant, true))
+		if overflow := llm.DetectContextOverflowResponse(resp, a.Client.MaxContextWindow()); overflow.Retry {
+			return "", &llm.ContextOverflowError{Cause: errors.New("模型因上下文窗口耗尽而未生成输出")}
 		}
-		a.append(msg)
-		a.emit(event.NewMessageCompleted(runID, msg, true))
 		return resp.Content, nil
 	}
 	stopped := "达到最大迭代次数限制"
 	a.appendDurable(runID, llm.Assistant(stopped))
 	return stopped, nil
+}
+
+// SkipNextBeforeChat lets the runtime make one best-effort model call after a
+// threshold compaction warning. Later tool-loop calls are checked normally.
+func (a *Agent) SkipNextBeforeChat() {
+	a.skipBeforeChat = true
+}
+
+// DiscardTrailingOverflowResponse removes a persisted empty length response
+// from the in-memory retry context. The session entry remains available for
+// diagnostics and compaction bookkeeping.
+func (a *Agent) DiscardTrailingOverflowResponse() {
+	if len(a.History) == 0 {
+		return
+	}
+	last := a.History[len(a.History)-1]
+	if last.Role == llm.RoleAssistant && strings.EqualFold(last.FinishReason, "length") &&
+		strings.TrimSpace(last.Content) == "" && len(last.ToolCalls) == 0 {
+		a.History = a.History[:len(a.History)-1]
+	}
+}
+
+func (a *Agent) assistantMessage(resp llm.ChatResponse) llm.Message {
+	provider := resp.Provider
+	if provider == "" {
+		provider = a.Client.ProviderName()
+	}
+	model := resp.Model
+	if model == "" {
+		model = a.Client.ModelName()
+	}
+	return llm.Message{
+		Role:              llm.RoleAssistant,
+		Content:           resp.Content,
+		ReasoningContent:  resp.ReasoningContent,
+		ToolCalls:         resp.ToolCalls,
+		InputTokens:       resp.InputTokens,
+		OutputTokens:      resp.OutputTokens,
+		CachedInputTokens: resp.CachedInputTokens,
+		Provider:          provider,
+		Model:             model,
+		FinishReason:      resp.FinishReason,
+	}
 }
 
 func (a *Agent) appendImageToolMessages(runID string, results []tool.ToolCallResult) {
@@ -296,6 +355,7 @@ func (f *FakeClient) ModelName() string {
 }
 
 func (*FakeClient) MaxContextWindow() int       { return 200000 }
+func (*FakeClient) MaxOutputTokens() int        { return 0 }
 func (*FakeClient) SupportsTools() bool         { return true }
 func (*FakeClient) SupportsPromptCaching() bool { return false }
 func (*FakeClient) SupportsImages() bool        { return true }

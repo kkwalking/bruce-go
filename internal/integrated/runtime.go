@@ -76,6 +76,8 @@ type modelSwitcher interface {
 	SetReasoningEffort(level string) error
 }
 
+var errCompactionRequired = errors.New("context compaction required")
+
 func New(ctx context.Context, opts Options) (*Runtime, error) {
 	workspace := abs(opts.Workspace)
 	if canonical, err := sandbox.CanonicalAbsolute(workspace); err == nil {
@@ -269,10 +271,8 @@ func (r *Runtime) runTask(ctx context.Context, input string, allowPendingPlanInp
 		r.emit(event.NewRunFailed(runID, err.Error()))
 		return "", err
 	}
-	current := r.Session.Context(r.Mode)
 	if r.Mode == runtime.ModePlan {
-		r.planning.RestoreHistory(current.Messages)
-		out, err := r.planning.Run(ctx, prepared, r.taskContextWithPlan(taskContext), runID)
+		out, err := r.runAgentWithCompaction(ctx, r.planning, prepared, r.taskContextWithPlan(taskContext), runID)
 		if err != nil {
 			r.emit(event.NewRunFailed(runID, err.Error()))
 			return "", err
@@ -285,8 +285,7 @@ func (r *Runtime) runTask(ctx context.Context, input string, allowPendingPlanInp
 		r.emit(event.NewRunCompleted(runID, display))
 		return display, nil
 	}
-	r.react.RestoreHistory(current.Messages)
-	out, err := r.react.Run(ctx, prepared, r.taskContextWithPlan(taskContext), runID)
+	out, err := r.runAgentWithCompaction(ctx, r.react, prepared, r.taskContextWithPlan(taskContext), runID)
 	if err != nil {
 		r.emit(event.NewRunFailed(runID, err.Error()))
 		return "", err
@@ -359,7 +358,7 @@ func (r *Runtime) HandleCommand(ctx context.Context, command cli.Command) cli.Re
 			}
 		}
 	case "compact":
-		result.Output, result.Err = r.compact(strings.Join(command.Args, " "))
+		result.Output, result.Err = r.compact(ctx, strings.Join(command.Args, " "))
 		if result.Err == nil {
 			r.emit(event.NewSessionChanged("compact", r.Session.Context(r.Mode)))
 		}
@@ -681,20 +680,174 @@ func (r *Runtime) newSession() error {
 	return nil
 }
 
-func (r *Runtime) compact(extra string) (string, error) {
+func (r *Runtime) runAgentWithCompaction(ctx context.Context, currentAgent *agent.Agent, input llm.PreparedInput, taskContext, runID string) (string, error) {
+	currentAgent.RestoreHistory(r.Session.Context(r.Mode).Messages)
+	out, err := currentAgent.Run(ctx, input, taskContext, runID)
+	overflowRetries := 0
+	thresholdRetries := 0
+	for err != nil {
+		switch {
+		case errors.Is(err, errCompactionRequired):
+			if thresholdRetries >= 3 {
+				return "", errors.New("上下文在自动压缩后仍持续超过阈值")
+			}
+			thresholdRetries++
+			if _, compactErr := r.autoCompact(ctx, runID, "阈值"); compactErr != nil {
+				r.emit(event.NewActivity(runID, "自动压缩失败，将尝试继续当前任务: "+compactErr.Error()))
+				currentAgent.SkipNextBeforeChat()
+			} else {
+				currentAgent.RestoreHistory(r.Session.Context(r.Mode).Messages)
+			}
+			out, err = currentAgent.Continue(ctx, taskContext, runID)
+		case llm.IsContextOverflowError(err):
+			if !r.Settings.Compaction.Enabled {
+				return "", fmt.Errorf("模型上下文已溢出，且自动压缩已禁用: %w", err)
+			}
+			if overflowRetries >= 1 {
+				return "", fmt.Errorf("自动压缩后模型上下文仍然溢出，已停止重试: %w", err)
+			}
+			overflowRetries++
+			if _, compactErr := r.autoCompact(ctx, runID, "上下文溢出恢复"); compactErr != nil {
+				return "", fmt.Errorf("上下文溢出后的自动压缩失败: %w", compactErr)
+			}
+			currentAgent.RestoreHistory(r.Session.Context(r.Mode).Messages)
+			currentAgent.DiscardTrailingOverflowResponse()
+			out, err = currentAgent.Continue(ctx, taskContext, runID)
+		default:
+			return "", err
+		}
+	}
+	r.compactAfterSuccessfulTurn(ctx, runID)
+	return out, nil
+}
+
+func (r *Runtime) compactAfterSuccessfulTurn(ctx context.Context, runID string) {
+	response, ok := r.latestAssistantResponseAfterCompaction()
+	if ok {
+		overflow := llm.DetectContextOverflowResponse(response, r.Client.MaxContextWindow())
+		if overflow.Overflow {
+			if !r.Settings.Compaction.Enabled {
+				return
+			}
+			if _, err := r.autoCompact(ctx, runID, "成功响应 usage 超出上下文窗口"); err != nil {
+				r.emit(event.NewActivity(runID, "自动压缩失败，但当前回答已完成: "+err.Error()))
+			}
+			return
+		}
+	}
+	if needed, _, _ := r.compactionThreshold(); !needed {
+		return
+	}
+	if _, err := r.autoCompact(ctx, runID, "回合结束阈值"); err != nil {
+		r.emit(event.NewActivity(runID, "自动压缩失败，但当前回答已完成: "+err.Error()))
+	}
+}
+
+func (r *Runtime) compactionThreshold() (needed bool, tokens int, threshold int) {
+	return r.compactionThresholdFor(r.Session.Context(r.Mode).Messages)
+}
+
+func (r *Runtime) compactionThresholdFor(messages []llm.Message) (needed bool, tokens int, threshold int) {
+	if !r.Settings.Compaction.Enabled || r.Client.MaxContextWindow() <= 0 {
+		return false, 0, 0
+	}
+	entries := r.Session.ActiveEntries()
+	lastCompaction := -1
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Type == session.TypeCompaction {
+			lastCompaction = i
+			break
+		}
+	}
+	hasFreshUsage := false
+	for i := len(entries) - 1; i > lastCompaction; i-- {
+		entry := entries[i]
+		if entry.Type == session.TypeMessage && entry.Message != nil && entry.Message.Role == llm.RoleAssistant && entry.Message.TotalUsageTokens() > 0 &&
+			!strings.EqualFold(entry.Message.FinishReason, "aborted") && !strings.EqualFold(entry.Message.FinishReason, "error") {
+			hasFreshUsage = true
+			break
+		}
+	}
+	if !hasFreshUsage {
+		return false, 0, 0
+	}
+	tokens = session.EstimateContextTokens(messages).Tokens
+	threshold = r.Client.MaxContextWindow() - r.Settings.Compaction.ReserveTokens
+	return session.ShouldCompact(tokens, r.Client.MaxContextWindow(), r.Settings.Compaction), tokens, threshold
+}
+
+func (r *Runtime) latestAssistantResponseAfterCompaction() (llm.ChatResponse, bool) {
+	entries := r.Session.ActiveEntries()
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
+		if entry.Type == session.TypeCompaction {
+			break
+		}
+		if entry.Type != session.TypeMessage || entry.Message == nil || entry.Message.Role != llm.RoleAssistant {
+			continue
+		}
+		message := entry.Message
+		return llm.ChatResponse{
+			Content:           message.Content,
+			ReasoningContent:  message.ReasoningContent,
+			ToolCalls:         message.ToolCalls,
+			InputTokens:       message.InputTokens,
+			OutputTokens:      message.OutputTokens,
+			CachedInputTokens: message.CachedInputTokens,
+			Provider:          message.Provider,
+			Model:             message.Model,
+			FinishReason:      message.FinishReason,
+		}, true
+	}
+	return llm.ChatResponse{}, false
+}
+
+func (r *Runtime) performCompaction(ctx context.Context, instructions string) (session.CompactionResult, error) {
+	preparation, ok := session.PrepareCompaction(r.Session.ActiveEntries(), r.Settings.Compaction)
+	if !ok {
+		return session.CompactionResult{}, errors.New("当前会话没有可安全压缩的历史，或最新节点已经是 compaction")
+	}
+	result, err := session.Compact(ctx, r.Client, *preparation, instructions)
+	if err != nil {
+		return session.CompactionResult{}, err
+	}
+	if err := r.Session.AppendCompaction(result.Summary, result.FirstKeptEntryID, result.TokensBefore, result.Details); err != nil {
+		return session.CompactionResult{}, err
+	}
+	return result, nil
+}
+
+func (r *Runtime) autoCompact(ctx context.Context, runID, reason string) (session.CompactionResult, error) {
+	result, err := r.performCompaction(ctx, "")
+	if err != nil {
+		return session.CompactionResult{}, err
+	}
+	r.emit(event.NewActivity(runID, fmt.Sprintf("已执行自动压缩（%s，压缩前约 %d tokens）。", reason, result.TokensBefore)))
+	r.emit(event.NewSessionChanged("compact", r.Session.Context(r.Mode)))
+	return result, nil
+}
+
+func (r *Runtime) compact(ctx context.Context, extra string) (string, error) {
 	entries := r.Session.ActiveEntries()
 	if len(entries) == 0 {
 		return "当前 session 没有可压缩的历史。", nil
 	}
-	firstKept := entries[len(entries)-1].ID
-	if len(entries) >= 2 {
-		firstKept = entries[len(entries)-2].ID
+	if entries[len(entries)-1].Type == session.TypeCompaction {
+		return "", errors.New("最新节点已经是 compaction，不能连续压缩")
 	}
-	summary := summarizeEntries(entries, extra)
-	if err := r.Session.AppendCompaction(summary, firstKept, len(summary), map[string]string{"instructions": extra}); err != nil {
+	preparation, ok := session.PrepareCompaction(entries, r.Settings.Compaction)
+	if !ok {
+		return "当前 session 没有可安全淘汰的历史，无需 compaction。", nil
+	}
+	result, err := session.Compact(ctx, r.Client, *preparation, extra)
+	if err != nil {
 		return "", err
 	}
-	return "已追加 compaction 摘要节点。", nil
+	if err := r.Session.AppendCompaction(result.Summary, result.FirstKeptEntryID, result.TokensBefore, result.Details); err != nil {
+		return "", err
+	}
+	r.rebuildAgents()
+	return fmt.Sprintf("已压缩会话上下文（压缩前约 %d tokens，保留边界 %s）。", result.TokensBefore, result.FirstKeptEntryID), nil
 }
 
 func (r *Runtime) refreshMCPTools() {
@@ -725,6 +878,15 @@ func (r *Runtime) rebuildAgents() {
 		return r.currentPlanState()
 	})
 	r.planning = agent.New(r.Client, planRegistry, planning.Prompt(additional), r.Concurrent, r.Events)
+	beforeChat := func(messages []llm.Message) error {
+		needed, tokens, threshold := r.compactionThresholdFor(messages)
+		if !needed {
+			return nil
+		}
+		return fmt.Errorf("%w: 当前约 %d tokens，阈值 %d", errCompactionRequired, tokens, threshold)
+	}
+	r.react.BeforeChat = beforeChat
+	r.planning.BeforeChat = beforeChat
 }
 
 func (r *Runtime) ModelOptions() []llm.ModelOption {
@@ -965,30 +1127,6 @@ func formatSearch(results []web.Result) string {
 	var b strings.Builder
 	for i, result := range results {
 		fmt.Fprintf(&b, "%d. %s\n%s\n%s\n\n", i+1, result.Title, result.URL, result.Snippet)
-	}
-	return strings.TrimSpace(b.String())
-}
-
-func summarizeEntries(entries []session.Entry, extra string) string {
-	var b strings.Builder
-	b.WriteString("会话历史摘要")
-	if strings.TrimSpace(extra) != "" {
-		b.WriteString("（聚焦: " + strings.TrimSpace(extra) + "）")
-	}
-	b.WriteString(":\n")
-	for i, entry := range entries {
-		if i >= 12 {
-			b.WriteString("- ... 更早历史省略 ...\n")
-			break
-		}
-		if entry.Message == nil {
-			continue
-		}
-		content := strings.TrimSpace(entry.Message.Content)
-		if len(content) > 240 {
-			content = content[:240] + "..."
-		}
-		fmt.Fprintf(&b, "- %s: %s\n", entry.Message.Role, content)
 	}
 	return strings.TrimSpace(b.String())
 }

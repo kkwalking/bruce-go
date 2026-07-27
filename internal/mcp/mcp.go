@@ -577,7 +577,7 @@ func defaultTransportFactory(ctx context.Context, _ string, cfg config.MCPServer
 func initializeAndList(ctx context.Context, transport Transport) ([]Tool, error) {
 	_, _ = transport.Call(ctx, "initialize", map[string]any{
 		"protocolVersion": "2024-11-05",
-		"clientInfo":      map[string]string{"name": "bruce-go", "version": "0.1.0"},
+		"clientInfo":      map[string]string{"name": "bruce-go", "version": "0.2.0"},
 		"capabilities":    map[string]any{},
 	})
 	raw, err := transport.Call(ctx, "tools/list", map[string]any{})

@@ -22,6 +22,7 @@ func validReasoningEffort(s string) bool {
 	}
 	return false
 }
+
 type SwitchableClient struct {
 	mu              sync.RWMutex
 	settings        *config.Settings
@@ -97,16 +98,20 @@ func NormalizeProvider(provider string) string {
 }
 
 func NewProviderClient(provider, model string, settings config.ProviderSetting) ChatClient {
+	var client *OpenAICompatibleClient
 	switch provider {
 	case "glm":
-		return NewGLMClient(settings.APIKey, model)
+		client = NewGLMClient(settings.APIKey, model)
 	case "deepseek":
-		return NewDeepSeekClient(settings.APIKey, model)
+		client = NewDeepSeekClient(settings.APIKey, model)
 	case "openai_compatiable":
-		return NewOpenAICompatibleClient(provider, settings.APIKey, model, settings.BaseURL)
+		client = NewOpenAICompatibleClient(provider, settings.APIKey, model, settings.BaseURL)
 	default:
-		return NewOpenAICompatibleClient(provider, settings.APIKey, model, settings.BaseURL)
+		client = NewOpenAICompatibleClient(provider, settings.APIKey, model, settings.BaseURL)
 	}
+	capability := settings.ModelCapabilities[model]
+	client.SetModelCapability(capability.ContextWindow, capability.MaxOutputTokens)
+	return client
 }
 
 func (c *SwitchableClient) Chat(ctx context.Context, messages []Message, tools []ToolDefinition, opts StreamOptions) (ChatResponse, error) {
@@ -132,6 +137,12 @@ func (c *SwitchableClient) MaxContextWindow() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.client.MaxContextWindow()
+}
+
+func (c *SwitchableClient) MaxOutputTokens() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.client.MaxOutputTokens()
 }
 
 func (c *SwitchableClient) SupportsTools() bool {

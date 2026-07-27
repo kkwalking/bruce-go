@@ -35,9 +35,15 @@ type LLMSettings struct {
 }
 
 type ProviderSetting struct {
-	APIKey  string   `json:"apiKey"`
-	BaseURL string   `json:"baseUrl"`
-	Models  []string `json:"models"`
+	APIKey            string                     `json:"apiKey"`
+	BaseURL           string                     `json:"baseUrl"`
+	Models            []string                   `json:"models"`
+	ModelCapabilities map[string]ModelCapability `json:"modelCapabilities,omitempty"`
+}
+
+type ModelCapability struct {
+	ContextWindow   int `json:"contextWindow,omitempty"`
+	MaxOutputTokens int `json:"maxOutputTokens,omitempty"`
 }
 
 type WebSearchSettings struct {
@@ -159,6 +165,9 @@ func (l Loader) Load() (Settings, error) {
 		return settings, err
 	}
 	normalize(&settings)
+	if err := validateLLM(settings.LLM); err != nil {
+		return settings, err
+	}
 	if err := validateSandbox(settings.Sandbox); err != nil {
 		return settings, err
 	}
@@ -173,6 +182,9 @@ func (l Loader) Save(settings Settings) error {
 		l.Path = DefaultSettingsPath()
 	}
 	normalize(&settings)
+	if err := validateLLM(settings.LLM); err != nil {
+		return err
+	}
 	if err := validateSandbox(settings.Sandbox); err != nil {
 		return err
 	}
@@ -187,6 +199,37 @@ func (l Loader) Save(settings Settings) error {
 		return err
 	}
 	return os.WriteFile(l.Path, append(data, '\n'), 0o644)
+}
+
+func validateLLM(settings LLMSettings) error {
+	for providerName, provider := range settings.Providers {
+		declared := make(map[string]bool, len(provider.Models))
+		for _, model := range provider.Models {
+			model = strings.TrimSpace(model)
+			if model != "" {
+				declared[model] = true
+			}
+		}
+		for model, capability := range provider.ModelCapabilities {
+			model = strings.TrimSpace(model)
+			if model == "" {
+				return fmt.Errorf("llm.providers.%s.modelCapabilities 包含空模型名", providerName)
+			}
+			if !declared[model] {
+				return fmt.Errorf("llm.providers.%s.modelCapabilities[%q] 未在 models 中声明", providerName, model)
+			}
+			if capability.ContextWindow < 0 {
+				return fmt.Errorf("llm.providers.%s.modelCapabilities[%q].contextWindow 必须为正数", providerName, model)
+			}
+			if capability.MaxOutputTokens < 0 {
+				return fmt.Errorf("llm.providers.%s.modelCapabilities[%q].maxOutputTokens 必须为正数", providerName, model)
+			}
+			if capability.ContextWindow == 0 && capability.MaxOutputTokens == 0 {
+				return fmt.Errorf("llm.providers.%s.modelCapabilities[%q] 至少配置一个模型能力", providerName, model)
+			}
+		}
+	}
+	return nil
 }
 
 func ResolveUserPath(value string) string {

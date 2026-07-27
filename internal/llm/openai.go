@@ -20,6 +20,8 @@ type OpenAICompatibleClient struct {
 	APIURL          string
 	HTTPClient      *http.Client
 	reasoningEffort string
+	contextWindow   int
+	maxOutputTokens int
 }
 
 func NewOpenAICompatibleClient(provider, apiKey, model, baseURL string) *OpenAICompatibleClient {
@@ -77,18 +79,45 @@ func (c *OpenAICompatibleClient) SupportsImages() bool {
 	}
 }
 func (c *OpenAICompatibleClient) MaxContextWindow() int {
-	switch c.Provider {
-	case "deepseek":
-		return 1000000
-	case "glm":
-		return 200000
+	if c.contextWindow > 0 {
+		return c.contextWindow
+	}
+	contextWindow, _ := builtInModelCapability(c.Provider, c.Model)
+	return contextWindow
+}
+
+func (c *OpenAICompatibleClient) MaxOutputTokens() int {
+	if c.maxOutputTokens > 0 {
+		return c.maxOutputTokens
+	}
+	_, maxOutputTokens := builtInModelCapability(c.Provider, c.Model)
+	return maxOutputTokens
+}
+
+func (c *OpenAICompatibleClient) SetModelCapability(contextWindow, maxOutputTokens int) {
+	c.contextWindow = contextWindow
+	c.maxOutputTokens = maxOutputTokens
+}
+
+func builtInModelCapability(provider, model string) (contextWindow, maxOutputTokens int) {
+	switch provider + "/" + model {
+	case "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro":
+		return 1000000, 384000
+	case "glm/glm-4.5-air":
+		return 131072, 98304
+	case "glm/glm-4.7":
+		return 204800, 131072
+	case "glm/glm-5-turbo", "glm/glm-5.1", "glm/glm-5v-turbo":
+		return 200000, 131072
+	case "glm/glm-5.2":
+		return 1000000, 131072
 	default:
-		return 0
+		return 0, 0
 	}
 }
 
 func (c *OpenAICompatibleClient) Chat(ctx context.Context, messages []Message, tools []ToolDefinition, opts StreamOptions) (ChatResponse, error) {
-	body, err := c.requestBody(messages, tools, true)
+	body, err := c.requestBody(messages, tools, true, opts)
 	if err != nil {
 		return ChatResponse{}, err
 	}
@@ -105,19 +134,23 @@ func (c *OpenAICompatibleClient) Chat(ctx context.Context, messages []Message, t
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(resp.Body)
-		return ChatResponse{}, errors.New(c.Provider + " API request failed: HTTP " + resp.Status + "\n" + string(data))
+		return ChatResponse{}, &APIError{Provider: c.Provider, StatusCode: resp.StatusCode, Status: resp.Status, Body: string(data)}
 	}
 	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		return ParseChatStream(resp.Body, opts)
+		result, err := ParseChatStream(resp.Body, opts)
+		result.Provider, result.Model = c.Provider, c.Model
+		return result, err
 	}
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return ChatResponse{}, err
 	}
-	return ParseChatResponse(data)
+	result, err := ParseChatResponse(data)
+	result.Provider, result.Model = c.Provider, c.Model
+	return result, err
 }
 
-func (c *OpenAICompatibleClient) requestBody(messages []Message, tools []ToolDefinition, stream bool) ([]byte, error) {
+func (c *OpenAICompatibleClient) requestBody(messages []Message, tools []ToolDefinition, stream bool, opts StreamOptions) ([]byte, error) {
 	payload := map[string]any{
 		"model":  c.Model,
 		"stream": stream,
@@ -131,6 +164,9 @@ func (c *OpenAICompatibleClient) requestBody(messages []Message, tools []ToolDef
 	}
 	if stream {
 		payload["stream_options"] = map[string]any{"include_usage": true}
+	}
+	if opts.MaxTokens > 0 {
+		payload["max_tokens"] = opts.MaxTokens
 	}
 	if len(tools) > 0 {
 		serialized := make([]any, 0, len(tools))
@@ -161,7 +197,8 @@ func (c *OpenAICompatibleClient) requestBody(messages []Message, tools []ToolDef
 func ParseChatResponse(data []byte) (ChatResponse, error) {
 	var root struct {
 		Choices []struct {
-			Message responseMessage `json:"message"`
+			Message      responseMessage `json:"message"`
+			FinishReason string          `json:"finish_reason"`
 		} `json:"choices"`
 		Usage usage `json:"usage"`
 	}
@@ -177,9 +214,10 @@ func ParseChatResponse(data []byte) (ChatResponse, error) {
 		Content:           msg.Content,
 		ReasoningContent:  firstNonEmpty(msg.ReasoningContent, msg.Reasoning, msg.ReasoningCamel),
 		ToolCalls:         msg.toToolCalls(),
-		InputTokens:       root.Usage.PromptTokens,
+		InputTokens:       root.Usage.inputTokens(),
 		OutputTokens:      root.Usage.CompletionTokens,
-		CachedInputTokens: root.Usage.CachedInputTokens,
+		CachedInputTokens: root.Usage.cachedTokens(),
+		FinishReason:      root.Choices[0].FinishReason,
 	}, nil
 }
 
@@ -224,8 +262,9 @@ func parseStreamData(data string, acc *streamAccumulator, opts StreamOptions) (b
 	}
 	var root struct {
 		Choices []struct {
-			Delta   responseMessage `json:"delta"`
-			Message responseMessage `json:"message"`
+			Delta        responseMessage `json:"delta"`
+			Message      responseMessage `json:"message"`
+			FinishReason string          `json:"finish_reason"`
 		} `json:"choices"`
 		Usage usage `json:"usage"`
 	}
@@ -237,6 +276,9 @@ func parseStreamData(data string, acc *streamAccumulator, opts StreamOptions) (b
 	}
 	if len(root.Choices) == 0 {
 		return false, nil
+	}
+	if root.Choices[0].FinishReason != "" {
+		acc.finishReason = root.Choices[0].FinishReason
 	}
 	delta := root.Choices[0].Delta
 	if delta.IsZero() {
@@ -274,9 +316,31 @@ func parseStreamData(data string, acc *streamAccumulator, opts StreamOptions) (b
 }
 
 type usage struct {
-	PromptTokens      int `json:"prompt_tokens"`
-	CompletionTokens  int `json:"completion_tokens"`
-	CachedInputTokens int `json:"cached_input_tokens"`
+	PromptTokens         int `json:"prompt_tokens"`
+	CompletionTokens     int `json:"completion_tokens"`
+	CachedInputTokens    int `json:"cached_input_tokens"`
+	PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"`
+	PromptTokenDetails   struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
+}
+
+func (u usage) cachedTokens() int {
+	if u.CachedInputTokens > 0 {
+		return u.CachedInputTokens
+	}
+	if u.PromptCacheHitTokens > 0 {
+		return u.PromptCacheHitTokens
+	}
+	return u.PromptTokenDetails.CachedTokens
+}
+
+func (u usage) inputTokens() int {
+	input := u.PromptTokens - u.cachedTokens()
+	if input < 0 {
+		return 0
+	}
+	return input
 }
 
 type responseMessage struct {
@@ -314,11 +378,12 @@ func (m responseMessage) toToolCalls() []ToolCall {
 }
 
 type streamAccumulator struct {
-	role      string
-	content   strings.Builder
-	reasoning strings.Builder
-	calls     map[int]*toolCallDelta
-	usage     usage
+	role         string
+	content      strings.Builder
+	reasoning    strings.Builder
+	calls        map[int]*toolCallDelta
+	usage        usage
+	finishReason string
 }
 
 type toolCallDelta struct {
@@ -340,9 +405,10 @@ func (a streamAccumulator) response() ChatResponse {
 		Content:           a.content.String(),
 		ReasoningContent:  a.reasoning.String(),
 		ToolCalls:         calls,
-		InputTokens:       a.usage.PromptTokens,
+		InputTokens:       a.usage.inputTokens(),
 		OutputTokens:      a.usage.CompletionTokens,
-		CachedInputTokens: a.usage.CachedInputTokens,
+		CachedInputTokens: a.usage.cachedTokens(),
+		FinishReason:      a.finishReason,
 	}
 }
 

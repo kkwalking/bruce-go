@@ -518,7 +518,7 @@ func (s *Store) resolveEntryIDLocked(reference string) (string, error) {
 func appendContext(messages *[]llm.Message, entry Entry) {
 	switch entry.Type {
 	case TypeMessage:
-		if entry.Message != nil && entry.Message.Role != llm.RoleSystem {
+		if entry.Message != nil && entry.Message.Role != llm.RoleSystem && !excludeFromModelContext(*entry.Message) {
 			*messages = append(*messages, *entry.Message)
 		}
 	case TypeCustomMessage:
@@ -669,56 +669,255 @@ type Details struct {
 	ModifiedFiles []string `json:"modifiedFiles"`
 }
 
-func PrepareCompaction(entries []Entry, settings config.Compaction) (firstKept string, messages []llm.Message, tokensBefore int, ok bool) {
+type CompactionPreparation struct {
+	FirstKeptEntryID    string
+	MessagesToSummarize []llm.Message
+	TurnPrefixMessages  []llm.Message
+	IsSplitTurn         bool
+	TokensBefore        int
+	PreviousSummary     string
+	Details             Details
+	Settings            config.Compaction
+}
+
+type ContextUsageEstimate struct {
+	Tokens         int
+	UsageTokens    int
+	TrailingTokens int
+	LastUsageIndex int
+}
+
+func PrepareCompaction(entries []Entry, settings config.Compaction) (*CompactionPreparation, bool) {
 	if len(entries) == 0 || entries[len(entries)-1].Type == TypeCompaction {
-		return "", nil, 0, false
+		return nil, false
+	}
+	if settings.ReserveTokens <= 0 {
+		settings.ReserveTokens = 16384
 	}
 	if settings.KeepRecentTokens <= 0 {
 		settings.KeepRecentTokens = 20000
 	}
-	all := entriesToMessages(entries)
-	tokensBefore = EstimateMessagesTokens(all)
-	acc := 0
-	cut := len(entries)
-	for i := len(entries) - 1; i >= 0; i-- {
-		msg := messageFromEntry(entries[i])
-		if msg == nil {
-			continue
-		}
-		acc += EstimateTokens(*msg)
-		if acc >= settings.KeepRecentTokens {
-			cut = i
-			break
+
+	previousIndex := latestCompactionIndex(entries)
+	boundaryStart := 0
+	previousSummary := ""
+	if previousIndex >= 0 {
+		previous := entries[previousIndex]
+		previousSummary = previous.Summary
+		boundaryStart = indexOfEntry(entries, previous.FirstKeptEntryID)
+		if boundaryStart < 0 {
+			boundaryStart = previousIndex + 1
 		}
 	}
-	if cut <= 0 || cut >= len(entries) {
-		return "", nil, tokensBefore, false
+
+	cut, turnStart, split := findCutPoint(entries, boundaryStart, len(entries), settings.KeepRecentTokens)
+	if cut < boundaryStart || cut >= len(entries) || strings.TrimSpace(entries[cut].ID) == "" {
+		return nil, false
 	}
-	for cut < len(entries) && !entries[cut].BranchNode() {
-		cut++
+	historyEnd := cut
+	if split {
+		historyEnd = turnStart
 	}
-	if cut >= len(entries) {
-		return "", nil, tokensBefore, false
+	messages := messagesFromRange(entries, boundaryStart, historyEnd)
+	var turnPrefix []llm.Message
+	if split {
+		turnPrefix = messagesFromRange(entries, turnStart, cut)
 	}
-	firstKept = entries[cut].ID
-	return firstKept, entriesToMessages(entries[:cut]), tokensBefore, firstKept != "" && len(entries[:cut]) > 0
+	if len(messages) == 0 && len(turnPrefix) == 0 {
+		return nil, false
+	}
+
+	fileOps := newFileOperations()
+	if previousIndex >= 0 {
+		fileOps.merge(detailsFromAny(entries[previousIndex].Details))
+	}
+	for _, message := range append(append([]llm.Message(nil), messages...), turnPrefix...) {
+		fileOps.extract(message)
+	}
+	contextMessages := buildContextMessages(entries)
+
+	return &CompactionPreparation{
+		FirstKeptEntryID:    entries[cut].ID,
+		MessagesToSummarize: messages,
+		TurnPrefixMessages:  turnPrefix,
+		IsSplitTurn:         split,
+		TokensBefore:        EstimateContextTokens(contextMessages).Tokens,
+		PreviousSummary:     previousSummary,
+		Details:             fileOps.details(),
+		Settings:            settings,
+	}, true
 }
 
-func Compact(ctx context.Context, client llm.ChatClient, messages []llm.Message, custom string, firstKept string, tokensBefore int) (CompactionResult, error) {
-	prompt := "下面是 Bruce Coding Agent 的会话片段，需要压缩成下一轮模型可继续使用的上下文摘要。请用中文输出结构化摘要。\n\n" + SerializeConversation(messages)
-	if strings.TrimSpace(custom) != "" {
-		prompt += "\n\n额外摘要指令:\n" + custom
+func Compact(ctx context.Context, client llm.ChatClient, preparation CompactionPreparation, custom string) (CompactionResult, error) {
+	historySummary := ""
+	turnSummary := ""
+	if preparation.IsSplitTurn && len(preparation.TurnPrefixMessages) > 0 {
+		type summaryResult struct {
+			kind    string
+			summary string
+			err     error
+		}
+		count := 1
+		needsHistorySummary := len(preparation.MessagesToSummarize) > 0 || preparation.PreviousSummary != ""
+		if needsHistorySummary {
+			count++
+		}
+		results := make(chan summaryResult, count)
+		if needsHistorySummary {
+			go func() {
+				summary, err := generateHistorySummary(ctx, client, preparation, custom)
+				results <- summaryResult{kind: "history", summary: summary, err: err}
+			}()
+		} else {
+			historySummary = "无更早历史。"
+		}
+		go func() {
+			summary, err := generateTurnPrefixSummary(ctx, client, preparation)
+			results <- summaryResult{kind: "turn", summary: summary, err: err}
+		}()
+		for i := 0; i < count; i++ {
+			result := <-results
+			if result.err != nil {
+				return CompactionResult{}, result.err
+			}
+			if result.kind == "history" {
+				historySummary = result.summary
+			} else {
+				turnSummary = result.summary
+			}
+		}
+	} else {
+		var err error
+		historySummary, err = generateHistorySummary(ctx, client, preparation, custom)
+		if err != nil {
+			return CompactionResult{}, err
+		}
 	}
-	resp, err := client.Chat(ctx, []llm.Message{llm.System("You are a context summarization assistant."), llm.User(prompt)}, nil, llm.StreamOptions{})
-	if err != nil {
-		return CompactionResult{}, err
+
+	summary := historySummary
+	if turnSummary != "" {
+		summary += "\n\n---\n\n## 当前超长回合上下文\n\n" + turnSummary
 	}
-	summary := strings.TrimSpace(resp.Content)
+	summary += formatFileDetails(preparation.Details)
+	summary = strings.TrimSpace(summary)
 	if summary == "" {
-		summary = "未生成摘要。"
+		return CompactionResult{}, errors.New("压缩摘要为空")
 	}
-	return CompactionResult{Summary: summary, FirstKeptEntryID: firstKept, TokensBefore: tokensBefore, TokensAfter: EstimateTokens(compactionMessage(summary))}, nil
+	return CompactionResult{
+		Summary:          summary,
+		FirstKeptEntryID: preparation.FirstKeptEntryID,
+		TokensBefore:     preparation.TokensBefore,
+		TokensAfter:      EstimateTokens(compactionMessage(summary)),
+		Details:          preparation.Details,
+	}, nil
 }
+
+func generateHistorySummary(ctx context.Context, client llm.ChatClient, preparation CompactionPreparation, custom string) (string, error) {
+	prompt := initialSummaryPrompt
+	if preparation.PreviousSummary != "" {
+		prompt = updateSummaryPrompt
+	}
+	if strings.TrimSpace(custom) != "" {
+		prompt += "\n\n附加聚焦要求：" + strings.TrimSpace(custom)
+	}
+	content := "<conversation>\n" + SerializeConversation(preparation.MessagesToSummarize) + "\n</conversation>\n\n"
+	if preparation.PreviousSummary != "" {
+		content += "<previous-summary>\n" + preparation.PreviousSummary + "\n</previous-summary>\n\n"
+	}
+	return requestSummary(ctx, client, content+prompt, summaryTokenLimit(client, preparation.Settings.ReserveTokens, 0.8))
+}
+
+func generateTurnPrefixSummary(ctx context.Context, client llm.ChatClient, preparation CompactionPreparation) (string, error) {
+	content := "<conversation>\n" + SerializeConversation(preparation.TurnPrefixMessages) + "\n</conversation>\n\n" + turnPrefixSummaryPrompt
+	return requestSummary(ctx, client, content, summaryTokenLimit(client, preparation.Settings.ReserveTokens, 0.5))
+}
+
+func requestSummary(ctx context.Context, client llm.ChatClient, prompt string, maxTokens int) (string, error) {
+	response, err := client.Chat(ctx, []llm.Message{
+		llm.System("你是上下文摘要助手。不要继续对话，不要回答会话中的问题，只输出指定格式的结构化摘要。"),
+		llm.User(prompt),
+	}, nil, llm.StreamOptions{MaxTokens: maxTokens})
+	if err != nil {
+		return "", fmt.Errorf("生成压缩摘要失败: %w", err)
+	}
+	if strings.EqualFold(response.FinishReason, "error") {
+		return "", errors.New("生成压缩摘要失败: 模型返回 error finish reason")
+	}
+	summary := strings.TrimSpace(response.Content)
+	if summary == "" {
+		return "", errors.New("生成压缩摘要失败: 模型返回空内容")
+	}
+	return summary, nil
+}
+
+func summaryTokenLimit(client llm.ChatClient, reserveTokens int, ratio float64) int {
+	limit := int(float64(reserveTokens) * ratio)
+	if modelLimit := client.MaxOutputTokens(); modelLimit > 0 && (limit <= 0 || modelLimit < limit) {
+		limit = modelLimit
+	}
+	return limit
+}
+
+const initialSummaryPrompt = `以上消息是一段需要压缩的对话。请创建一个供另一个模型继续工作的结构化上下文检查点，严格使用以下格式：
+
+## 目标
+[用户正在完成什么，可以有多项]
+
+## 约束与偏好
+- [用户提出的约束、偏好和要求；没有则写“无”]
+
+## 进度
+### 已完成
+- [x] [已完成事项]
+
+### 进行中
+- [ ] [当前工作]
+
+### 阻塞项
+- [阻塞问题；没有则写“无”]
+
+## 关键决策
+- **[决策]**：[简短理由]
+
+## 下一步
+1. [有序的后续操作]
+
+## 关键上下文
+- [继续工作所需的数据、示例或引用；没有则写“无”]
+
+保持简洁，保留准确的文件路径、函数名和错误消息。`
+
+const updateSummaryPrompt = `以上消息是需要合并进 <previous-summary> 的新对话。更新已有结构化摘要：保留仍然有效的信息，加入新进展、决策与上下文，将完成事项从“进行中”移动到“已完成”，并更新下一步。保留准确的文件路径、函数名和错误消息。
+
+严格使用以下章节结构：
+
+## 目标
+
+## 约束与偏好
+
+## 进度
+### 已完成
+### 进行中
+### 阻塞项
+
+## 关键决策
+
+## 下一步
+
+## 关键上下文`
+
+const turnPrefixSummaryPrompt = `这是一个因过长而被拆分的回合前半部分，较新的后半部分会被保留。请严格使用以下格式概括前半部分：
+
+## 原始请求
+[用户在本回合提出的要求]
+
+## 早期进展
+- [前半部分完成的工作和关键决策]
+
+## 后半部分所需上下文
+- [理解已保留后半部分所需的信息]
+
+保持简洁。`
 
 func SerializeConversation(messages []llm.Message) string {
 	var parts []string
@@ -732,6 +931,13 @@ func SerializeConversation(messages []llm.Message) string {
 			}
 			if msg.Content != "" {
 				parts = append(parts, "[Assistant]: "+msg.Content)
+			}
+			if len(msg.ToolCalls) > 0 {
+				calls := make([]string, 0, len(msg.ToolCalls))
+				for _, call := range msg.ToolCalls {
+					calls = append(calls, call.Function.Name+"("+call.Function.Arguments+")")
+				}
+				parts = append(parts, "[Assistant tool calls]: "+strings.Join(calls, "; "))
 			}
 		case llm.RoleTool:
 			parts = append(parts, "[Tool result]: "+truncate(msg.Content, 2000))
@@ -748,17 +954,55 @@ func EstimateMessagesTokens(messages []llm.Message) int {
 	return total
 }
 
+func EstimateContextTokens(messages []llm.Message) ContextUsageEstimate {
+	lastUsage := -1
+	usageTokens := 0
+	for i := len(messages) - 1; i >= 0; i-- {
+		message := messages[i]
+		if hasValidAssistantUsage(message) {
+			lastUsage = i
+			usageTokens = message.TotalUsageTokens()
+			break
+		}
+	}
+	if lastUsage < 0 {
+		tokens := EstimateMessagesTokens(messages)
+		return ContextUsageEstimate{Tokens: tokens, TrailingTokens: tokens, LastUsageIndex: -1}
+	}
+	trailing := EstimateMessagesTokens(messages[lastUsage+1:])
+	return ContextUsageEstimate{Tokens: usageTokens + trailing, UsageTokens: usageTokens, TrailingTokens: trailing, LastUsageIndex: lastUsage}
+}
+
+func hasValidAssistantUsage(message llm.Message) bool {
+	if message.Role != llm.RoleAssistant || message.TotalUsageTokens() <= 0 {
+		return false
+	}
+	finishReason := strings.ToLower(strings.TrimSpace(message.FinishReason))
+	return finishReason != "aborted" && finishReason != "error"
+}
+
+func ShouldCompact(contextTokens, contextWindow int, settings config.Compaction) bool {
+	return settings.Enabled && contextWindow > 0 && contextTokens > contextWindow-settings.ReserveTokens
+}
+
 func EstimateTokens(msg llm.Message) int {
-	tokens := 4 + len([]rune(msg.Role))/4 + len([]rune(msg.Content))/4 + len([]rune(msg.ReasoningContent))/4
+	chars := len([]rune(msg.Content)) + len([]rune(msg.ReasoningContent))
+	if len(msg.ContentParts) > 0 {
+		chars = len([]rune(msg.ReasoningContent))
+		for _, part := range msg.ContentParts {
+			if part.Type == llm.ContentImageURL {
+				chars += 4800
+			} else {
+				chars += len([]rune(part.Text))
+			}
+		}
+	}
+	for _, call := range msg.ToolCalls {
+		chars += len([]rune(call.Function.Name)) + len([]rune(call.Function.Arguments))
+	}
+	tokens := (chars + 3) / 4
 	if tokens < 1 {
 		tokens = 1
-	}
-	for _, part := range msg.ContentParts {
-		if part.Type == llm.ContentImageURL {
-			tokens += 1200
-		} else {
-			tokens += len([]rune(part.Text)) / 4
-		}
 	}
 	return tokens
 }
@@ -776,6 +1020,9 @@ func entriesToMessages(entries []Entry) []llm.Message {
 func messageFromEntry(entry Entry) *llm.Message {
 	switch entry.Type {
 	case TypeMessage:
+		if entry.Message != nil && excludeFromModelContext(*entry.Message) {
+			return nil
+		}
 		return entry.Message
 	case TypeCustomMessage:
 		msg := llm.User(entry.Content)
@@ -785,9 +1032,210 @@ func messageFromEntry(entry Entry) *llm.Message {
 	}
 }
 
+func excludeFromModelContext(message llm.Message) bool {
+	return message.Role == llm.RoleAssistant && strings.EqualFold(message.FinishReason, "length") &&
+		message.OutputTokens == 0 && message.InputTokens+message.CachedInputTokens > 0 &&
+		strings.TrimSpace(message.Content) == "" && len(message.ToolCalls) == 0
+}
+
 func truncate(value string, max int) string {
-	if len(value) <= max {
+	runes := []rune(value)
+	if len(runes) <= max {
 		return value
 	}
-	return value[:max] + "\n\n[... truncated]"
+	return string(runes[:max]) + fmt.Sprintf("\n\n[... 省略 %d 个字符]", len(runes)-max)
+}
+
+func latestCompactionIndex(entries []Entry) int {
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Type == TypeCompaction {
+			return i
+		}
+	}
+	return -1
+}
+
+func indexOfEntry(entries []Entry, id string) int {
+	for i := range entries {
+		if entries[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func findCutPoint(entries []Entry, start, end, keepRecentTokens int) (cut, turnStart int, split bool) {
+	valid := make([]int, 0)
+	for i := start; i < end; i++ {
+		if isValidCutEntry(entries[i]) {
+			valid = append(valid, i)
+		}
+	}
+	if len(valid) == 0 {
+		return start, -1, false
+	}
+	cut = valid[0]
+	accumulated := 0
+	for i := end - 1; i >= start; i-- {
+		message := messageFromEntry(entries[i])
+		if message == nil {
+			continue
+		}
+		accumulated += EstimateTokens(*message)
+		if accumulated >= keepRecentTokens {
+			for _, candidate := range valid {
+				if candidate >= i {
+					cut = candidate
+					break
+				}
+			}
+			break
+		}
+	}
+	if isTurnStartEntry(entries[cut]) {
+		return cut, -1, false
+	}
+	turnStart = findTurnStart(entries, cut, start)
+	return cut, turnStart, turnStart >= 0
+}
+
+func isValidCutEntry(entry Entry) bool {
+	if entry.Type == TypeCustomMessage {
+		return true
+	}
+	return entry.Type == TypeMessage && entry.Message != nil && (entry.Message.Role == llm.RoleUser || entry.Message.Role == llm.RoleAssistant)
+}
+
+func isTurnStartEntry(entry Entry) bool {
+	return entry.Type == TypeCustomMessage || (entry.Type == TypeMessage && entry.Message != nil && entry.Message.Role == llm.RoleUser)
+}
+
+func findTurnStart(entries []Entry, from, start int) int {
+	for i := from; i >= start; i-- {
+		if isTurnStartEntry(entries[i]) {
+			return i
+		}
+	}
+	return -1
+}
+
+func messagesFromRange(entries []Entry, start, end int) []llm.Message {
+	var messages []llm.Message
+	for i := start; i < end; i++ {
+		if message := messageFromEntry(entries[i]); message != nil {
+			messages = append(messages, *message)
+		}
+	}
+	return messages
+}
+
+func buildContextMessages(entries []Entry) []llm.Message {
+	compactionIndex := latestCompactionIndex(entries)
+	if compactionIndex < 0 {
+		return entriesToMessages(entries)
+	}
+	messages := []llm.Message{compactionMessage(entries[compactionIndex].Summary)}
+	firstKept := indexOfEntry(entries[:compactionIndex], entries[compactionIndex].FirstKeptEntryID)
+	if firstKept >= 0 {
+		messages = append(messages, entriesToMessages(entries[firstKept:compactionIndex])...)
+	}
+	messages = append(messages, entriesToMessages(entries[compactionIndex+1:])...)
+	return messages
+}
+
+type fileOperations struct {
+	read    map[string]bool
+	written map[string]bool
+	edited  map[string]bool
+}
+
+func newFileOperations() fileOperations {
+	return fileOperations{read: map[string]bool{}, written: map[string]bool{}, edited: map[string]bool{}}
+}
+
+func (f fileOperations) extract(message llm.Message) {
+	if message.Role != llm.RoleAssistant {
+		return
+	}
+	for _, call := range message.ToolCalls {
+		var arguments map[string]any
+		if json.Unmarshal([]byte(call.Function.Arguments), &arguments) != nil {
+			continue
+		}
+		path, _ := arguments["path"].(string)
+		if path == "" {
+			continue
+		}
+		switch call.Function.Name {
+		case "read_file":
+			f.read[path] = true
+		case "write_file":
+			f.written[path] = true
+		case "edit_file":
+			f.edited[path] = true
+		}
+	}
+}
+
+func (f fileOperations) merge(details Details) {
+	for _, path := range details.ReadFiles {
+		f.read[path] = true
+	}
+	for _, path := range details.ModifiedFiles {
+		f.edited[path] = true
+	}
+}
+
+func (f fileOperations) details() Details {
+	modified := map[string]bool{}
+	for path := range f.written {
+		modified[path] = true
+	}
+	for path := range f.edited {
+		modified[path] = true
+	}
+	details := Details{}
+	for path := range f.read {
+		if !modified[path] {
+			details.ReadFiles = append(details.ReadFiles, path)
+		}
+	}
+	for path := range modified {
+		details.ModifiedFiles = append(details.ModifiedFiles, path)
+	}
+	sort.Strings(details.ReadFiles)
+	sort.Strings(details.ModifiedFiles)
+	return details
+}
+
+func detailsFromAny(value any) Details {
+	if value == nil {
+		return Details{}
+	}
+	if details, ok := value.(Details); ok {
+		return details
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return Details{}
+	}
+	var details Details
+	if json.Unmarshal(data, &details) != nil {
+		return Details{}
+	}
+	return details
+}
+
+func formatFileDetails(details Details) string {
+	var sections []string
+	if len(details.ReadFiles) > 0 {
+		sections = append(sections, "<read-files>\n"+strings.Join(details.ReadFiles, "\n")+"\n</read-files>")
+	}
+	if len(details.ModifiedFiles) > 0 {
+		sections = append(sections, "<modified-files>\n"+strings.Join(details.ModifiedFiles, "\n")+"\n</modified-files>")
+	}
+	if len(sections) == 0 {
+		return ""
+	}
+	return "\n\n" + strings.Join(sections, "\n\n")
 }

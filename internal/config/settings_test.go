@@ -80,6 +80,36 @@ func TestLoaderLoadsCompatibleSettingJSON(t *testing.T) {
 	}
 }
 
+func TestLoaderModelCapabilitiesCompatibilityAndValidation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "setting.json")
+	valid := `{"llm":{"providers":{"openai_compatiable":{"apiKey":"k","baseUrl":"http://localhost/v1","models":["local-model"],"modelCapabilities":{"local-model":{"contextWindow":128000,"maxOutputTokens":8192}}}}}}`
+	if err := os.WriteFile(path, []byte(valid), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := NewLoader(path).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	capability := settings.LLM.Providers["openai_compatiable"].ModelCapabilities["local-model"]
+	if capability.ContextWindow != 128000 || capability.MaxOutputTokens != 8192 {
+		t.Fatalf("capability = %+v", capability)
+	}
+
+	cases := []string{
+		`{"llm":{"providers":{"p":{"models":["declared"],"modelCapabilities":{"other":{"contextWindow":1}}}}}}`,
+		`{"llm":{"providers":{"p":{"models":["declared"],"modelCapabilities":{"declared":{"contextWindow":-1}}}}}}`,
+		`{"llm":{"providers":{"p":{"models":["declared"],"modelCapabilities":{"declared":{}}}}}}`,
+	}
+	for _, data := range cases {
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewLoader(path).Load(); err == nil {
+			t.Fatalf("invalid capability should fail: %s", data)
+		}
+	}
+}
+
 func TestLoaderValidatesMCPToolAccess(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "setting.json")
 	cases := []struct {

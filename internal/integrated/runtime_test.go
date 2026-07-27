@@ -16,6 +16,7 @@ import (
 	"bruce-go/internal/mcp"
 	bruntime "bruce-go/internal/runtime"
 	"bruce-go/internal/sandbox"
+	"bruce-go/internal/session"
 	"bruce-go/internal/web"
 )
 
@@ -632,6 +633,284 @@ type recordingChatClient struct {
 	calls     [][]llm.Message
 }
 
+type compactionChatStep struct {
+	response llm.ChatResponse
+	err      error
+}
+
+type compactionChatClient struct {
+	steps     []compactionChatStep
+	calls     [][]llm.Message
+	options   []llm.StreamOptions
+	window    int
+	maxOutput int
+}
+
+func (c *compactionChatClient) Chat(_ context.Context, messages []llm.Message, _ []llm.ToolDefinition, opts llm.StreamOptions) (llm.ChatResponse, error) {
+	copied := append([]llm.Message(nil), messages...)
+	c.calls = append(c.calls, copied)
+	c.options = append(c.options, opts)
+	if len(c.steps) == 0 {
+		return llm.ChatResponse{}, errors.New("compaction client exhausted")
+	}
+	step := c.steps[0]
+	c.steps = c.steps[1:]
+	return step.response, step.err
+}
+
+func (*compactionChatClient) ProviderName() string        { return "fake" }
+func (*compactionChatClient) ModelName() string           { return "fake-model" }
+func (c *compactionChatClient) MaxContextWindow() int     { return c.window }
+func (c *compactionChatClient) MaxOutputTokens() int      { return c.maxOutput }
+func (*compactionChatClient) SupportsTools() bool         { return true }
+func (*compactionChatClient) SupportsPromptCaching() bool { return false }
+func (*compactionChatClient) SupportsImages() bool        { return true }
+
+func newCompactionRuntime(t *testing.T, client *compactionChatClient) *Runtime {
+	t.Helper()
+	rt, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: t.TempDir(), Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupRuntime(t, rt)
+	rt.Settings.Compaction = config.Compaction{Enabled: true, ReserveTokens: 10, KeepRecentTokens: 1}
+	if err := rt.Session.AppendMessage(llm.User(strings.Repeat("旧问题", 40))); err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.Session.AppendMessage(llm.Assistant(strings.Repeat("旧回答", 40))); err != nil {
+		t.Fatal(err)
+	}
+	return rt
+}
+
+func TestRuntimeOverflowCompactsAndContinuesWithoutDuplicateUser(t *testing.T) {
+	client := &compactionChatClient{window: 100, maxOutput: 50, steps: []compactionChatStep{
+		{err: errors.New("input exceeds the context window")},
+		{response: llm.ChatResponse{Content: "## 目标\n恢复任务"}},
+		{response: llm.ChatResponse{Content: "恢复完成", FinishReason: "stop"}},
+	}}
+	rt := newCompactionRuntime(t, client)
+	out, err := rt.RunTask(context.Background(), "唯一的新问题")
+	if err != nil || out != "恢复完成" {
+		t.Fatalf("result = %q, %v", out, err)
+	}
+	if len(client.calls) != 3 {
+		t.Fatalf("calls = %d", len(client.calls))
+	}
+	if !messagesContainText(client.calls[1], "上下文摘要助手") && !messagesContainText(client.calls[1], "超长回合") {
+		t.Fatalf("second call is not summarization: %+v", client.calls[1])
+	}
+	users := 0
+	for _, entry := range rt.Session.ActiveEntries() {
+		if entry.Message != nil && entry.Message.Role == llm.RoleUser && entry.Message.Content == "唯一的新问题" {
+			users++
+		}
+	}
+	if users != 1 {
+		t.Fatalf("persisted user count = %d", users)
+	}
+	if countExactUser(client.calls[2], "唯一的新问题") != 1 {
+		t.Fatalf("retry context duplicated user: %+v", client.calls[2])
+	}
+}
+
+func TestManualCompactUsesLLMSummaryWhenAutomaticCompactionDisabled(t *testing.T) {
+	client := &compactionChatClient{window: 100, maxOutput: 20, steps: []compactionChatStep{{response: llm.ChatResponse{Content: "## 目标\n手动摘要"}}}}
+	rt := newCompactionRuntime(t, client)
+	rt.Settings.Compaction.Enabled = false
+	rt.Settings.Compaction.ReserveTokens = 100
+	rt.Settings.Compaction.KeepRecentTokens = 2
+	if err := rt.Session.AppendMessage(llm.User("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.Session.AppendMessage(llm.Assistant("y")); err != nil {
+		t.Fatal(err)
+	}
+	result := rt.Handle(context.Background(), "/compact 重点保留接口")
+	if result.Err != nil || !strings.Contains(result.Output, "已压缩") {
+		t.Fatalf("result = %+v", result)
+	}
+	if len(client.calls) != 1 || !messagesContainText(client.calls[0], "重点保留接口") || client.options[0].MaxTokens != 20 {
+		t.Fatalf("summary call = %+v opts=%+v", client.calls, client.options)
+	}
+	entries := rt.Session.ActiveEntries()
+	last := entries[len(entries)-1]
+	if last.Type != session.TypeCompaction || last.TokensBefore <= 0 || !strings.Contains(last.Summary, "手动摘要") {
+		t.Fatalf("compaction entry = %+v", last)
+	}
+}
+
+func TestRuntimeLengthOverflowKeepsUserContextForRetry(t *testing.T) {
+	client := &compactionChatClient{window: 100, steps: []compactionChatStep{
+		{response: llm.ChatResponse{InputTokens: 99, FinishReason: "length"}},
+		{response: llm.ChatResponse{Content: "摘要"}},
+		{response: llm.ChatResponse{Content: "重试成功", FinishReason: "stop"}},
+	}}
+	rt := newCompactionRuntime(t, client)
+	out, err := rt.RunTask(context.Background(), "必须保留的请求")
+	if err != nil || out != "重试成功" {
+		t.Fatalf("result=%q err=%v", out, err)
+	}
+	if len(client.calls) != 3 || countExactUser(client.calls[2], "必须保留的请求") != 1 {
+		t.Fatalf("retry context = %+v", client.calls)
+	}
+	foundPersistedOverflow := false
+	for _, entry := range rt.Session.ActiveEntries() {
+		if entry.Message != nil && entry.Message.FinishReason == "length" && entry.Message.InputTokens == 99 {
+			foundPersistedOverflow = true
+		}
+	}
+	if !foundPersistedOverflow {
+		t.Fatal("length overflow response metadata was not persisted")
+	}
+	current := rt.Session.Context(rt.Mode)
+	resumed := session.NewStore(rt.HomeDir, rt.Workspace)
+	if err := resumed.Resume(current.File); err != nil {
+		t.Fatal(err)
+	}
+	restored := resumed.Context(rt.Mode)
+	if len(restored.Messages) != len(current.Messages) {
+		t.Fatalf("restored messages=%+v current=%+v", restored.Messages, current.Messages)
+	}
+	for i := range current.Messages {
+		if restored.Messages[i].Role != current.Messages[i].Role || restored.Messages[i].Content != current.Messages[i].Content {
+			t.Fatalf("restored message %d=%+v current=%+v", i, restored.Messages[i], current.Messages[i])
+		}
+	}
+}
+
+func TestRuntimeOverflowRetriesOnlyOnce(t *testing.T) {
+	client := &compactionChatClient{window: 100, steps: []compactionChatStep{
+		{err: errors.New("prompt is too long")},
+		{response: llm.ChatResponse{Content: "摘要"}},
+		{err: errors.New("prompt is too long")},
+	}}
+	rt := newCompactionRuntime(t, client)
+	_, err := rt.RunTask(context.Background(), "new")
+	if err == nil || !strings.Contains(err.Error(), "仍然溢出") {
+		t.Fatalf("error = %v", err)
+	}
+	if len(client.calls) != 3 {
+		t.Fatalf("calls = %d, expected agent + summary + one retry", len(client.calls))
+	}
+}
+
+func TestRuntimeSuccessfulSilentOverflowCompactsWithoutRetry(t *testing.T) {
+	client := &compactionChatClient{window: 100, steps: []compactionChatStep{
+		{response: llm.ChatResponse{Content: "答案", InputTokens: 101, FinishReason: "stop"}},
+		{response: llm.ChatResponse{Content: "摘要"}},
+	}}
+	rt := newCompactionRuntime(t, client)
+	rt.Settings.Compaction.KeepRecentTokens = 2
+	out, err := rt.RunTask(context.Background(), "new")
+	if err != nil || out != "答案" {
+		t.Fatalf("result = %q, %v", out, err)
+	}
+	if len(client.calls) != 2 {
+		t.Fatalf("silent overflow should summarize but not retry, calls=%d", len(client.calls))
+	}
+	if rt.Session.ActiveEntries()[len(rt.Session.ActiveEntries())-1].Type != "compaction" {
+		t.Fatalf("last entry is not compaction: %+v", rt.Session.ActiveEntries())
+	}
+}
+
+func TestRuntimeThresholdBeforeAndAfterModelCalls(t *testing.T) {
+	t.Run("before", func(t *testing.T) {
+		client := &compactionChatClient{window: 100, steps: []compactionChatStep{{response: llm.ChatResponse{Content: "摘要"}}, {response: llm.ChatResponse{Content: "答案", FinishReason: "stop"}}}}
+		rt := newCompactionRuntime(t, client)
+		entries := rt.Session.ActiveEntries()
+		used := *entries[len(entries)-1].Message
+		used.InputTokens, used.OutputTokens, used.FinishReason = 92, 1, "stop"
+		if err := rt.Session.AppendMessage(used); err != nil {
+			t.Fatal(err)
+		}
+		out, err := rt.RunTask(context.Background(), "new")
+		if err != nil || out != "答案" || len(client.calls) != 2 {
+			t.Fatalf("result=%q err=%v calls=%d", out, err, len(client.calls))
+		}
+		if !messagesContainText(client.calls[0], "conversation") {
+			t.Fatalf("first call should be compaction: %+v", client.calls[0])
+		}
+	})
+
+	t.Run("after", func(t *testing.T) {
+		client := &compactionChatClient{window: 100, steps: []compactionChatStep{{response: llm.ChatResponse{Content: "答案", InputTokens: 92, OutputTokens: 1, FinishReason: "stop"}}, {response: llm.ChatResponse{Content: "摘要"}}}}
+		rt := newCompactionRuntime(t, client)
+		rt.Settings.Compaction.KeepRecentTokens = 2
+		out, err := rt.RunTask(context.Background(), "new")
+		if err != nil || out != "答案" || len(client.calls) != 2 {
+			t.Fatalf("result=%q err=%v calls=%d", out, err, len(client.calls))
+		}
+	})
+}
+
+func TestRuntimeThresholdDisabledUnknownWindowAndOldCompactionUsage(t *testing.T) {
+	tests := []struct {
+		name       string
+		window     int
+		enabled    bool
+		oldCompact bool
+	}{
+		{name: "disabled", window: 100, enabled: false},
+		{name: "unknown window", window: 0, enabled: true},
+		{name: "old compaction usage", window: 100, enabled: true, oldCompact: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &compactionChatClient{window: test.window, steps: []compactionChatStep{{response: llm.ChatResponse{Content: "答案", FinishReason: "stop"}}}}
+			rt := newCompactionRuntime(t, client)
+			rt.Settings.Compaction.Enabled = test.enabled
+			entries := rt.Session.ActiveEntries()
+			used := llm.Assistant("usage")
+			used.InputTokens, used.FinishReason = 95, "stop"
+			if err := rt.Session.AppendMessage(used); err != nil {
+				t.Fatal(err)
+			}
+			if test.oldCompact {
+				entries = rt.Session.ActiveEntries()
+				if err := rt.Session.AppendCompaction("旧摘要", entries[0].ID, 95, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if out, err := rt.RunTask(context.Background(), "new"); err != nil || out != "答案" {
+				t.Fatalf("result=%q err=%v", out, err)
+			}
+			if len(client.calls) != 1 {
+				t.Fatalf("unexpected compaction, calls=%d", len(client.calls))
+			}
+		})
+	}
+}
+
+func TestRuntimePostTurnCompactionFailurePreservesAnswer(t *testing.T) {
+	client := &compactionChatClient{window: 100, steps: []compactionChatStep{{response: llm.ChatResponse{Content: "已完成答案", InputTokens: 92, FinishReason: "stop"}}, {err: errors.New("summary unavailable")}}}
+	rt := newCompactionRuntime(t, client)
+	rt.Settings.Compaction.KeepRecentTokens = 2
+	var activities []string
+	rt.Events.Subscribe(func(evt event.Event) {
+		if activity, ok := evt.(event.Activity); ok {
+			activities = append(activities, activity.Message)
+		}
+	})
+	out, err := rt.RunTask(context.Background(), "new")
+	if err != nil || out != "已完成答案" {
+		t.Fatalf("result=%q err=%v", out, err)
+	}
+	if !messagesContainRawText(activities, "当前回答已完成") {
+		t.Fatalf("activities = %v", activities)
+	}
+}
+
+func countExactUser(messages []llm.Message, content string) int {
+	count := 0
+	for _, message := range messages {
+		if message.Role == llm.RoleUser && message.Content == content {
+			count++
+		}
+	}
+	return count
+}
+
 func (c *recordingChatClient) Chat(_ context.Context, messages []llm.Message, _ []llm.ToolDefinition, opts llm.StreamOptions) (llm.ChatResponse, error) {
 	copied := append([]llm.Message(nil), messages...)
 	c.calls = append(c.calls, copied)
@@ -651,6 +930,7 @@ func (c *recordingChatClient) Chat(_ context.Context, messages []llm.Message, _ 
 func (*recordingChatClient) ProviderName() string        { return "fake" }
 func (*recordingChatClient) ModelName() string           { return "fake-model" }
 func (*recordingChatClient) MaxContextWindow() int       { return 200000 }
+func (*recordingChatClient) MaxOutputTokens() int        { return 0 }
 func (*recordingChatClient) SupportsTools() bool         { return true }
 func (*recordingChatClient) SupportsPromptCaching() bool { return false }
 func (*recordingChatClient) SupportsImages() bool        { return true }
