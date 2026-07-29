@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -91,9 +92,41 @@ type MCPServerSetting struct {
 }
 
 type Compaction struct {
-	Enabled          bool `json:"enabled"`
-	ReserveTokens    int  `json:"reserveTokens"`
-	KeepRecentTokens int  `json:"keepRecentTokens"`
+	Enabled            bool    `json:"enabled"`
+	ContextWindowRatio float64 `json:"contextWindowRatio"`
+	ReserveTokens      int     `json:"reserveTokens"`
+	KeepRecentTokens   int     `json:"keepRecentTokens"`
+}
+
+func (c Compaction) Validate() error {
+	if c.ContextWindowRatio <= 0 || c.ContextWindowRatio > 1 || math.IsNaN(c.ContextWindowRatio) {
+		return errors.New("compaction.contextWindowRatio 必须大于 0 且不超过 1")
+	}
+	if c.ReserveTokens < 0 {
+		return errors.New("compaction.reserveTokens 不能为负数")
+	}
+	return nil
+}
+
+func (c Compaction) Threshold(contextWindow int) (int, error) {
+	if err := c.Validate(); err != nil {
+		return 0, err
+	}
+	if contextWindow <= 0 {
+		return 0, nil
+	}
+	usableWindow := int(math.Floor(float64(contextWindow) * c.ContextWindowRatio))
+	threshold := usableWindow - c.ReserveTokens
+	if threshold <= 0 {
+		return 0, fmt.Errorf(
+			"compaction 自动压缩阈值无效: contextWindow(%d) × contextWindowRatio(%g) = %d，必须大于 reserveTokens(%d)",
+			contextWindow,
+			c.ContextWindowRatio,
+			usableWindow,
+			c.ReserveTokens,
+		)
+	}
+	return threshold, nil
 }
 
 func DefaultSettings() Settings {
@@ -118,9 +151,10 @@ func DefaultSettings() Settings {
 			Servers: map[string]MCPServerSetting{},
 		},
 		Compaction: Compaction{
-			Enabled:          true,
-			ReserveTokens:    16384,
-			KeepRecentTokens: 20000,
+			Enabled:            true,
+			ContextWindowRatio: 0.8,
+			ReserveTokens:      16384,
+			KeepRecentTokens:   20000,
 		},
 		Sandbox:   SandboxSettings{Mode: "full-access"},
 		Variables: map[string]string{},
@@ -165,6 +199,9 @@ func (l Loader) Load() (Settings, error) {
 		return settings, err
 	}
 	normalize(&settings)
+	if err := settings.Compaction.Validate(); err != nil {
+		return settings, err
+	}
 	if err := validateLLM(settings.LLM); err != nil {
 		return settings, err
 	}
@@ -182,6 +219,9 @@ func (l Loader) Save(settings Settings) error {
 		l.Path = DefaultSettingsPath()
 	}
 	normalize(&settings)
+	if err := settings.Compaction.Validate(); err != nil {
+		return err
+	}
 	if err := validateLLM(settings.LLM); err != nil {
 		return err
 	}
@@ -200,7 +240,6 @@ func (l Loader) Save(settings Settings) error {
 	}
 	return os.WriteFile(l.Path, append(data, '\n'), 0o644)
 }
-
 func validateLLM(settings LLMSettings) error {
 	for providerName, provider := range settings.Providers {
 		declared := make(map[string]bool, len(provider.Models))

@@ -77,6 +77,9 @@ func NewSwitchable(settings config.Settings, loader config.Loader) (*SwitchableC
 		current:       initial,
 	}
 	c.client = c.suppliers[key(initial)]()
+	if err := validateCompactionWindow(settings.Compaction, initial, c.client); err != nil {
+		return nil, err
+	}
 	effort := strings.TrimSpace(settings.LLM.ReasoningEffort)
 	if effort == "" || !validReasoningEffort(effort) {
 		effort = "max"
@@ -194,6 +197,10 @@ func (c *SwitchableClient) Switch(selector string) (ModelOption, error) {
 	if supplier == nil {
 		return ModelOption{}, errors.New("未知模型: " + next.Display())
 	}
+	nextClient := supplier()
+	if err := validateCompactionWindow(c.settings.Compaction, next, nextClient); err != nil {
+		return ModelOption{}, err
+	}
 	oldProvider, oldModel := c.settings.LLM.DefaultProvider, c.settings.LLM.DefaultModel
 	c.settings.LLM.DefaultProvider = strings.ToLower(next.Provider)
 	c.settings.LLM.DefaultModel = next.Model
@@ -204,9 +211,19 @@ func (c *SwitchableClient) Switch(selector string) (ModelOption, error) {
 		}
 	}
 	c.current = next
-	c.client = supplier()
+	c.client = nextClient
 	c.applyEffortToClient()
 	return next, nil
+}
+
+func validateCompactionWindow(settings config.Compaction, model ModelOption, client ChatClient) error {
+	if !settings.Enabled || client.MaxContextWindow() <= 0 {
+		return nil
+	}
+	if _, err := settings.Threshold(client.MaxContextWindow()); err != nil {
+		return fmt.Errorf("模型 %s 的自动压缩配置无效: %w", model.Selector(), err)
+	}
+	return nil
 }
 
 func (c *SwitchableClient) ReasoningEffort() string {

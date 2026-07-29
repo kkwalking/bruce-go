@@ -982,7 +982,11 @@ func hasValidAssistantUsage(message llm.Message) bool {
 }
 
 func ShouldCompact(contextTokens, contextWindow int, settings config.Compaction) bool {
-	return settings.Enabled && contextWindow > 0 && contextTokens > contextWindow-settings.ReserveTokens
+	if !settings.Enabled || contextWindow <= 0 {
+		return false
+	}
+	threshold, err := settings.Threshold(contextWindow)
+	return err == nil && contextTokens > threshold
 }
 
 func EstimateTokens(msg llm.Message) int {

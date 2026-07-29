@@ -78,6 +78,16 @@ type modelSwitcher interface {
 
 var errCompactionRequired = errors.New("context compaction required")
 
+func validateCompactionWindow(settings config.Compaction, client llm.ChatClient) error {
+	if !settings.Enabled || client.MaxContextWindow() <= 0 {
+		return nil
+	}
+	if _, err := settings.Threshold(client.MaxContextWindow()); err != nil {
+		return fmt.Errorf("模型 %s/%s 的自动压缩配置无效: %w", client.ProviderName(), client.ModelName(), err)
+	}
+	return nil
+}
+
 func New(ctx context.Context, opts Options) (*Runtime, error) {
 	workspace := abs(opts.Workspace)
 	if canonical, err := sandbox.CanonicalAbsolute(workspace); err == nil {
@@ -112,6 +122,9 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		}
 		client = s
 		switcher = s
+	}
+	if err := validateCompactionWindow(settings.Compaction, client); err != nil {
+		return nil, err
 	}
 
 	hitl := approval.NewAutoHandler(false, approval.Approve())
@@ -735,7 +748,12 @@ func (r *Runtime) compactAfterSuccessfulTurn(ctx context.Context, runID string) 
 			return
 		}
 	}
-	if needed, _, _ := r.compactionThreshold(); !needed {
+	needed, _, _, thresholdErr := r.compactionThreshold()
+	if thresholdErr != nil {
+		r.emit(event.NewActivity(runID, "自动压缩阈值配置无效，但当前回答已完成: "+thresholdErr.Error()))
+		return
+	}
+	if !needed {
 		return
 	}
 	if _, err := r.autoCompact(ctx, runID, "回合结束阈值"); err != nil {
@@ -743,13 +761,17 @@ func (r *Runtime) compactAfterSuccessfulTurn(ctx context.Context, runID string) 
 	}
 }
 
-func (r *Runtime) compactionThreshold() (needed bool, tokens int, threshold int) {
+func (r *Runtime) compactionThreshold() (needed bool, tokens int, threshold int, err error) {
 	return r.compactionThresholdFor(r.Session.Context(r.Mode).Messages)
 }
 
-func (r *Runtime) compactionThresholdFor(messages []llm.Message) (needed bool, tokens int, threshold int) {
+func (r *Runtime) compactionThresholdFor(messages []llm.Message) (needed bool, tokens int, threshold int, err error) {
 	if !r.Settings.Compaction.Enabled || r.Client.MaxContextWindow() <= 0 {
-		return false, 0, 0
+		return false, 0, 0, nil
+	}
+	threshold, err = r.Settings.Compaction.Threshold(r.Client.MaxContextWindow())
+	if err != nil {
+		return false, 0, 0, err
 	}
 	entries := r.Session.ActiveEntries()
 	lastCompaction := -1
@@ -769,11 +791,10 @@ func (r *Runtime) compactionThresholdFor(messages []llm.Message) (needed bool, t
 		}
 	}
 	if !hasFreshUsage {
-		return false, 0, 0
+		return false, 0, 0, nil
 	}
 	tokens = session.EstimateContextTokens(messages).Tokens
-	threshold = r.Client.MaxContextWindow() - r.Settings.Compaction.ReserveTokens
-	return session.ShouldCompact(tokens, r.Client.MaxContextWindow(), r.Settings.Compaction), tokens, threshold
+	return session.ShouldCompact(tokens, r.Client.MaxContextWindow(), r.Settings.Compaction), tokens, threshold, nil
 }
 
 func (r *Runtime) latestAssistantResponseAfterCompaction() (llm.ChatResponse, bool) {
@@ -879,7 +900,10 @@ func (r *Runtime) rebuildAgents() {
 	})
 	r.planning = agent.New(r.Client, planRegistry, planning.Prompt(additional), r.Concurrent, r.Events)
 	beforeChat := func(messages []llm.Message) error {
-		needed, tokens, threshold := r.compactionThresholdFor(messages)
+		needed, tokens, threshold, err := r.compactionThresholdFor(messages)
+		if err != nil {
+			return fmt.Errorf("自动压缩阈值配置无效: %w", err)
+		}
 		if !needed {
 			return nil
 		}

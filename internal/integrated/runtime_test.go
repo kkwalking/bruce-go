@@ -668,12 +668,18 @@ func (*compactionChatClient) SupportsImages() bool        { return true }
 
 func newCompactionRuntime(t *testing.T, client *compactionChatClient) *Runtime {
 	t.Helper()
-	rt, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: t.TempDir(), Client: client})
+	homeDir := t.TempDir()
+	settingsPath := filepath.Join(homeDir, "setting.json")
+	settings := config.DefaultSettings()
+	settings.Compaction = config.Compaction{Enabled: true, ContextWindowRatio: 0.8, ReserveTokens: 10, KeepRecentTokens: 1}
+	if err := config.NewLoader(settingsPath).Save(settings); err != nil {
+		t.Fatal(err)
+	}
+	rt, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: homeDir, SettingsPath: settingsPath, Client: client})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cleanupRuntime(t, rt)
-	rt.Settings.Compaction = config.Compaction{Enabled: true, ReserveTokens: 10, KeepRecentTokens: 1}
 	if err := rt.Session.AppendMessage(llm.User(strings.Repeat("旧问题", 40))); err != nil {
 		t.Fatal(err)
 	}
@@ -842,6 +848,46 @@ func TestRuntimeThresholdBeforeAndAfterModelCalls(t *testing.T) {
 			t.Fatalf("result=%q err=%v calls=%d", out, err, len(client.calls))
 		}
 	})
+}
+
+func TestRuntimeCompactionThresholdUsesContextWindowRatio(t *testing.T) {
+	client := &compactionChatClient{window: 100}
+	rt := newCompactionRuntime(t, client)
+
+	atThreshold := llm.Assistant("usage")
+	atThreshold.InputTokens, atThreshold.FinishReason = 70, "stop"
+	if err := rt.Session.AppendMessage(atThreshold); err != nil {
+		t.Fatal(err)
+	}
+	needed, tokens, threshold, err := rt.compactionThreshold()
+	if err != nil || needed || tokens != 70 || threshold != 70 {
+		t.Fatalf("at threshold: needed=%v tokens=%d threshold=%d err=%v", needed, tokens, threshold, err)
+	}
+
+	aboveThreshold := llm.Assistant("usage")
+	aboveThreshold.InputTokens, aboveThreshold.FinishReason = 71, "stop"
+	if err := rt.Session.AppendMessage(aboveThreshold); err != nil {
+		t.Fatal(err)
+	}
+	needed, tokens, threshold, err = rt.compactionThreshold()
+	if err != nil || !needed || tokens != 71 || threshold != 70 {
+		t.Fatalf("above threshold: needed=%v tokens=%d threshold=%d err=%v", needed, tokens, threshold, err)
+	}
+}
+
+func TestRuntimeRejectsInvalidCompactionWindowAtStartup(t *testing.T) {
+	homeDir := t.TempDir()
+	settingsPath := filepath.Join(homeDir, "setting.json")
+	settings := config.DefaultSettings()
+	settings.Compaction.ContextWindowRatio = 0.8
+	settings.Compaction.ReserveTokens = 80
+	if err := config.NewLoader(settingsPath).Save(settings); err != nil {
+		t.Fatal(err)
+	}
+	client := &compactionChatClient{window: 100}
+	if _, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: homeDir, SettingsPath: settingsPath, Client: client}); err == nil || !strings.Contains(err.Error(), "自动压缩配置无效") {
+		t.Fatalf("startup error = %v", err)
+	}
 }
 
 func TestRuntimeThresholdDisabledUnknownWindowAndOldCompactionUsage(t *testing.T) {

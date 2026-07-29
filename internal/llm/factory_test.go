@@ -45,6 +45,51 @@ func TestSwitchableClientListsAndSwitchesModels(t *testing.T) {
 	}
 }
 
+func TestSwitchableClientRejectsInvalidCompactionWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "setting.json")
+	settings := config.DefaultSettings()
+	settings.Compaction.ContextWindowRatio = 0.8
+	settings.Compaction.ReserveTokens = 80
+	settings.LLM.DefaultProvider = "openai_compatiable"
+	settings.LLM.DefaultModel = "local-a"
+	settings.LLM.Providers["openai_compatiable"] = config.ProviderSetting{
+		APIKey:  "key",
+		BaseURL: "http://localhost:9000/v1",
+		Models:  []string{"local-a", "local-b"},
+		ModelCapabilities: map[string]config.ModelCapability{
+			"local-a": {ContextWindow: 200},
+			"local-b": {ContextWindow: 100},
+		},
+	}
+	loader := config.NewLoader(path)
+	if err := loader.Save(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	client, err := NewSwitchable(settings, loader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Switch("openai_compatiable/local-b"); err == nil {
+		t.Fatal("switch to model with invalid compaction window should fail")
+	}
+	if got := client.Current().Model; got != "local-a" {
+		t.Fatalf("current model changed to %q", got)
+	}
+	reloaded, err := loader.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.LLM.DefaultModel; got != "local-a" {
+		t.Fatalf("persisted default model changed to %q", got)
+	}
+
+	settings.LLM.DefaultModel = "local-b"
+	if _, err := NewSwitchable(settings, loader); err == nil {
+		t.Fatal("initial model with invalid compaction window should fail")
+	}
+}
+
 func TestSwitchableClientReasoningEffort(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "setting.json")
 	settings := config.DefaultSettings()

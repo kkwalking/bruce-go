@@ -72,11 +72,85 @@ func TestLoaderLoadsCompatibleSettingJSON(t *testing.T) {
 	if got := settings.MCP.Servers["demo"].ToolAccess["read_file"]; got != "read-only" {
 		t.Fatalf("mcp read_file access = %q", got)
 	}
-	if settings.Compaction.ReserveTokens != 1000 || settings.Compaction.KeepRecentTokens != 2000 {
+	if settings.Compaction.ContextWindowRatio != 0.8 || settings.Compaction.ReserveTokens != 1000 || settings.Compaction.KeepRecentTokens != 2000 {
 		t.Fatalf("unexpected compaction: %+v", settings.Compaction)
 	}
 	if got := settings.Variables["demoToken"]; got != "replace_me" {
 		t.Fatalf("variable = %q", got)
+	}
+}
+
+func TestCompactionRatioValidationAndThreshold(t *testing.T) {
+	settings := DefaultSettings()
+	if settings.Compaction.ContextWindowRatio != 0.8 {
+		t.Fatalf("default context window ratio = %v", settings.Compaction.ContextWindowRatio)
+	}
+	threshold, err := settings.Compaction.Threshold(100000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if threshold != 63616 {
+		t.Fatalf("threshold = %d, want 63616", threshold)
+	}
+	flooring := settings.Compaction
+	flooring.ReserveTokens = 10
+	if threshold, err := flooring.Threshold(101); err != nil || threshold != 70 {
+		t.Fatalf("floored threshold = %d, err=%v", threshold, err)
+	}
+
+	path := filepath.Join(t.TempDir(), "setting.json")
+	if err := os.WriteFile(path, []byte(`{"compaction":{"contextWindowRatio":0.75}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := NewLoader(path).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Compaction.ContextWindowRatio != 0.75 {
+		t.Fatalf("loaded context window ratio = %v", loaded.Compaction.ContextWindowRatio)
+	}
+
+	for _, ratio := range []string{"0", "-0.1", "1.1"} {
+		data := `{"compaction":{"contextWindowRatio":` + ratio + `}}`
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewLoader(path).Load(); err == nil || !strings.Contains(err.Error(), "contextWindowRatio") {
+			t.Fatalf("ratio %s should fail validation, err=%v", ratio, err)
+		}
+	}
+	invalidSettings := DefaultSettings()
+	invalidSettings.Compaction.ContextWindowRatio = 0
+	if err := NewLoader(path).Save(invalidSettings); err == nil || !strings.Contains(err.Error(), "contextWindowRatio") {
+		t.Fatalf("saving invalid ratio should fail, err=%v", err)
+	}
+
+	invalidWindow := DefaultSettings().Compaction
+	invalidWindow.ReserveTokens = 80000
+	if _, err := invalidWindow.Threshold(100000); err == nil || !strings.Contains(err.Error(), "必须大于 reserveTokens") {
+		t.Fatalf("invalid usable window error = %v", err)
+	}
+}
+
+func TestCompactionValidate(t *testing.T) {
+	if err := DefaultSettings().Compaction.Validate(); err != nil {
+		t.Fatalf("default compaction should be valid: %v", err)
+	}
+	tests := []struct {
+		name     string
+		settings Compaction
+		want     string
+	}{
+		{name: "zero ratio", settings: Compaction{ContextWindowRatio: 0}, want: "contextWindowRatio"},
+		{name: "ratio above one", settings: Compaction{ContextWindowRatio: 1.1}, want: "contextWindowRatio"},
+		{name: "negative reserve", settings: Compaction{ContextWindowRatio: 0.8, ReserveTokens: -1}, want: "reserveTokens"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.settings.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("validation error = %v", err)
+			}
+		})
 	}
 }
 

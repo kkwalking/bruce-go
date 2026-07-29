@@ -144,6 +144,20 @@ func TestEstimateAndSerializeCompactionContent(t *testing.T) {
 	}
 }
 
+func TestShouldCompactUsesContextWindowRatio(t *testing.T) {
+	settings := config.Compaction{Enabled: true, ContextWindowRatio: 0.8, ReserveTokens: 10}
+	if ShouldCompact(70, 100, settings) {
+		t.Fatal("context at threshold should not compact")
+	}
+	if !ShouldCompact(71, 100, settings) {
+		t.Fatal("context above threshold should compact")
+	}
+	settings.ReserveTokens = 80
+	if ShouldCompact(100, 100, settings) {
+		t.Fatal("invalid threshold should not compact")
+	}
+}
+
 type summaryClient struct {
 	mu        sync.Mutex
 	responses []llm.ChatResponse

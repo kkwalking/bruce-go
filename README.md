@@ -75,6 +75,7 @@ go run ./cmd/bruce --no-mcp
   },
   "compaction": {
     "enabled": true,
+    "contextWindowRatio": 0.8,
     "reserveTokens": 16384,
     "keepRecentTokens": 20000
   },
@@ -91,7 +92,7 @@ go run ./cmd/bruce --no-mcp
 
 自定义模型可通过 `modelCapabilities` 声明上下文窗口和最大输出 token；键必须同时出现在 `models` 中，配置值会覆盖内置模型能力。未配置 `contextWindow` 的自定义模型不会触发阈值自动压缩，但 API 返回的显式上下文溢出仍会被识别。
 
-`/compact [instructions]` 使用当前模型生成中文结构化摘要，保留安全的 tool call/result 边界并累计已读/已修改文件。自动压缩在模型调用前和成功回合后按 `contextWindow - reserveTokens` 检查；上下文溢出时最多压缩并续跑一次，不会重复写入用户消息。`compaction.enabled=false` 仅关闭自动压缩，手动 `/compact` 仍可使用。Session JSONL 格式版本保持不变，旧 session 和缺少新增 assistant 元数据的记录仍可恢复。
+`/compact [instructions]` 使用当前模型生成中文结构化摘要，保留安全的 tool call/result 边界并累计已读/已修改文件。自动压缩在模型调用前和成功回合后按 `floor(contextWindow * contextWindowRatio) - reserveTokens` 检查，`contextWindowRatio` 默认是 `0.8`、合法范围为 `(0, 1]`，启用自动压缩时比例窗口必须大于 `reserveTokens`；上下文溢出时最多压缩并续跑一次，不会重复写入用户消息。`compaction.enabled=false` 仅关闭自动压缩，手动 `/compact` 仍可使用。Session JSONL 格式版本保持不变，旧 session 和缺少新增 assistant 元数据的记录仍可恢复。
 
 `sandbox.mode` 仅允许 `read-only`、`workspace-write`、`full-access`。旧配置没有 `sandbox` 字段时会自动采用 `full-access`，该模式下网络始终开启。`networkAccess` 保存安全模式的网络偏好，因此默认仍为 `false`，切换到 `read-only` 或 `workspace-write` 后恢复禁网。非法 mode 或非法环境变量名会在启动时报错。`allowedEnv` 只接受精确环境变量名，列出的变量会追加到安全环境允许列表中。`commandTimeoutSeconds` 可选，设置 execute_command 的单命令超时（默认 30 秒，不能为负数）。
 
