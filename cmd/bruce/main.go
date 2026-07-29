@@ -9,9 +9,8 @@ import (
 	"bruce-go/internal/cli"
 	"bruce-go/internal/integrated"
 	"bruce-go/internal/tui"
+	"bruce-go/internal/version"
 )
-
-const version = "0.3.0"
 
 func main() {
 	var (
@@ -23,7 +22,7 @@ func main() {
 	flag.BoolVar(&noMCP, "no-mcp", false, "启动时不自动连接 MCP server")
 	flag.BoolVar(&showVer, "version", false, "显示版本")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "Bruce Go Coding Agent %s\n\n", version)
+		fmt.Fprintf(flag.CommandLine.Output(), "Bruce Go Coding Agent %s\n\n", version.Current)
 		fmt.Fprintln(flag.CommandLine.Output(), "用法:")
 		fmt.Fprintln(flag.CommandLine.Output(), "  bruce [--settings path] [--no-mcp]")
 		fmt.Fprintln(flag.CommandLine.Output())
@@ -31,7 +30,7 @@ func main() {
 	}
 	flag.Parse()
 	if showVer {
-		fmt.Println(version)
+		fmt.Println(version.Current)
 		return
 	}
 	if flag.NArg() > 0 {
