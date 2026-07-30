@@ -154,6 +154,50 @@ func TestReActEmitsDurableToolTranscriptInProtocolOrder(t *testing.T) {
 	}
 }
 
+func TestReActAppendsAllToolMessagesBeforeImageMessage(t *testing.T) {
+	registry := tool.EmptyRegistry(t.TempDir())
+	registry.Register(tool.Tool{
+		Name:       "image_tool",
+		Parameters: []byte(`{"type":"object","properties":{}}`),
+		Exec: func(context.Context, map[string]string) (string, error) {
+			return "image text\n[bruce-image-content mimeType=image/png source=test]\niVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==\n[/bruce-image-content]", nil
+		},
+	})
+	registry.Register(tool.Tool{
+		Name:       "echo",
+		Parameters: []byte(`{"type":"object","properties":{}}`),
+		Exec:       func(context.Context, map[string]string) (string, error) { return "echo", nil },
+	})
+	client := &recordingClient{responses: []llm.ChatResponse{
+		{ToolCalls: []llm.ToolCall{
+			{ID: "image_1", Function: llm.FunctionCall{Name: "image_tool", Arguments: `{}`}},
+			{ID: "echo_1", Function: llm.FunctionCall{Name: "echo", Arguments: `{}`}},
+		}},
+		{Content: "完成"},
+	}}
+	a := New(client, registry, "", runtime.DefaultConcurrency(), nil)
+	if _, err := a.Run(context.Background(), llm.PreparedInput{Text: "run", Message: llm.User("run")}, "", "run_1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.calls) < 2 {
+		t.Fatalf("chat calls = %d", len(client.calls))
+	}
+	messages := client.calls[1]
+	assistantIndex := -1
+	for index, message := range messages {
+		if message.Role == llm.RoleAssistant && len(message.ToolCalls) == 2 {
+			assistantIndex = index
+			break
+		}
+	}
+	if assistantIndex < 0 || len(messages) <= assistantIndex+3 {
+		t.Fatalf("messages = %+v", messages)
+	}
+	if messages[assistantIndex+1].Role != llm.RoleTool || messages[assistantIndex+2].Role != llm.RoleTool || messages[assistantIndex+3].Role != llm.RoleUser || !messages[assistantIndex+3].HasImages() {
+		t.Fatalf("tool/image protocol order = %+v", messages[assistantIndex:])
+	}
+}
+
 func TestNetworkErrorAssistantIsNonDurable(t *testing.T) {
 	bus := event.NewBus()
 	var completed []event.MessageCompleted

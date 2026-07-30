@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"bruce-go/internal/agent"
@@ -639,6 +640,7 @@ type compactionChatStep struct {
 }
 
 type compactionChatClient struct {
+	mu        sync.Mutex
 	steps     []compactionChatStep
 	calls     [][]llm.Message
 	options   []llm.StreamOptions
@@ -647,6 +649,9 @@ type compactionChatClient struct {
 }
 
 func (c *compactionChatClient) Chat(_ context.Context, messages []llm.Message, _ []llm.ToolDefinition, opts llm.StreamOptions) (llm.ChatResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	copied := append([]llm.Message(nil), messages...)
 	c.calls = append(c.calls, copied)
 	c.options = append(c.options, opts)

@@ -2,8 +2,11 @@ package tui
 
 import (
 	"context"
+	"errors"
+	"io"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -382,6 +385,172 @@ func TestApprovalDialogCompletesFromKeyInput(t *testing.T) {
 	}
 }
 
+func TestApprovalCancellationClearsMatchingDialogOnly(t *testing.T) {
+	model := NewModel(context.Background(), testRuntime(t))
+	firstReply := make(chan approval.Result, 1)
+	model.Update(approvalRequestMsg{ID: 1, Request: approval.NewRequest("write_file", `{"path":"a.txt"}`, ""), Reply: firstReply})
+	model.Update(approvalCanceledMsg{ID: 2})
+	if model.approval == nil || model.approval.id != 1 {
+		t.Fatalf("unrelated cancellation cleared approval: %+v", model.approval)
+	}
+	model.Update(approvalCanceledMsg{ID: 1})
+	if model.approval != nil {
+		t.Fatalf("matching cancellation did not clear approval: %+v", model.approval)
+	}
+}
+
+func TestToolCompletionStatusLabels(t *testing.T) {
+	tests := map[tool.ToolCallStatus]string{
+		tool.ToolCallSuccess:     "完成",
+		tool.ToolCallFailed:      "失败",
+		tool.ToolCallTimeout:     "超时",
+		tool.ToolCallInterrupted: "已取消",
+		tool.ToolCallRejected:    "已拒绝",
+		tool.ToolCallSkipped:     "已跳过",
+	}
+	for status, want := range tests {
+		if got := toolCompletionStatus(status); got != want {
+			t.Fatalf("status %q = %q, want %q", status, got, want)
+		}
+	}
+}
+
+type approvalCaptureModel struct {
+	messages chan tea.Msg
+}
+
+type approvalRequestResult struct {
+	result approval.Result
+	err    error
+}
+
+func (*approvalCaptureModel) Init() tea.Cmd { return nil }
+func (m *approvalCaptureModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg.(type) {
+	case approvalRequestMsg, approvalCanceledMsg:
+		m.messages <- msg
+	}
+	return m, nil
+}
+func (*approvalCaptureModel) View() string { return "" }
+
+func startApprovalCaptureProgram(t *testing.T) (*approvalCaptureModel, *tea.Program) {
+	t.Helper()
+	model := &approvalCaptureModel{messages: make(chan tea.Msg, 4)}
+	program := tea.NewProgram(model, tea.WithoutRenderer(), tea.WithInput(nil), tea.WithOutput(io.Discard))
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := program.Run()
+		runDone <- err
+	}()
+	t.Cleanup(func() {
+		program.Quit()
+		select {
+		case <-runDone:
+		case <-time.After(time.Second):
+		}
+	})
+	return model, program
+}
+
+func TestTUIApprovalHandlerSerializesRequestsAndApproveAll(t *testing.T) {
+	model, program := startApprovalCaptureProgram(t)
+	handler := newTUIApprovalHandler()
+	handler.SetProgram(program)
+	handler.SetEnabled(true)
+	results := make(chan approvalRequestResult, 2)
+	for _, name := range []string{"write_file", "execute_command"} {
+		name := name
+		go func() {
+			result, err := handler.Request(context.Background(), approval.NewRequest(name, `{}`, ""))
+			results <- approvalRequestResult{result: result, err: err}
+		}()
+	}
+	var request approvalRequestMsg
+	select {
+	case msg := <-model.messages:
+		request = msg.(approvalRequestMsg)
+	case <-time.After(time.Second):
+		t.Fatal("approval request was not displayed")
+	}
+	select {
+	case second := <-model.messages:
+		t.Fatalf("second approval bypassed serialization: %#v", second)
+	case <-time.After(30 * time.Millisecond):
+	}
+	request.Reply <- approval.ApproveAll()
+	for range 2 {
+		select {
+		case result := <-results:
+			if result.err != nil || (result.result.Decision != approval.ApprovedAll && result.result.Decision != approval.Approved) {
+				t.Fatalf("approval result = %+v", result)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("approval request did not finish")
+		}
+	}
+	select {
+	case second := <-model.messages:
+		t.Fatalf("approve-all still displayed another request: %#v", second)
+	case <-time.After(30 * time.Millisecond):
+	}
+}
+
+func TestTUIApprovalHandlerCancellationReleasesGate(t *testing.T) {
+	model, program := startApprovalCaptureProgram(t)
+	handler := newTUIApprovalHandler()
+	handler.SetProgram(program)
+	handler.SetEnabled(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := handler.Request(ctx, approval.NewRequest("write_file", `{}`, ""))
+		done <- err
+	}()
+	select {
+	case msg := <-model.messages:
+		if _, ok := msg.(approvalRequestMsg); !ok {
+			t.Fatalf("message = %#v", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("approval request was not displayed")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("request error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled approval did not return")
+	}
+	select {
+	case msg := <-model.messages:
+		if _, ok := msg.(approvalCanceledMsg); !ok {
+			t.Fatalf("message = %#v", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("approval cancellation was not delivered")
+	}
+	secondDone := make(chan approvalRequestResult, 1)
+	go func() {
+		result, err := handler.Request(context.Background(), approval.NewRequest("write_file", `{}`, ""))
+		secondDone <- approvalRequestResult{result: result, err: err}
+	}()
+	var secondRequest approvalRequestMsg
+	select {
+	case msg := <-model.messages:
+		secondRequest = msg.(approvalRequestMsg)
+	case <-time.After(time.Second):
+		t.Fatal("gate was not released for the next approval")
+	}
+	secondRequest.Reply <- approval.Approve()
+	second := <-secondDone
+	if second.err != nil || second.result.Decision != approval.Approved {
+		t.Fatalf("result = %+v", second)
+	}
+}
+
 func TestRuntimeEventsUpdateSingleToolActivityLine(t *testing.T) {
 	model := NewModel(context.Background(), testRuntime(t))
 	model.messages = nil
@@ -638,7 +807,7 @@ func testRuntime(t *testing.T) *integrated.Runtime {
 	return rt
 }
 
-func toolResult(call llm.ToolCall, status string) tool.ToolCallResult {
+func toolResult(call llm.ToolCall, status tool.ToolCallStatus) tool.ToolCallResult {
 	return tool.ToolCallResult{ToolCall: call, Status: status}
 }
 

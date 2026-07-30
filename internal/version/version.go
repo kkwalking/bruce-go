@@ -2,4 +2,4 @@
 package version
 
 // Current is the version reported by the CLI and external integrations.
-const Current = "0.3.0"
+const Current = "0.3.1"

@@ -43,7 +43,7 @@ func RegisterPlanTools(registry *tool.Registry, store *Store, active ActivePlanF
 		Parameters:    rawSchema(),
 		Exec:          readPlan(store, active),
 		PromptSnippet: "Read the current markdown plan",
-		Policy:        tool.Policy{Source: tool.SourcePlan, MinimumMode: sandbox.ModeReadOnly},
+		Policy:        tool.Policy{Source: tool.SourcePlan, MinimumMode: sandbox.ModeReadOnly, ParallelSafe: true},
 	})
 	registry.Register(tool.Tool{
 		Name:          "replace_plan",
@@ -113,12 +113,19 @@ func planExecuteCommand(base *tool.Registry) tool.Executor {
 	return func(ctx context.Context, args map[string]string) (string, error) {
 		command := args["command"]
 		if result := CheckReadOnlyCommand(command); !result.Allowed {
-			return "命令被 plan mode 安全策略拒绝: " + result.Reason, nil
+			message := "命令被 plan mode 安全策略拒绝: " + result.Reason
+			return message, tool.NewExecutionError(tool.ToolCallRejected, errors.New(message))
 		}
+		var outcome tool.ExecutionOutcome
 		if base.SandboxCanEnforce(sandbox.ModeReadOnly) {
-			return base.ExecuteWithSandboxMode(ctx, "execute_command", map[string]string{"command": command}, sandbox.ModeReadOnly), nil
+			outcome = base.ExecuteWithSandboxModeResult(ctx, "execute_command", map[string]string{"command": command}, sandbox.ModeReadOnly)
+		} else {
+			outcome = base.ExecuteResult(ctx, "execute_command", map[string]string{"command": command})
 		}
-		return base.Execute(ctx, "execute_command", map[string]string{"command": command}), nil
+		if outcome.Status != tool.ToolCallSuccess {
+			return outcome.Output, tool.NewExecutionError(outcome.Status, errors.New(outcome.Output))
+		}
+		return outcome.Output, nil
 	}
 }
 

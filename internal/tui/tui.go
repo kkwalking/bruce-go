@@ -20,6 +20,7 @@ import (
 	"bruce-go/internal/llm"
 	bruntime "bruce-go/internal/runtime"
 	"bruce-go/internal/session"
+	"bruce-go/internal/tool"
 )
 
 const (
@@ -87,6 +88,7 @@ const (
 )
 
 type approvalDialog struct {
+	id      uint64
 	request approval.Request
 	reply   chan approval.Result
 	mode    approvalMode
@@ -173,8 +175,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case runtimeEventMsg:
 		m.handleRuntimeEvent(msg.event)
 	case approvalRequestMsg:
-		m.approval = &approvalDialog{request: msg.Request, reply: msg.Reply}
+		m.approval = &approvalDialog{id: msg.ID, request: msg.Request, reply: msg.Reply}
 		m.appendActivity("HITL 等待审批: " + msg.Request.ToolName)
+	case approvalCanceledMsg:
+		if m.approval != nil && m.approval.id == msg.ID {
+			m.appendActivity("HITL 审批已取消: " + m.approval.request.ToolName)
+			m.approval = nil
+		}
 	case commandFinishedMsg:
 		return m, m.handleCommandFinished(msg)
 	case tea.MouseMsg:
@@ -380,10 +387,7 @@ func (m *Model) handleRuntimeEvent(evt event.Event) {
 			m.toolActivityIndexes[toolActivityKey(e.RunID, e.ToolCall)] = index
 		}
 	case event.ToolCallCompleted:
-		status := "完成"
-		if e.Result.Status != "success" {
-			status = "失败"
-		}
+		status := toolCompletionStatus(e.Result.Status)
 		text := toolActivityText(e.Result.ToolCall, status)
 		key := toolActivityKey(e.RunID, e.Result.ToolCall)
 		if index, ok := m.toolActivityIndexes[key]; ok && m.replaceActivity(index, text) {
@@ -411,6 +415,23 @@ func (m *Model) handleRuntimeEvent(evt event.Event) {
 		m.handleBasicEvent(e)
 	}
 	m.scrollOffset = m.clampScrollOffset(m.scrollOffset)
+}
+
+func toolCompletionStatus(status tool.ToolCallStatus) string {
+	switch status {
+	case tool.ToolCallSuccess:
+		return "完成"
+	case tool.ToolCallTimeout:
+		return "超时"
+	case tool.ToolCallInterrupted:
+		return "已取消"
+	case tool.ToolCallRejected:
+		return "已拒绝"
+	case tool.ToolCallSkipped:
+		return "已跳过"
+	default:
+		return "失败"
+	}
 }
 
 func (m *Model) handleBasicEvent(e event.Basic) {
@@ -526,7 +547,10 @@ func (m *Model) completeApproval(result approval.Result) {
 	}
 	reply := m.approval.reply
 	m.approval = nil
-	reply <- result
+	select {
+	case reply <- result:
+	default:
+	}
 }
 
 func (m *Model) inputText() string {

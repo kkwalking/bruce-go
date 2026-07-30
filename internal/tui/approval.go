@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"context"
 	"sync"
+	"sync/atomic"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -9,8 +11,13 @@ import (
 )
 
 type approvalRequestMsg struct {
+	ID      uint64
 	Request approval.Request
 	Reply   chan approval.Result
+}
+
+type approvalCanceledMsg struct {
+	ID uint64
 }
 
 type tuiApprovalHandler struct {
@@ -18,10 +25,14 @@ type tuiApprovalHandler struct {
 	enabled     bool
 	approvedAll bool
 	program     *tea.Program
+	requestGate chan struct{}
+	nextID      atomic.Uint64
 }
 
 func newTUIApprovalHandler() *tuiApprovalHandler {
-	return &tuiApprovalHandler{enabled: false}
+	gate := make(chan struct{}, 1)
+	gate <- struct{}{}
+	return &tuiApprovalHandler{enabled: false, requestGate: gate}
 }
 
 func (h *tuiApprovalHandler) SetProgram(program *tea.Program) {
@@ -51,25 +62,42 @@ func (h *tuiApprovalHandler) ClearApprovedAll() {
 	h.approvedAll = false
 }
 
-func (h *tuiApprovalHandler) Request(request approval.Request) approval.Result {
+func (h *tuiApprovalHandler) Request(ctx context.Context, request approval.Request) (approval.Result, error) {
+	select {
+	case <-ctx.Done():
+		return approval.Result{}, ctx.Err()
+	case <-h.requestGate:
+	}
+	defer func() { h.requestGate <- struct{}{} }()
+	if err := ctx.Err(); err != nil {
+		return approval.Result{}, err
+	}
+
 	h.mu.RLock()
 	enabled := h.enabled
 	approvedAll := h.approvedAll
 	program := h.program
 	h.mu.RUnlock()
 	if !enabled || approvedAll {
-		return approval.Approve()
+		return approval.Approve(), nil
 	}
 	if program == nil {
-		return approval.Approve()
+		return approval.Approve(), nil
 	}
+	id := h.nextID.Add(1)
 	reply := make(chan approval.Result, 1)
-	program.Send(approvalRequestMsg{Request: request, Reply: reply})
-	result := <-reply
+	program.Send(approvalRequestMsg{ID: id, Request: request, Reply: reply})
+	var result approval.Result
+	select {
+	case result = <-reply:
+	case <-ctx.Done():
+		program.Send(approvalCanceledMsg{ID: id})
+		return approval.Result{}, ctx.Err()
+	}
 	if result.Decision == approval.ApprovedAll {
 		h.mu.Lock()
 		h.approvedAll = true
 		h.mu.Unlock()
 	}
-	return result
+	return result, nil
 }

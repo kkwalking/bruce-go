@@ -1,8 +1,10 @@
 package approval
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 
 	"github.com/mattn/go-runewidth"
 )
@@ -43,11 +45,12 @@ func (r Result) EffectiveArguments(original string) string {
 type Handler interface {
 	Enabled() bool
 	SetEnabled(bool)
-	Request(Request) Result
+	Request(context.Context, Request) (Result, error)
 	ClearApprovedAll()
 }
 
 type AutoHandler struct {
+	mu      sync.RWMutex
 	enabled bool
 	result  Result
 }
@@ -59,10 +62,29 @@ func NewAutoHandler(enabled bool, result Result) *AutoHandler {
 	return &AutoHandler{enabled: enabled, result: result}
 }
 
-func (h *AutoHandler) Enabled() bool          { return h.enabled }
-func (h *AutoHandler) SetEnabled(v bool)      { h.enabled = v }
-func (h *AutoHandler) ClearApprovedAll()      {}
-func (h *AutoHandler) Request(Request) Result { return h.result }
+func (h *AutoHandler) Enabled() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.enabled
+}
+
+func (h *AutoHandler) SetEnabled(v bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.enabled = v
+}
+
+func (h *AutoHandler) ClearApprovedAll() {}
+func (h *AutoHandler) Request(ctx context.Context, _ Request) (Result, error) {
+	select {
+	case <-ctx.Done():
+		return Result{}, ctx.Err()
+	default:
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.result, nil
+}
 
 type Request struct {
 	ToolName        string

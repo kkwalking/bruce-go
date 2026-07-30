@@ -315,7 +315,7 @@ func RegisterTools(registry *tool.Registry, catalog *Catalog) {
 		Exec: func(_ context.Context, args map[string]string) (string, error) {
 			return catalog.ReadResource(args["skill"], args["path"])
 		},
-		Policy: tool.Policy{Source: tool.SourceSkill, MinimumMode: sandbox.ModeReadOnly},
+		Policy: tool.Policy{Source: tool.SourceSkill, MinimumMode: sandbox.ModeReadOnly, ParallelSafe: true},
 	})
 }
 

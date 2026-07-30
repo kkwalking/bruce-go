@@ -657,13 +657,23 @@ func (*HTTPTransport) Close() error   { return nil }
 func (*HTTPTransport) Logs() []string { return nil }
 
 type StdioTransport struct {
-	mu      sync.Mutex
-	cmd     *exec.Cmd
-	process sandbox.LongRunningProcess
-	stdin   io.WriteCloser
-	scanner *bufio.Scanner
-	logs    *LogRingBuffer
-	nextID  int64
+	writeMu   sync.Mutex
+	stateMu   sync.Mutex
+	closeOnce sync.Once
+	cmd       *exec.Cmd
+	process   sandbox.LongRunningProcess
+	stdin     io.WriteCloser
+	scanner   *bufio.Scanner
+	logs      *LogRingBuffer
+	nextID    atomic.Int64
+	pending   map[int64]chan stdioResult
+	closed    bool
+	closeErr  error
+}
+
+type stdioResult struct {
+	raw json.RawMessage
+	err error
 }
 
 var mcpVarRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_.]*)\}`)
@@ -714,12 +724,15 @@ func newStdioTransport(ctx context.Context, cfg config.MCPServerSetting, workspa
 		go readLines(process.Stderr(), logs)
 		scanner := bufio.NewScanner(process.Stdout())
 		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-		return &StdioTransport{
+		transport := &StdioTransport{
 			process: process,
 			stdin:   process.Stdin(),
 			scanner: scanner,
 			logs:    logs,
-		}, nil
+			pending: map[int64]chan stdioResult{},
+		}
+		go transport.readLoop()
+		return transport, nil
 	}
 	select {
 	case <-ctx.Done():
@@ -748,54 +761,101 @@ func newStdioTransport(ctx context.Context, cfg config.MCPServerSetting, workspa
 	go readLines(stderr, logs)
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	return &StdioTransport{cmd: cmd, stdin: stdin, scanner: scanner, logs: logs}, nil
+	transport := &StdioTransport{cmd: cmd, stdin: stdin, scanner: scanner, logs: logs, pending: map[int64]chan stdioResult{}}
+	go transport.readLoop()
+	return transport, nil
 }
 
 func (t *StdioTransport) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	id := atomic.AddInt64(&t.nextID, 1)
-	req, _ := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params})
-	if _, err := t.stdin.Write(append(req, '\n')); err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	type result struct {
-		raw json.RawMessage
-		err error
+	id := t.nextID.Add(1)
+	req, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params})
+	if err != nil {
+		return nil, err
 	}
-	ch := make(chan result, 1)
-	go func() {
-		for t.scanner.Scan() {
-			line := bytes.TrimSpace(t.scanner.Bytes())
-			if len(line) == 0 {
-				continue
-			}
-			var resp rpcResponse
-			if err := json.Unmarshal(line, &resp); err != nil {
-				t.logs.Append("stdout parse error: " + err.Error())
-				continue
-			}
-			if resp.ID != id {
-				continue
-			}
-			if resp.Error != nil {
-				ch <- result{err: errors.New(resp.Error.Message)}
-			} else {
-				ch <- result{raw: resp.Result}
-			}
-			return
-		}
-		if err := t.scanner.Err(); err != nil {
-			ch <- result{err: err}
-			return
-		}
-		ch <- result{err: io.EOF}
-	}()
+	ch := make(chan stdioResult, 1)
+	t.stateMu.Lock()
+	if t.closed {
+		t.stateMu.Unlock()
+		return nil, io.ErrClosedPipe
+	}
+	t.pending[id] = ch
+	t.stateMu.Unlock()
+
+	t.writeMu.Lock()
+	t.stateMu.Lock()
+	closed := t.closed
+	t.stateMu.Unlock()
+	if closed {
+		t.writeMu.Unlock()
+		t.removePending(id)
+		return nil, io.ErrClosedPipe
+	}
+	_, err = t.stdin.Write(append(req, '\n'))
+	t.writeMu.Unlock()
+	if err != nil {
+		t.removePending(id)
+		return nil, err
+	}
 	select {
 	case <-ctx.Done():
+		t.removePending(id)
 		return nil, ctx.Err()
 	case out := <-ch:
 		return out.raw, out.err
+	}
+}
+
+func (t *StdioTransport) readLoop() {
+	for t.scanner.Scan() {
+		line := bytes.TrimSpace(t.scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var resp rpcResponse
+		if err := json.Unmarshal(line, &resp); err != nil {
+			t.logs.Append("stdout parse error: " + err.Error())
+			continue
+		}
+		result := stdioResult{raw: resp.Result}
+		if resp.Error != nil {
+			result = stdioResult{err: errors.New(resp.Error.Message)}
+		}
+		t.stateMu.Lock()
+		ch := t.pending[resp.ID]
+		delete(t.pending, resp.ID)
+		t.stateMu.Unlock()
+		if ch == nil {
+			t.logs.Append(fmt.Sprintf("unmatched response id: %d", resp.ID))
+			continue
+		}
+		ch <- result
+	}
+	err := t.scanner.Err()
+	if err == nil {
+		err = io.EOF
+	}
+	t.failPending(err)
+}
+
+func (t *StdioTransport) removePending(id int64) {
+	t.stateMu.Lock()
+	delete(t.pending, id)
+	t.stateMu.Unlock()
+}
+
+func (t *StdioTransport) failPending(err error) {
+	t.stateMu.Lock()
+	if !t.closed {
+		t.closed = true
+	}
+	pending := t.pending
+	t.pending = map[int64]chan stdioResult{}
+	t.stateMu.Unlock()
+	for _, ch := range pending {
+		ch <- stdioResult{err: err}
 	}
 }
 
@@ -803,16 +863,22 @@ func (t *StdioTransport) Close() error {
 	if t == nil {
 		return nil
 	}
-	if t.process != nil {
-		return t.process.Close()
-	}
-	if t.cmd == nil || t.cmd.Process == nil {
-		return nil
-	}
-	_ = t.stdin.Close()
-	err := t.cmd.Process.Kill()
-	_ = t.cmd.Wait()
-	return err
+	t.closeOnce.Do(func() {
+		t.failPending(io.ErrClosedPipe)
+		t.writeMu.Lock()
+		defer t.writeMu.Unlock()
+		if t.process != nil {
+			t.closeErr = t.process.Close()
+			return
+		}
+		if t.cmd == nil || t.cmd.Process == nil {
+			return
+		}
+		_ = t.stdin.Close()
+		t.closeErr = t.cmd.Process.Kill()
+		_ = t.cmd.Wait()
+	})
+	return t.closeErr
 }
 
 func (t *StdioTransport) Logs() []string {

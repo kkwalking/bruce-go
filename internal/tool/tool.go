@@ -24,6 +24,22 @@ import (
 
 type Executor func(ctx context.Context, args map[string]string) (string, error)
 
+type ToolCallStatus string
+
+const (
+	ToolCallSuccess     ToolCallStatus = "success"
+	ToolCallFailed      ToolCallStatus = "failed"
+	ToolCallTimeout     ToolCallStatus = "timeout"
+	ToolCallInterrupted ToolCallStatus = "interrupted"
+	ToolCallRejected    ToolCallStatus = "rejected"
+	ToolCallSkipped     ToolCallStatus = "skipped"
+)
+
+type ExecutionOutcome struct {
+	Output string
+	Status ToolCallStatus
+}
+
 type Source string
 
 const (
@@ -39,6 +55,7 @@ type Policy struct {
 	Source          Source
 	MinimumMode     sandbox.Mode
 	RequiresNetwork bool
+	ParallelSafe    bool
 }
 
 type Tool struct {
@@ -84,16 +101,22 @@ func EmptyRegistry(workspaceRoot string) *Registry {
 }
 
 func (r *Registry) WithHITL(handler approval.Handler) *Registry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.hitl = handler
 	return r
 }
 
 func (r *Registry) WithConcurrency(config runtime.ConcurrencyConfig) *Registry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.config = config.Normalize()
 	return r
 }
 
 func (r *Registry) WithSandbox(manager *sandbox.Manager) *Registry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.sandbox = manager
 	return r
 }
@@ -127,6 +150,24 @@ func (r *Registry) Lookup(name string) (Tool, bool) {
 	defer r.mu.RUnlock()
 	t, ok := r.tools[name]
 	return t, ok
+}
+
+func (r *Registry) concurrencyConfig() runtime.ConcurrencyConfig {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.config.Normalize()
+}
+
+func (r *Registry) approvalHandler() approval.Handler {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.hitl
+}
+
+func (r *Registry) sandboxManager() *sandbox.Manager {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.sandbox
 }
 
 func (r *Registry) Definitions() []llm.ToolDefinition {
@@ -228,74 +269,190 @@ func defaultGuidelines(tools []Tool) []string {
 	return guidelines
 }
 
-func (r *Registry) ExecuteJSON(ctx context.Context, name, argumentsJSON string) string {
-	args, err := ParseArguments(argumentsJSON)
-	if err != nil {
-		return "工具参数解析失败: " + err.Error()
+type preparedExecution struct {
+	tool         Tool
+	args         map[string]string
+	modeOverride *sandbox.Mode
+}
+
+type executionStatusError struct {
+	status ToolCallStatus
+	cause  error
+}
+
+func (e *executionStatusError) Error() string { return e.cause.Error() }
+func (e *executionStatusError) Unwrap() error { return e.cause }
+
+func NewExecutionError(status ToolCallStatus, cause error) error {
+	if cause == nil {
+		cause = errors.New(string(status))
 	}
-	return r.Execute(ctx, name, args)
+	return &executionStatusError{status: status, cause: cause}
+}
+
+func (r *Registry) ExecuteJSON(ctx context.Context, name, argumentsJSON string) string {
+	return r.executeJSONOutcome(ctx, name, argumentsJSON, nil).Output
 }
 
 func (r *Registry) Execute(ctx context.Context, name string, args map[string]string) string {
-	return r.execute(ctx, name, args, nil)
+	return r.executeOutcome(ctx, name, args, nil).Output
+}
+
+func (r *Registry) ExecuteResult(ctx context.Context, name string, args map[string]string) ExecutionOutcome {
+	return r.executeOutcome(ctx, name, args, nil)
 }
 
 func (r *Registry) ExecuteWithSandboxMode(ctx context.Context, name string, args map[string]string, mode sandbox.Mode) string {
-	return r.execute(ctx, name, args, &mode)
+	return r.executeOutcome(ctx, name, args, &mode).Output
 }
 
-func (r *Registry) execute(ctx context.Context, name string, args map[string]string, modeOverride *sandbox.Mode) string {
+func (r *Registry) ExecuteWithSandboxModeResult(ctx context.Context, name string, args map[string]string, mode sandbox.Mode) ExecutionOutcome {
+	return r.executeOutcome(ctx, name, args, &mode)
+}
+
+func (r *Registry) executeJSONOutcome(ctx context.Context, name, argumentsJSON string, modeOverride *sandbox.Mode) ExecutionOutcome {
+	args, err := ParseArguments(argumentsJSON)
+	if err != nil {
+		return ExecutionOutcome{Output: "工具参数解析失败: " + err.Error(), Status: ToolCallFailed}
+	}
+	return r.executeOutcome(ctx, name, args, modeOverride)
+}
+
+func (r *Registry) executeOutcome(ctx context.Context, name string, args map[string]string, modeOverride *sandbox.Mode) (outcome ExecutionOutcome) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			outcome = ExecutionOutcome{Output: fmt.Sprintf("工具执行失败: panic: %v", recovered), Status: ToolCallFailed}
+		}
+	}()
+	prepared, outcome, ok := r.prepare(ctx, name, args, modeOverride)
+	if !ok {
+		return outcome
+	}
+	return r.executePrepared(ctx, prepared)
+}
+
+func (r *Registry) prepare(ctx context.Context, name string, args map[string]string, modeOverride *sandbox.Mode) (preparedExecution, ExecutionOutcome, bool) {
+	if err := ctx.Err(); err != nil {
+		return preparedExecution{}, contextOutcome(name, err), false
+	}
 	r.mu.RLock()
 	t, ok := r.tools[name]
-	names := make([]string, 0, len(r.tools))
-	for toolName := range r.tools {
-		names = append(names, toolName)
+	var names []string
+	if !ok {
+		names = make([]string, 0, len(r.tools))
+		for toolName := range r.tools {
+			names = append(names, toolName)
+		}
 	}
 	r.mu.RUnlock()
 	if !ok {
 		sort.Strings(names)
-		return "未知工具: " + name + "，可用工具: " + strings.Join(names, ", ")
+		return preparedExecution{}, ExecutionOutcome{
+			Output: "未知工具: " + name + "，可用工具: " + strings.Join(names, ", "),
+			Status: ToolCallFailed,
+		}, false
 	}
 	if _, rejected := r.validateToolRequest(t, args, modeOverride); rejected != "" {
-		return rejected
+		return preparedExecution{}, validationOutcome(rejected), false
 	}
-	if r.hitl != nil && r.hitl.Enabled() && approval.RequiresApproval(name) {
+	hitl := r.approvalHandler()
+	if hitl != nil && hitl.Enabled() && approval.RequiresApproval(name) {
 		raw, _ := json.Marshal(args)
-		result := r.hitl.Request(approval.NewRequest(name, string(raw), ""))
+		result, err := hitl.Request(ctx, approval.NewRequest(name, string(raw), ""))
+		if err != nil {
+			return preparedExecution{}, contextOrFailureOutcome(name, "", err), false
+		}
 		if result.IsRejected() {
 			if result.Reason == "" {
 				result.Reason = "用户拒绝了此操作"
 			}
-			return "[HITL] 操作已被拒绝：" + result.Reason
+			return preparedExecution{}, ExecutionOutcome{Output: "[HITL] 操作已被拒绝：" + result.Reason, Status: ToolCallRejected}, false
 		}
 		if result.IsSkipped() {
-			return "[HITL] 操作已被跳过"
+			return preparedExecution{}, ExecutionOutcome{Output: "[HITL] 操作已被跳过", Status: ToolCallSkipped}, false
 		}
 		if result.Decision == approval.Modified {
 			modified, err := ParseArguments(result.EffectiveArguments(string(raw)))
 			if err != nil {
-				return "工具参数解析失败: " + err.Error()
+				return preparedExecution{}, ExecutionOutcome{Output: "工具参数解析失败: " + err.Error(), Status: ToolCallFailed}, false
 			}
 			args = modified
-			if _, rejected := r.validateToolRequest(t, args, modeOverride); rejected != "" {
-				return rejected
-			}
+		} else if result.Decision != approval.Approved && result.Decision != approval.ApprovedAll {
+			return preparedExecution{}, ExecutionOutcome{Output: "工具执行失败: HITL 返回了未知决策", Status: ToolCallFailed}, false
+		}
+		// Approval may take arbitrarily long or modify arguments. Revalidate once
+		// after it returns; execution performs a separate dynamic policy check.
+		if _, rejected := r.validateToolRequest(t, args, modeOverride); rejected != "" {
+			return preparedExecution{}, validationOutcome(rejected), false
 		}
 	}
-	if _, rejected := r.validateToolRequest(t, args, modeOverride); rejected != "" {
-		return rejected
+	return preparedExecution{tool: t, args: args, modeOverride: modeOverride}, ExecutionOutcome{}, true
+}
+
+func (r *Registry) executePrepared(ctx context.Context, prepared preparedExecution) (outcome ExecutionOutcome) {
+	name := prepared.tool.Name
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			outcome = ExecutionOutcome{Output: fmt.Sprintf("工具执行失败: panic: %v", recovered), Status: ToolCallFailed}
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return contextOutcome(name, err)
+	}
+	if _, rejected := r.validateToolRequest(prepared.tool, prepared.args, prepared.modeOverride); rejected != "" {
+		return validationOutcome(rejected)
 	}
 	var out string
 	var err error
-	if name == "execute_command" && modeOverride != nil {
-		out, err = r.executeCommandWithMode(ctx, args, modeOverride)
+	if name == "execute_command" && prepared.modeOverride != nil {
+		out, err = r.executeCommandWithMode(ctx, prepared.args, prepared.modeOverride)
 	} else {
-		out, err = t.Exec(ctx, args)
+		out, err = prepared.tool.Exec(ctx, prepared.args)
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		outcome := contextOutcome(name, contextErr)
+		if out != "" {
+			outcome.Output = out
+		}
+		return outcome
 	}
 	if err != nil {
-		return "工具执行失败: " + err.Error()
+		return contextOrFailureOutcome(name, out, err)
 	}
-	return r.config.Truncate(out)
+	return ExecutionOutcome{Output: r.concurrencyConfig().Truncate(out), Status: ToolCallSuccess}
+}
+
+func validationOutcome(message string) ExecutionOutcome {
+	status := ToolCallRejected
+	if strings.HasPrefix(message, "工具执行失败") || strings.HasPrefix(message, "工具参数解析失败") {
+		status = ToolCallFailed
+	}
+	return ExecutionOutcome{Output: message, Status: status}
+}
+
+func contextOutcome(name string, err error) ExecutionOutcome {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ExecutionOutcome{Output: "工具执行超时，已取消: " + name, Status: ToolCallTimeout}
+	}
+	return ExecutionOutcome{Output: "工具批次执行被中断: " + name, Status: ToolCallInterrupted}
+}
+
+func contextOrFailureOutcome(name, output string, err error) ExecutionOutcome {
+	var statusErr *executionStatusError
+	if errors.As(err, &statusErr) {
+		if output == "" {
+			output = statusErr.Error()
+		}
+		return ExecutionOutcome{Output: output, Status: statusErr.status}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		outcome := contextOutcome(name, err)
+		if output != "" {
+			outcome.Output = output
+		}
+		return outcome
+	}
+	return ExecutionOutcome{Output: "工具执行失败: " + err.Error(), Status: ToolCallFailed}
 }
 
 func (r *Registry) validateToolRequest(t Tool, args map[string]string, modeOverride *sandbox.Mode) (uint64, string) {
@@ -308,8 +465,8 @@ func (r *Registry) validateToolRequest(t Tool, args map[string]string, modeOverr
 		if result := r.commandGuard.Check(args["command"]); !result.Allowed {
 			return generation, "命令被安全策略拒绝: " + result.Reason
 		}
-		if r.sandbox != nil {
-			if err := r.sandbox.Preflight(modeOverride); err != nil {
+		if manager := r.sandboxManager(); manager != nil {
+			if err := manager.Preflight(modeOverride); err != nil {
 				return generation, "命令被 sandbox 拒绝: " + err.Error()
 			}
 		}
@@ -322,8 +479,8 @@ func (r *Registry) validateToolRequest(t Tool, args map[string]string, modeOverr
 			}
 			return generation, "工具执行失败: " + err.Error()
 		}
-		if r.sandbox != nil {
-			if err := r.sandbox.CanWriteFile(rel); err != nil {
+		if manager := r.sandboxManager(); manager != nil {
+			if err := manager.CanWriteFile(rel); err != nil {
 				return generation, "命令被 sandbox 拒绝: " + err.Error()
 			}
 		}
@@ -332,10 +489,11 @@ func (r *Registry) validateToolRequest(t Tool, args map[string]string, modeOverr
 }
 
 func (r *Registry) validateToolPolicy(t Tool, modeOverride *sandbox.Mode) (uint64, string) {
-	if r.sandbox == nil {
+	manager := r.sandboxManager()
+	if manager == nil {
 		return 0, ""
 	}
-	status := r.sandbox.Status()
+	status := manager.Status()
 	mode := status.Mode
 	network := status.NetworkAccess
 	if modeOverride != nil {
@@ -383,7 +541,8 @@ func modeAllows(current, required sandbox.Mode) bool {
 }
 
 func (r *Registry) SandboxCanEnforce(mode sandbox.Mode) bool {
-	return r.sandbox != nil && r.sandbox.Preflight(&mode) == nil
+	manager := r.sandboxManager()
+	return manager != nil && manager.Preflight(&mode) == nil
 }
 
 func ParseArguments(raw string) (map[string]string, error) {
@@ -414,7 +573,7 @@ func (r *Registry) RegisterBuiltins() {
 		Parameters:    params(param{"path", "string", "文件路径", true}, param{"offset", "integer", "起始行号", false}, param{"limit", "integer", "最多读取行数", false}),
 		Exec:          r.readFile,
 		PromptSnippet: "Read known file contents with optional offset/limit",
-		Policy:        Policy{Source: SourceBuiltin, MinimumMode: sandbox.ModeReadOnly},
+		Policy:        Policy{Source: SourceBuiltin, MinimumMode: sandbox.ModeReadOnly, ParallelSafe: true},
 	})
 	r.Register(Tool{
 		Name:          "write_file",
@@ -442,7 +601,10 @@ func (r *Registry) RegisterBuiltins() {
 	})
 }
 
-func (r *Registry) readFile(_ context.Context, args map[string]string) (string, error) {
+func (r *Registry) readFile(ctx context.Context, args map[string]string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	rel, err := r.relativePath(args["path"])
 	if err != nil {
 		return "", err
@@ -454,6 +616,9 @@ func (r *Registry) readFile(_ context.Context, args map[string]string) (string, 
 	defer root.Close()
 	data, err := root.ReadFile(rel)
 	if err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	content := string(data)
@@ -533,7 +698,10 @@ func (r *Registry) readFile(_ context.Context, args map[string]string) (string, 
 	return result.String(), nil
 }
 
-func (r *Registry) writeFile(_ context.Context, args map[string]string) (string, error) {
+func (r *Registry) writeFile(ctx context.Context, args map[string]string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	rel, err := r.writeTargetRelativePath(args["path"])
 	if err != nil {
 		return "", err
@@ -549,10 +717,16 @@ func (r *Registry) writeFile(_ context.Context, args map[string]string) (string,
 	if err := root.WriteFile(rel, []byte(args["content"]), 0o644); err != nil {
 		return "", err
 	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	return "文件已写入: " + rel, nil
 }
 
-func (r *Registry) editFile(_ context.Context, args map[string]string) (string, error) {
+func (r *Registry) editFile(ctx context.Context, args map[string]string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	rel, err := r.writeTargetRelativePath(args["path"])
 	if err != nil {
 		return "", err
@@ -564,7 +738,7 @@ func (r *Registry) editFile(_ context.Context, args map[string]string) (string, 
 	defer root.Close()
 	oldText := args["old_text"]
 	if oldText == "" {
-		return "edit_file 失败: old_text 不能为空，文件未修改", nil
+		return "", errors.New("edit_file 失败: old_text 不能为空，文件未修改")
 	}
 	data, err := root.ReadFile(rel)
 	if err != nil {
@@ -573,13 +747,19 @@ func (r *Registry) editFile(_ context.Context, args map[string]string) (string, 
 	content := string(data)
 	count := strings.Count(content, oldText)
 	if count == 0 {
-		return "edit_file 失败: old_text 未在文件中找到，文件未修改: " + rel, nil
+		return "", errors.New("edit_file 失败: old_text 未在文件中找到，文件未修改: " + rel)
 	}
 	if count > 1 {
-		return fmt.Sprintf("edit_file 失败: old_text 匹配多处 (%d)，请提供更精确的 old_text，文件未修改: %s", count, rel), nil
+		return "", fmt.Errorf("edit_file 失败: old_text 匹配多处 (%d)，请提供更精确的 old_text，文件未修改: %s", count, rel)
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	updated := strings.Replace(content, oldText, args["new_text"], 1)
 	if err := root.WriteFile(rel, []byte(updated), 0o644); err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("文件已编辑: %s (替换 1 处，%d -> %d 字符)", rel, len(oldText), len(args["new_text"])), nil
@@ -592,19 +772,20 @@ func (r *Registry) executeCommand(ctx context.Context, args map[string]string) (
 func (r *Registry) executeCommandWithMode(ctx context.Context, args map[string]string, modeOverride *sandbox.Mode) (string, error) {
 	command := strings.TrimSpace(args["command"])
 	if command == "" {
-		return "命令不能为空", nil
+		return "", errors.New("命令不能为空")
 	}
-	config := r.config.Normalize()
-	if r.sandbox != nil {
-		result, err := r.sandbox.Run(ctx, command, config.CommandTimeout, config.MaxOutputChars, modeOverride)
+	config := r.concurrencyConfig()
+	manager := r.sandboxManager()
+	if manager != nil {
+		result, err := manager.Run(ctx, command, config.CommandTimeout, config.MaxOutputChars, modeOverride)
 		if err != nil {
 			return "", err
 		}
 		if result.TimedOut {
-			return "命令执行超时，已终止:\n" + result.Output, nil
+			return "命令执行超时，已终止:\n" + result.Output, &executionStatusError{status: ToolCallTimeout, cause: context.DeadlineExceeded}
 		}
 		if result.Canceled {
-			return "命令执行已取消:\n" + result.Output, nil
+			return "命令执行已取消:\n" + result.Output, &executionStatusError{status: ToolCallInterrupted, cause: context.Canceled}
 		}
 		return fmt.Sprintf("命令执行完成 (exit code: %d)\n%s", result.ExitCode, result.Output), nil
 	}
@@ -617,7 +798,10 @@ func (r *Registry) executeCommandWithMode(ctx context.Context, args map[string]s
 	cmd.Stderr = &out
 	err := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
-		return "命令执行超时，已终止:\n" + out.String(), nil
+		return "命令执行超时，已终止:\n" + out.String(), &executionStatusError{status: ToolCallTimeout, cause: context.DeadlineExceeded}
+	}
+	if ctx.Err() == context.Canceled {
+		return "命令执行已取消:\n" + out.String(), &executionStatusError{status: ToolCallInterrupted, cause: context.Canceled}
 	}
 	exit := 0
 	if err != nil {
@@ -716,7 +900,7 @@ const readFileOutputLimit = 12000
 
 func (r *Registry) readFileOutputLimit() int {
 	limit := readFileOutputLimit
-	maxOutput := r.config.Normalize().MaxOutputChars
+	maxOutput := r.concurrencyConfig().MaxOutputChars
 	if maxOutput > 700 && maxOutput-500 < limit {
 		limit = maxOutput - 500
 	}
@@ -788,18 +972,40 @@ type ToolCallResult struct {
 	ImageParts     []llm.ContentPart
 	ToolCall       llm.ToolCall
 	Result         string
-	Status         string
+	Status         ToolCallStatus
 	DurationMillis int64
 }
 
-func RunToolCall(ctx context.Context, registry *Registry, call llm.ToolCall) ToolCallResult {
+func RunToolCall(ctx context.Context, registry *Registry, call llm.ToolCall) (result ToolCallResult) {
 	start := time.Now()
-	result := registry.ExecuteJSON(ctx, call.Function.Name, call.Function.Arguments)
-	status := "success"
-	if strings.HasPrefix(result, "工具执行失败") || strings.HasPrefix(result, "工具参数解析失败") {
-		status = "failed"
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = resultFromOutcome(call, start, ExecutionOutcome{
+				Output: fmt.Sprintf("工具执行失败: panic: %v", recovered),
+				Status: ToolCallFailed,
+			})
+		}
+	}()
+	if registry == nil {
+		return resultFromOutcome(call, start, ExecutionOutcome{Output: "工具执行失败: Registry 不能为空", Status: ToolCallFailed})
 	}
-	cleanText, imageParts := ParseToolResult(result)
+	args, err := ParseArguments(call.Function.Arguments)
+	if err != nil {
+		return resultFromOutcome(call, start, ExecutionOutcome{Output: "工具参数解析失败: " + err.Error(), Status: ToolCallFailed})
+	}
+	prepared, outcome, ok := registry.prepare(ctx, call.Function.Name, args, nil)
+	if ok {
+		outcome = registry.executePrepared(ctx, prepared)
+	}
+	return resultFromOutcome(call, start, outcome)
+}
+
+func resultFromOutcome(call llm.ToolCall, start time.Time, outcome ExecutionOutcome) ToolCallResult {
+	status := outcome.Status
+	if status == "" {
+		status = ToolCallFailed
+	}
+	cleanText, imageParts := ParseToolResult(outcome.Output)
 	return ToolCallResult{
 		ToolCall:       call,
 		Result:         cleanText,
@@ -809,36 +1015,247 @@ func RunToolCall(ctx context.Context, registry *Registry, call llm.ToolCall) Too
 	}
 }
 
+type ExecutionHooks struct {
+	OnStarted   func(llm.ToolCall)
+	OnCompleted func(ToolCallResult)
+}
+
+type hookNotifier struct {
+	mu    sync.Mutex
+	hooks ExecutionHooks
+}
+
+func (n *hookNotifier) started(ctx context.Context, call llm.ToolCall) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if ctx.Err() != nil {
+		return false
+	}
+	if n.hooks.OnStarted != nil {
+		n.hooks.OnStarted(call)
+	}
+	return true
+}
+
+func (n *hookNotifier) completed(result ToolCallResult) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.hooks.OnCompleted != nil {
+		n.hooks.OnCompleted(result)
+	}
+}
+
+type preparedBatchCall struct {
+	index    int
+	call     llm.ToolCall
+	prepared preparedExecution
+}
+
+type indexedToolCallResult struct {
+	index  int
+	result ToolCallResult
+}
+
 type ParallelExecutor struct {
 	Registry *Registry
 	Config   runtime.ConcurrencyConfig
 }
 
-func (e ParallelExecutor) Execute(ctx context.Context, calls []llm.ToolCall) []ToolCallResult {
+func (e ParallelExecutor) Execute(ctx context.Context, calls []llm.ToolCall, hooks ExecutionHooks) []ToolCallResult {
 	if len(calls) == 0 {
 		return nil
 	}
-	if len(calls) == 1 {
-		return []ToolCallResult{RunToolCall(ctx, e.Registry, calls[0])}
-	}
-	config := e.Config.Normalize()
-	ctx, cancel := context.WithTimeout(ctx, config.BatchTimeout)
-	defer cancel()
 	results := make([]ToolCallResult, len(calls))
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, config.ParallelismFor(len(calls)))
-	for i, call := range calls {
-		i, call := i, call
-		wg.Add(1)
+	finished := make([]bool, len(calls))
+	notifier := &hookNotifier{hooks: hooks}
+	finish := func(index int, result ToolCallResult) {
+		if finished[index] {
+			return
+		}
+		results[index] = result
+		finished[index] = true
+		notifier.completed(result)
+	}
+	prepared := make([]preparedBatchCall, 0, len(calls))
+	for index, call := range calls {
+		start := time.Now()
+		item, outcome, ok := prepareBatchCall(ctx, e.Registry, call)
+		if !ok {
+			finish(index, resultFromOutcome(call, start, outcome))
+			continue
+		}
+		prepared = append(prepared, preparedBatchCall{index: index, call: call, prepared: item})
+	}
+	if len(prepared) == 0 {
+		return results
+	}
+
+	config := e.Config.Normalize()
+	batchCtx, cancel := context.WithTimeout(ctx, config.BatchTimeout)
+	defer cancel()
+	batchStart := time.Now()
+	parallelism := config.ParallelismFor(len(prepared))
+	for cursor := 0; cursor < len(prepared); {
+		if err := batchCtx.Err(); err != nil {
+			finishPending(prepared[cursor:], finish, batchStart, err)
+			break
+		}
+		if parallelism == 1 || !prepared[cursor].prepared.tool.Policy.ParallelSafe {
+			if !runExclusiveBatchCall(batchCtx, e.Registry, prepared[cursor], notifier, finish, batchStart) {
+				finishPending(prepared[cursor+1:], finish, batchStart, batchCtx.Err())
+				break
+			}
+			cursor++
+			continue
+		}
+		end := cursor + 1
+		for end < len(prepared) && prepared[end].prepared.tool.Policy.ParallelSafe {
+			end++
+		}
+		if !runParallelBatchSegment(batchCtx, e.Registry, prepared[cursor:end], parallelism, notifier, finish, batchStart, finished) {
+			finishPending(prepared[end:], finish, batchStart, batchCtx.Err())
+			break
+		}
+		cursor = end
+	}
+	return results
+}
+
+func prepareBatchCall(ctx context.Context, registry *Registry, call llm.ToolCall) (prepared preparedExecution, outcome ExecutionOutcome, ok bool) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			prepared = preparedExecution{}
+			outcome = ExecutionOutcome{Output: fmt.Sprintf("工具执行失败: panic: %v", recovered), Status: ToolCallFailed}
+			ok = false
+		}
+	}()
+	if registry == nil {
+		return preparedExecution{}, ExecutionOutcome{Output: "工具执行失败: Registry 不能为空", Status: ToolCallFailed}, false
+	}
+	args, err := ParseArguments(call.Function.Arguments)
+	if err != nil {
+		return preparedExecution{}, ExecutionOutcome{Output: "工具参数解析失败: " + err.Error(), Status: ToolCallFailed}, false
+	}
+	return registry.prepare(ctx, call.Function.Name, args, nil)
+}
+
+func runPreparedCall(ctx context.Context, registry *Registry, call preparedBatchCall) (result ToolCallResult) {
+	start := time.Now()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = resultFromOutcome(call.call, start, ExecutionOutcome{
+				Output: fmt.Sprintf("工具执行失败: panic: %v", recovered),
+				Status: ToolCallFailed,
+			})
+		}
+	}()
+	outcome := registry.executePrepared(ctx, call.prepared)
+	return resultFromOutcome(call.call, start, outcome)
+}
+
+func runExclusiveBatchCall(
+	ctx context.Context,
+	registry *Registry,
+	call preparedBatchCall,
+	notifier *hookNotifier,
+	finish func(int, ToolCallResult),
+	batchStart time.Time,
+) bool {
+	if !notifier.started(ctx, call.call) {
+		finish(call.index, contextResult(call.call, batchStart, ctx.Err()))
+		return false
+	}
+	resultCh := make(chan ToolCallResult, 1)
+	go func() { resultCh <- runPreparedCall(ctx, registry, call) }()
+	select {
+	case result := <-resultCh:
+		finish(call.index, result)
+		return ctx.Err() == nil
+	case <-ctx.Done():
+		finish(call.index, contextResult(call.call, batchStart, ctx.Err()))
+		return false
+	}
+}
+
+func runParallelBatchSegment(
+	ctx context.Context,
+	registry *Registry,
+	segment []preparedBatchCall,
+	parallelism int,
+	notifier *hookNotifier,
+	finish func(int, ToolCallResult),
+	batchStart time.Time,
+	finished []bool,
+) bool {
+	workerCount := min(parallelism, len(segment))
+	jobs := make(chan preparedBatchCall)
+	out := make(chan indexedToolCallResult, len(segment))
+	for range workerCount {
 		go func() {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			results[i] = RunToolCall(ctx, e.Registry, call)
+			for call := range jobs {
+				if !notifier.started(ctx, call.call) {
+					out <- indexedToolCallResult{index: call.index, result: contextResult(call.call, batchStart, ctx.Err())}
+					continue
+				}
+				out <- indexedToolCallResult{index: call.index, result: runPreparedCall(ctx, registry, call)}
+			}
 		}()
 	}
-	wg.Wait()
-	return results
+	go func() {
+		defer close(jobs)
+		for _, call := range segment {
+			select {
+			case jobs <- call:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	remaining := len(segment)
+	for remaining > 0 {
+		select {
+		case completed := <-out:
+			if !finished[completed.index] {
+				finish(completed.index, completed.result)
+				remaining--
+			}
+		case <-ctx.Done():
+			for {
+				select {
+				case completed := <-out:
+					if !finished[completed.index] {
+						finish(completed.index, completed.result)
+						remaining--
+					}
+				default:
+					for _, call := range segment {
+						if !finished[call.index] {
+							finish(call.index, contextResult(call.call, batchStart, ctx.Err()))
+						}
+					}
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+func finishPending(calls []preparedBatchCall, finish func(int, ToolCallResult), start time.Time, err error) {
+	if err == nil {
+		err = context.Canceled
+	}
+	for _, call := range calls {
+		finish(call.index, contextResult(call.call, start, err))
+	}
+}
+
+func contextResult(call llm.ToolCall, start time.Time, err error) ToolCallResult {
+	if err == nil {
+		err = context.Canceled
+	}
+	return resultFromOutcome(call, start, contextOutcome(call.Function.Name, err))
 }
 
 // ParseToolResult extracts image content blocks from raw tool output.

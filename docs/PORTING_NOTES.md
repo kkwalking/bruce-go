@@ -30,6 +30,7 @@
 - `/compact` 已对齐 pi 核心压缩语义：安全切割 tool call/result、中文结构化 LLM 摘要、重复压缩、split-turn、文件追踪、阈值自动压缩和单次 overflow compact-and-continue。`compaction.enabled` 只控制自动压缩；Session JSONL format version 仍为 1。
 - Assistant session message 额外保存 provider、model、finish reason 和 usage；旧 JSONL 缺少这些字段时继续使用零值恢复。
 - HITL 默认关闭，需要时可通过 `/hitl on` 打开；真实交互 handler 可在 TUI 层替换。
+- ReAct/planning 工具批次仅并行执行显式标记安全的只读工具；写操作、命令、MCP 和未知工具保持输入顺序独占执行。批次超时会生成结构化 timeout/interrupted 结果，HITL 等待时间不计入执行超时。
 - `/plan` 不再自动执行 JSON/DAG；计划正文保存在 `~/.bruce/plans/`，计划生命周期通过 `plan_event` 写入 session JSONL，`/resume` 会同时恢复 mode 和 active plan state。
 
 ## 测试策略

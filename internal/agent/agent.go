@@ -139,17 +139,20 @@ func (a *Agent) run(ctx context.Context, taskContext string, runID string) (stri
 		if resp.HasToolCalls() {
 			a.append(assistant)
 			a.emit(event.NewMessageCompleted(runID, assistant, true))
-			for _, call := range resp.ToolCalls {
-				a.emit(event.NewToolCallStarted(runID, call))
-			}
-			results := a.Executor.Execute(ctx, resp.ToolCalls)
-			a.appendImageToolMessages(runID, results)
+			results := a.Executor.Execute(ctx, resp.ToolCalls, tool.ExecutionHooks{
+				OnStarted: func(call llm.ToolCall) {
+					a.emit(event.NewToolCallStarted(runID, call))
+				},
+				OnCompleted: func(result tool.ToolCallResult) {
+					a.emit(event.NewToolCallCompleted(runID, result))
+				},
+			})
 			for _, result := range results {
-				a.emit(event.NewToolCallCompleted(runID, result))
 				toolMessage := llm.ToolMessage(result.ToolCall.ID, result.Result)
 				a.append(toolMessage)
 				a.emit(event.NewMessageCompleted(runID, a.durableToolMessage(result.ToolCall, toolMessage), true))
 			}
+			a.appendImageToolMessages(runID, results)
 			continue
 		}
 		a.append(assistant)

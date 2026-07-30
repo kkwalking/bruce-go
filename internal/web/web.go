@@ -254,7 +254,7 @@ func RegisterTools(registry *tool.Registry, manager *Manager) {
 			return formatResults(results), nil
 		},
 		PromptSnippet: "Search the web when local context is insufficient or freshness matters",
-		Policy:        tool.Policy{Source: tool.SourceWeb, MinimumMode: sandbox.ModeReadOnly},
+		Policy:        tool.Policy{Source: tool.SourceWeb, MinimumMode: sandbox.ModeReadOnly, ParallelSafe: true},
 	})
 	registry.Register(tool.Tool{
 		Name:        "web_fetch",
@@ -268,7 +268,7 @@ func RegisterTools(registry *tool.Registry, manager *Manager) {
 			return formatPage(page), nil
 		},
 		PromptSnippet: "Fetch and extract readable page text from a URL",
-		Policy:        tool.Policy{Source: tool.SourceWeb, MinimumMode: sandbox.ModeReadOnly},
+		Policy:        tool.Policy{Source: tool.SourceWeb, MinimumMode: sandbox.ModeReadOnly, ParallelSafe: true},
 	})
 }
 
