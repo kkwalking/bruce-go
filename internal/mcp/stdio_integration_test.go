@@ -35,11 +35,14 @@ func TestMCPStdioHelperProcess(t *testing.T) {
 	for scanner.Scan() {
 		var request struct {
 			JSONRPC string          `json:"jsonrpc"`
-			ID      int64           `json:"id"`
+			ID      *int64          `json:"id"`
 			Method  string          `json:"method"`
 			Params  json.RawMessage `json:"params"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &request); err != nil {
+			continue
+		}
+		if request.ID == nil {
 			continue
 		}
 		result := json.RawMessage(`{}`)
@@ -64,7 +67,7 @@ func TestMCPStdioHelperProcess(t *testing.T) {
 			})
 			result = encoded
 		}
-		_ = encoder.Encode(rpcResponse{JSONRPC: "2.0", ID: request.ID, Result: result})
+		_ = encoder.Encode(rpcResponse{JSONRPC: "2.0", ID: *request.ID, Result: result})
 	}
 	if err := scanner.Err(); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, err)

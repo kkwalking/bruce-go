@@ -53,6 +53,7 @@ type ServerStatus struct {
 
 type Transport interface {
 	Call(ctx context.Context, method string, params any) (json.RawMessage, error)
+	Notify(ctx context.Context, method string, params any) error
 	Close() error
 	Logs() []string
 }
@@ -576,20 +577,25 @@ func defaultTransportFactory(ctx context.Context, _ string, cfg config.MCPServer
 }
 
 func initializeAndList(ctx context.Context, transport Transport) ([]Tool, error) {
-	_, _ = transport.Call(ctx, "initialize", map[string]any{
+	if _, err := transport.Call(ctx, "initialize", map[string]any{
 		"protocolVersion": "2024-11-05",
 		"clientInfo":      map[string]string{"name": "bruce-go", "version": version.Current},
 		"capabilities":    map[string]any{},
-	})
+	}); err != nil {
+		return nil, fmt.Errorf("MCP initialize 失败: %w", err)
+	}
+	if err := transport.Notify(ctx, "notifications/initialized", map[string]any{}); err != nil {
+		return nil, fmt.Errorf("MCP notifications/initialized 失败: %w", err)
+	}
 	raw, err := transport.Call(ctx, "tools/list", map[string]any{})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("MCP tools/list 失败: %w", err)
 	}
 	var payload struct {
 		Tools []Tool `json:"tools"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("MCP tools/list 响应解析失败: %w", err)
 	}
 	return payload.Tools, nil
 }
@@ -597,6 +603,12 @@ func initializeAndList(ctx context.Context, transport Transport) ([]Tool, error)
 type rpcRequest struct {
 	JSONRPC string `json:"jsonrpc"`
 	ID      int64  `json:"id"`
+	Method  string `json:"method"`
+	Params  any    `json:"params,omitempty"`
+}
+
+type rpcNotification struct {
+	JSONRPC string `json:"jsonrpc"`
 	Method  string `json:"method"`
 	Params  any    `json:"params,omitempty"`
 }
@@ -629,10 +641,37 @@ func NewHTTPTransport(cfg config.MCPServerSetting) *HTTPTransport {
 }
 
 func (t *HTTPTransport) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	resp, err := t.post(ctx, rpcRequest{JSONRPC: "2.0", ID: t.nextID.Add(1), Method: method, Params: params})
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("MCP HTTP %d", resp.StatusCode)
+	}
+	return decodeRPCResponse(resp.Body)
+}
+
+func (t *HTTPTransport) Notify(ctx context.Context, method string, params any) error {
+	resp, err := t.post(ctx, rpcNotification{JSONRPC: "2.0", Method: method, Params: params})
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("MCP HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (t *HTTPTransport) post(ctx context.Context, message any) (*http.Response, error) {
 	if strings.TrimSpace(t.url) == "" {
 		return nil, errors.New("MCP HTTP URL 不能为空")
 	}
-	reqBody, _ := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: t.nextID.Add(1), Method: method, Params: params})
+	reqBody, err := json.Marshal(message)
+	if err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.url, bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, err
@@ -642,15 +681,7 @@ func (t *HTTPTransport) Call(ctx context.Context, method string, params any) (js
 	for k, v := range t.headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := t.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("MCP HTTP %d", resp.StatusCode)
-	}
-	return decodeRPCResponse(resp.Body)
+	return t.client.Do(req)
 }
 
 func (*HTTPTransport) Close() error   { return nil }
@@ -806,6 +837,26 @@ func (t *StdioTransport) Call(ctx context.Context, method string, params any) (j
 	case out := <-ch:
 		return out.raw, out.err
 	}
+}
+
+func (t *StdioTransport) Notify(ctx context.Context, method string, params any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	notification, err := json.Marshal(rpcNotification{JSONRPC: "2.0", Method: method, Params: params})
+	if err != nil {
+		return err
+	}
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+	t.stateMu.Lock()
+	closed := t.closed
+	t.stateMu.Unlock()
+	if closed {
+		return io.ErrClosedPipe
+	}
+	_, err = t.stdin.Write(append(notification, '\n'))
+	return err
 }
 
 func (t *StdioTransport) readLoop() {

@@ -209,6 +209,8 @@ func (runtimePolicyTransport) Call(_ context.Context, method string, _ any) (jso
 	}
 }
 
+func (runtimePolicyTransport) Notify(context.Context, string, any) error { return nil }
+
 func (runtimePolicyTransport) Close() error   { return nil }
 func (runtimePolicyTransport) Logs() []string { return nil }
 

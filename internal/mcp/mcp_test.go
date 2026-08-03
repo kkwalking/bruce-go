@@ -47,6 +47,69 @@ func TestManagerEnableRegisterAndCallTool(t *testing.T) {
 	}
 }
 
+func TestManagerEnablePropagatesInitializeError(t *testing.T) {
+	initializeErr := errors.New("unsupported protocol version")
+	transport := &handshakeTransport{initializeErr: initializeErr}
+	manager := NewManager(config.MCPSettings{Servers: map[string]config.MCPServerSetting{
+		"demo": {Type: "stdio", Command: "fake"},
+	}}, t.TempDir()).WithFactory(func(context.Context, string, config.MCPServerSetting, string) (Transport, error) {
+		return transport, nil
+	})
+
+	err := manager.Enable(context.Background(), "demo")
+	if !errors.Is(err, initializeErr) {
+		t.Fatalf("enable error = %v", err)
+	}
+	if got := strings.Join(transport.calls, ","); got != "initialize" {
+		t.Fatalf("calls = %q", got)
+	}
+	if got := transport.closed.Load(); got != 1 {
+		t.Fatalf("close count = %d", got)
+	}
+	status := manager.Status()[0]
+	if status.Ready || !strings.Contains(status.Error, "MCP initialize 失败") || !strings.Contains(status.Error, initializeErr.Error()) {
+		t.Fatalf("status = %+v", status)
+	}
+}
+
+func TestInitializeAndListStopsAfterInitializedNotificationError(t *testing.T) {
+	notifyErr := errors.New("notification rejected")
+	transport := &handshakeTransport{notifyErr: notifyErr}
+
+	_, err := initializeAndList(context.Background(), transport)
+	if !errors.Is(err, notifyErr) || !strings.Contains(err.Error(), "MCP notifications/initialized 失败") {
+		t.Fatalf("initializeAndList error = %v", err)
+	}
+	if got := strings.Join(transport.calls, ","); got != "initialize,notifications/initialized" {
+		t.Fatalf("calls = %q", got)
+	}
+}
+
+func TestInitializeAndListCompletesHandshakeBeforeListingTools(t *testing.T) {
+	transport := &handshakeTransport{}
+
+	tools, err := initializeAndList(context.Background(), transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 1 || tools[0].Name != "echo" {
+		t.Fatalf("tools = %+v", tools)
+	}
+	if got := strings.Join(transport.calls, ","); got != "initialize,notifications/initialized,tools/list" {
+		t.Fatalf("calls = %q", got)
+	}
+}
+
+func TestInitializeAndListAddsToolsListErrorContext(t *testing.T) {
+	listErr := errors.New("list unavailable")
+	transport := &handshakeTransport{listErr: listErr}
+
+	_, err := initializeAndList(context.Background(), transport)
+	if !errors.Is(err, listErr) || !strings.Contains(err.Error(), "MCP tools/list 失败") {
+		t.Fatalf("initializeAndList error = %v", err)
+	}
+}
+
 func TestMCPToolAccessFiltersDefinitionsAndRejectsStaleCalls(t *testing.T) {
 	workspace := t.TempDir()
 	sandboxManager, err := sandbox.New(context.Background(), sandbox.Options{
@@ -335,6 +398,8 @@ func (f *policyTransport) Call(_ context.Context, method string, params any) (js
 	}
 }
 
+func (*policyTransport) Notify(context.Context, string, any) error { return nil }
+
 func (f *policyTransport) Close() error {
 	f.closed.Add(1)
 	return nil
@@ -375,6 +440,8 @@ func (t *blockingTransport) Call(_ context.Context, method string, _ any) (json.
 	}
 }
 
+func (*blockingTransport) Notify(context.Context, string, any) error { return nil }
+
 func (t *blockingTransport) Close() error {
 	t.closeOnce.Do(func() {
 		close(t.closeStarted)
@@ -408,6 +475,101 @@ func TestHTTPTransportCallsJSONRPC(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"ok":true`) {
 		t.Fatalf("raw = %s", raw)
+	}
+}
+
+func TestHTTPTransportSendsNotificationWithoutID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Test-Header") != "notification" {
+			http.Error(w, "missing configured header", http.StatusBadRequest)
+			return
+		}
+		var message map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&message); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if _, ok := message["id"]; ok {
+			http.Error(w, "notification must not contain id", http.StatusBadRequest)
+			return
+		}
+		var method string
+		if err := json.Unmarshal(message["method"], &method); err != nil || method != "notifications/initialized" {
+			http.Error(w, "unexpected method", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	transport := NewHTTPTransport(config.MCPServerSetting{
+		URL:     server.URL,
+		Headers: map[string]string{"X-Test-Header": "notification"},
+	})
+	if err := transport.Notify(context.Background(), "notifications/initialized", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHTTPTransportNotificationReturnsHTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "rejected", http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	transport := NewHTTPTransport(config.MCPServerSetting{URL: server.URL})
+	err := transport.Notify(context.Background(), "notifications/initialized", map[string]any{})
+	if err == nil || !strings.Contains(err.Error(), "MCP HTTP 400") {
+		t.Fatalf("notify error = %v", err)
+	}
+}
+
+func TestStdioTransportSendsNotificationWithoutPendingResponse(t *testing.T) {
+	transport, requests, _ := newPipeStdioTransport(t)
+	done := make(chan error, 1)
+	go func() {
+		done <- transport.Notify(context.Background(), "notifications/initialized", map[string]any{})
+	}()
+
+	if !requests.Scan() {
+		t.Fatal("missing stdio notification")
+	}
+	var message map[string]json.RawMessage
+	if err := json.Unmarshal(requests.Bytes(), &message); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := message["id"]; ok {
+		t.Fatalf("notification contains id: %s", requests.Bytes())
+	}
+	var method string
+	if err := json.Unmarshal(message["method"], &method); err != nil || method != "notifications/initialized" {
+		t.Fatalf("notification method = %q, err = %v", method, err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("notification waited for a response")
+	}
+	transport.stateMu.Lock()
+	pending := len(transport.pending)
+	transport.stateMu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pending responses = %d", pending)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := transport.Notify(ctx, "notifications/initialized", nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled notification error = %v", err)
+	}
+	if err := transport.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := transport.Notify(context.Background(), "notifications/initialized", nil); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("closed notification error = %v", err)
 	}
 }
 
@@ -566,8 +728,45 @@ func (f *fakeTransport) Call(_ context.Context, method string, params any) (json
 	}
 }
 
+func (*fakeTransport) Notify(context.Context, string, any) error { return nil }
+
 func (f *fakeTransport) Close() error   { return nil }
 func (f *fakeTransport) Logs() []string { return []string{"fake log"} }
+
+type handshakeTransport struct {
+	calls         []string
+	initializeErr error
+	notifyErr     error
+	listErr       error
+	closed        atomic.Int32
+}
+
+func (t *handshakeTransport) Call(_ context.Context, method string, _ any) (json.RawMessage, error) {
+	t.calls = append(t.calls, method)
+	switch method {
+	case "initialize":
+		return json.RawMessage(`{}`), t.initializeErr
+	case "tools/list":
+		if t.listErr != nil {
+			return nil, t.listErr
+		}
+		return json.RawMessage(`{"tools":[{"name":"echo","description":"echo","inputSchema":{"type":"object"}}]}`), nil
+	default:
+		return json.RawMessage(`{}`), nil
+	}
+}
+
+func (t *handshakeTransport) Notify(_ context.Context, method string, _ any) error {
+	t.calls = append(t.calls, method)
+	return t.notifyErr
+}
+
+func (t *handshakeTransport) Close() error {
+	t.closed.Add(1)
+	return nil
+}
+
+func (*handshakeTransport) Logs() []string { return nil }
 
 func TestSanitizeSchemaEnsuresObject(t *testing.T) {
 	// Non-object schema should be wrapped
