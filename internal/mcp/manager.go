@@ -176,7 +176,7 @@ func (m *Manager) enable(ctx context.Context, name string) error {
 	if factory != nil {
 		transport, err = factory(ctx, name, cfg, workspace)
 	} else {
-		transport, err = defaultTransportFactory(ctx, name, cfg, workspace, sandboxManager)
+		transport, err = defaultTransportFactory(ctx, cfg, workspace, sandboxManager)
 	}
 	if err != nil {
 		m.recordError(name, err)

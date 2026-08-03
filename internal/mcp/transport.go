@@ -23,11 +23,15 @@ type Transport interface {
 
 type TransportFactory func(ctx context.Context, name string, cfg config.MCPServerSetting, workspace string) (Transport, error)
 
+var _ TransportFactory = DefaultTransportFactory
+
+// DefaultTransportFactory accepts the server name to satisfy TransportFactory;
+// the default implementation selects transports only from the server settings.
 func DefaultTransportFactory(ctx context.Context, _ string, cfg config.MCPServerSetting, workspace string) (Transport, error) {
-	return defaultTransportFactory(ctx, "", cfg, workspace, nil)
+	return defaultTransportFactory(ctx, cfg, workspace, nil)
 }
 
-func defaultTransportFactory(ctx context.Context, _ string, cfg config.MCPServerSetting, workspace string, launcher *sandbox.Manager) (Transport, error) {
+func defaultTransportFactory(ctx context.Context, cfg config.MCPServerSetting, workspace string, launcher *sandbox.Manager) (Transport, error) {
 	switch strings.ToLower(strings.TrimSpace(cfg.Type)) {
 	case "", "stdio":
 		return newStdioTransport(ctx, cfg, workspace, launcher)
