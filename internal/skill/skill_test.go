@@ -42,11 +42,11 @@ func TestLoaderProjectOverridesUserAndToolsReadResources(t *testing.T) {
 }
 
 func TestParseInvocation(t *testing.T) {
-	inv, err := ParseInvocation("$review $security 审查代码")
+	inv, err := ParseInvocation("$review $security review the code")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(inv.Names, ",") != "review,security" || inv.Task != "审查代码" {
+	if strings.Join(inv.Names, ",") != "review,security" || inv.Task != "review the code" {
 		t.Fatalf("invocation = %+v", inv)
 	}
 	if _, err := ParseInvocation("$review"); err == nil {

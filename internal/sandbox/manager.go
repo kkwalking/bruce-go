@@ -50,20 +50,20 @@ func New(ctx context.Context, opts Options) (*Manager, error) {
 	}
 	workspace, err := canonicalAbsolute(opts.Workspace)
 	if err != nil {
-		return nil, fmt.Errorf("解析 workspace: %w", err)
+		return nil, fmt.Errorf("resolve workspace: %w", err)
 	}
 	home, err := canonicalAbsolute(opts.HomeDir)
 	if err != nil {
-		return nil, fmt.Errorf("解析 HOME: %w", err)
+		return nil, fmt.Errorf("resolve HOME: %w", err)
 	}
 	tempRoot, err := os.MkdirTemp("", "bruce-sandbox-")
 	if err != nil {
-		return nil, fmt.Errorf("创建 sandbox 临时目录: %w", err)
+		return nil, fmt.Errorf("create sandbox temporary directory: %w", err)
 	}
 	for _, name := range []string{"tmp", "cache", "run"} {
 		if err := os.MkdirAll(filepath.Join(tempRoot, name), 0o700); err != nil {
 			_ = os.RemoveAll(tempRoot)
-			return nil, fmt.Errorf("初始化 sandbox 临时目录: %w", err)
+			return nil, fmt.Errorf("initialize sandbox temporary directory: %w", err)
 		}
 	}
 
@@ -80,7 +80,7 @@ func New(ctx context.Context, opts Options) (*Manager, error) {
 	var gitErr error
 	m.git, gitErr = discoverGitLayout(workspace)
 	if gitErr != nil {
-		m.policyErr = fmt.Errorf("Git 元数据布局不可信: %w", gitErr)
+		m.policyErr = fmt.Errorf("untrusted Git metadata layout: %w", gitErr)
 	}
 	if mode == ModeWorkspaceWrite {
 		if err := validateWritableWorkspace(workspace, home); err != nil {
@@ -88,7 +88,7 @@ func New(ctx context.Context, opts Options) (*Manager, error) {
 		}
 		for _, sensitive := range m.sensitivePaths {
 			if pathContains(sensitive, workspace) {
-				m.policyErr = fmt.Errorf("workspace 位于敏感目录内: %s", sensitive)
+				m.policyErr = fmt.Errorf("workspace is inside a sensitive directory: %s", sensitive)
 				break
 			}
 		}
@@ -124,7 +124,7 @@ func (m *Manager) Status() Status {
 	defer m.mu.RUnlock()
 	capabilities := m.capabilities
 	if !m.probed {
-		capabilities = Capabilities{Backend: m.runner.Name(), Reason: "backend 尚未探测，首次进入受限模式时探测"}
+		capabilities = Capabilities{Backend: m.runner.Name(), Reason: "backend has not been probed; it will be probed when restricted mode is first entered"}
 	}
 	if m.policyErr != nil && m.mode != ModeFullAccess {
 		capabilities.Available = false
@@ -168,7 +168,7 @@ func (m *Manager) ValidateMode(mode Mode) error {
 		}
 		for _, sensitive := range m.sensitivePaths {
 			if pathContains(sensitive, m.workspace) {
-				return fmt.Errorf("workspace 位于敏感目录内: %s", sensitive)
+				return fmt.Errorf("workspace is inside a sensitive directory: %s", sensitive)
 			}
 		}
 	}
@@ -199,10 +199,10 @@ func (m *Manager) SetNetworkAccess(enabled bool) {
 
 func (m *Manager) CanWriteFile(relativePath string) error {
 	if IsGitMetadataPath(relativePath) {
-		return fmt.Errorf("%w: 文件工具禁止直接修改 .git", ErrPolicy)
+		return fmt.Errorf("%w: file tools must not modify .git directly", ErrPolicy)
 	}
 	if m.Mode() == ModeReadOnly {
-		return fmt.Errorf("%w: read-only 模式禁止修改 workspace", ErrPolicy)
+		return fmt.Errorf("%w: read-only mode prohibits workspace modifications", ErrPolicy)
 	}
 	return nil
 }
@@ -235,7 +235,7 @@ func (m *Manager) Run(ctx context.Context, command string, timeout time.Duration
 		var err error
 		commandTempRoot, err = m.newCommandTempRoot()
 		if err != nil {
-			return RunResult{}, fmt.Errorf("初始化命令隔离目录: %w", err)
+			return RunResult{}, fmt.Errorf("initialize command isolation directory: %w", err)
 		}
 		defer os.RemoveAll(commandTempRoot)
 	}
@@ -269,7 +269,7 @@ func (m *Manager) StartProcess(ctx context.Context, spec ProcessSpec, modeOverri
 		return nil, err
 	}
 	if strings.TrimSpace(spec.Program) == "" {
-		return nil, fmt.Errorf("%w: program 不能为空", ErrPolicy)
+		return nil, fmt.Errorf("%w: program must not be empty", ErrPolicy)
 	}
 	if strings.TrimSpace(spec.Directory) == "" {
 		spec.Directory = m.workspace
@@ -280,7 +280,7 @@ func (m *Manager) StartProcess(ctx context.Context, spec ProcessSpec, modeOverri
 		var err error
 		processTempRoot, err = m.newProcessTempRoot("process-")
 		if err != nil {
-			return nil, fmt.Errorf("初始化长驻进程隔离目录: %w", err)
+			return nil, fmt.Errorf("initialize long-running process isolation directory: %w", err)
 		}
 		cleanup = func() { _ = os.RemoveAll(processTempRoot) }
 	}
@@ -348,7 +348,7 @@ func mergeEnvironment(base, extra []string) ([]string, error) {
 			name, value, ok := strings.Cut(item, "=")
 			if !ok || strings.TrimSpace(name) == "" || strings.Contains(name, "=") {
 				if explicit {
-					return fmt.Errorf("%w: 非法环境变量赋值", ErrPolicy)
+					return fmt.Errorf("%w: invalid environment variable assignment", ErrPolicy)
 				}
 				continue
 			}
@@ -480,14 +480,14 @@ func protectedHostPaths(home string) ([]string, []string) {
 func validateWritableWorkspace(workspace, home string) error {
 	root := string(os.PathSeparator)
 	if workspace == root || workspace == home || pathContains(workspace, home) {
-		return fmt.Errorf("workspace-write 拒绝过宽 workspace: %s", workspace)
+		return fmt.Errorf("workspace-write rejects an overly broad workspace: %s", workspace)
 	}
 	return nil
 }
 
 func canonicalAbsolute(path string) (string, error) {
 	if strings.TrimSpace(path) == "" {
-		return "", errors.New("路径不能为空")
+		return "", errors.New("path must not be empty")
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {

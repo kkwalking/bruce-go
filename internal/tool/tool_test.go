@@ -23,11 +23,11 @@ func TestRegistryBuiltinsAndHITL(t *testing.T) {
 	registry := NewRegistry(dir)
 
 	out := registry.Execute(context.Background(), "write_file", map[string]string{"path": "a.txt", "content": "hello"})
-	if !strings.Contains(out, "文件已写入") {
+	if !strings.Contains(out, "File written") {
 		t.Fatalf("write_file output = %q", out)
 	}
 	out = registry.Execute(context.Background(), "edit_file", map[string]string{"path": "a.txt", "old_text": "hello", "new_text": "hi"})
-	if !strings.Contains(out, "文件已编辑") {
+	if !strings.Contains(out, "File edited") {
 		t.Fatalf("edit_file output = %q", out)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "a.txt"))
@@ -44,7 +44,7 @@ func TestRegistryBuiltinsAndHITL(t *testing.T) {
 
 	registry.WithHITL(approval.NewAutoHandler(true, approval.Reject("no writes")))
 	out = registry.Execute(context.Background(), "write_file", map[string]string{"path": "b.txt", "content": "blocked"})
-	if !strings.Contains(out, "[HITL] 操作已被拒绝") {
+	if !strings.Contains(out, "[HITL] Operation was rejected") {
 		t.Fatalf("HITL output = %q", out)
 	}
 }
@@ -54,14 +54,14 @@ func TestHITLModifiedArgumentsAreRevalidated(t *testing.T) {
 	modifiedWrite := approval.Result{Decision: approval.Modified, Arguments: `{"path":".git/config","content":"malicious"}`}
 	registry := NewRegistry(dir).WithHITL(approval.NewAutoHandler(true, modifiedWrite))
 	out := registry.Execute(context.Background(), "write_file", map[string]string{"path": "safe.txt", "content": "safe"})
-	if !strings.Contains(out, "文件工具禁止直接修改 .git") {
+	if !strings.Contains(out, "file tools must not modify .git directly") {
 		t.Fatalf("modified write was not revalidated: %q", out)
 	}
 
 	modifiedCommand := approval.Result{Decision: approval.Modified, Arguments: `{"command":"rm -rf /"}`}
 	registry.WithHITL(approval.NewAutoHandler(true, modifiedCommand))
 	out = registry.Execute(context.Background(), "execute_command", map[string]string{"command": "pwd"})
-	if !strings.Contains(out, "命令被安全策略拒绝") {
+	if !strings.Contains(out, "Command rejected by security policy") {
 		t.Fatalf("modified command was not revalidated: %q", out)
 	}
 }
@@ -81,7 +81,7 @@ func TestCommandGuardRejectsDangerousCommands(t *testing.T) {
 func TestBuildPromptIncludesRoutingGuidelines(t *testing.T) {
 	registry := NewRegistry(t.TempDir())
 	prompt := registry.BuildPrompt()
-	for _, want := range []string{"Guidelines:", "rg --files", "读取已知路径的单个文件用 read_file", "小范围修改已有文件用 edit_file", "新建文件或完整覆盖文件用 write_file"} {
+	for _, want := range []string{"Guidelines:", "rg --files", "Use read_file to read a single file", "Use edit_file for targeted changes", "Use write_file to create a file"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}
@@ -95,7 +95,7 @@ func TestBuildPromptIncludesRoutingGuidelines(t *testing.T) {
 		PromptSnippet: "MCP filesystem tree",
 	})
 	prompt = registry.BuildPrompt()
-	if !strings.Contains(prompt, "mcp__* 只在用户明确要求 MCP") {
+	if !strings.Contains(prompt, "Use mcp__* tools only when the user explicitly requests MCP") {
 		t.Fatalf("prompt missing MCP guidance:\n%s", prompt)
 	}
 }
@@ -113,7 +113,7 @@ func TestReadFileOffsetLimitAndContinuationHints(t *testing.T) {
 		}
 	}
 	out = registry.Execute(context.Background(), "read_file", map[string]string{"path": "notes.txt", "offset": "5"})
-	if !strings.Contains(out, "offset 超出文件末尾") || !strings.Contains(out, "文件总行数=4") {
+	if !strings.Contains(out, "offset is past the end of the file") || !strings.Contains(out, "total lines=4") {
 		t.Fatalf("offset output = %q", out)
 	}
 }
@@ -151,34 +151,34 @@ func TestFileToolsRejectTraversalSymlinksAndGitMetadata(t *testing.T) {
 	registry := NewRegistry(workspace)
 
 	out := registry.Execute(context.Background(), "read_file", map[string]string{"path": "../secret.txt"})
-	if !strings.Contains(out, "路径超出工作目录") {
+	if !strings.Contains(out, "path is outside the working directory") {
 		t.Fatalf("parent traversal output = %q", out)
 	}
 	out = registry.Execute(context.Background(), "read_file", map[string]string{"path": filepath.Join(outside, "secret.txt")})
-	if !strings.Contains(out, "路径超出工作目录") {
+	if !strings.Contains(out, "path is outside the working directory") {
 		t.Fatalf("absolute traversal output = %q", out)
 	}
 	out = registry.Execute(context.Background(), "read_file", map[string]string{"path": "escape/secret.txt"})
-	if strings.Contains(out, "outside-secret") || !strings.Contains(out, "工具执行失败") {
+	if strings.Contains(out, "outside-secret") || !strings.Contains(out, "Tool execution failed") {
 		t.Fatalf("symlink read output = %q", out)
 	}
 	out = registry.Execute(context.Background(), "write_file", map[string]string{"path": "escape/new.txt", "content": "bad"})
-	if !strings.Contains(out, "工具执行失败") {
+	if !strings.Contains(out, "Tool execution failed") {
 		t.Fatalf("symlink write output = %q", out)
 	}
 	if _, err := os.Stat(filepath.Join(outside, "new.txt")); !os.IsNotExist(err) {
 		t.Fatalf("symlink write escaped workspace: %v", err)
 	}
 	out = registry.Execute(context.Background(), "read_file", map[string]string{"path": "final-link"})
-	if strings.Contains(out, "outside-secret") || !strings.Contains(out, "工具执行失败") {
+	if strings.Contains(out, "outside-secret") || !strings.Contains(out, "Tool execution failed") {
 		t.Fatalf("final symlink read output = %q", out)
 	}
 	out = registry.Execute(context.Background(), "read_file", map[string]string{"path": "escape/"})
-	if strings.Contains(out, "outside-secret") || !strings.Contains(out, "工具执行失败") {
+	if strings.Contains(out, "outside-secret") || !strings.Contains(out, "Tool execution failed") {
 		t.Fatalf("trailing slash escape output = %q", out)
 	}
 	out = registry.Execute(context.Background(), "write_file", map[string]string{"path": ".git/config", "content": "bad"})
-	if !strings.Contains(out, "禁止直接修改 .git") {
+	if !strings.Contains(out, "must not modify .git directly") {
 		t.Fatalf("git metadata output = %q", out)
 	}
 }
@@ -187,11 +187,11 @@ func TestFileToolsRejectGitMetadataCaseVariants(t *testing.T) {
 	registry := NewRegistry(t.TempDir())
 	for _, path := range []string{".GIT/config", ".Git/hooks/pre-commit", "sub/.gIt/config"} {
 		out := registry.Execute(context.Background(), "write_file", map[string]string{"path": path, "content": "bad"})
-		if !strings.Contains(out, "禁止直接修改 .git") {
+		if !strings.Contains(out, "must not modify .git directly") {
 			t.Fatalf("case variant %q output = %q", path, out)
 		}
 		out = registry.Execute(context.Background(), "edit_file", map[string]string{"path": path, "old_text": "a", "new_text": "b"})
-		if !strings.Contains(out, "禁止直接修改 .git") {
+		if !strings.Contains(out, "must not modify .git directly") {
 			t.Fatalf("case variant edit %q output = %q", path, out)
 		}
 	}
@@ -215,7 +215,7 @@ func TestFileToolsRejectSymlinkIntoGitMetadata(t *testing.T) {
 	registry := NewRegistry(workspace)
 	for _, path := range []string{"innocent/hooks/pre-commit", "nested/link/pre-commit"} {
 		out := registry.Execute(context.Background(), "write_file", map[string]string{"path": path, "content": "#!/bin/sh\necho pwned"})
-		if !strings.Contains(out, "禁止直接修改 .git") {
+		if !strings.Contains(out, "must not modify .git directly") {
 			t.Fatalf("symlinked git write %q output = %q", path, out)
 		}
 	}
@@ -233,7 +233,7 @@ func TestReadOnlySandboxRejectsFileWritesBeforeExecution(t *testing.T) {
 	t.Cleanup(func() { _ = manager.Close() })
 	registry := NewRegistry(workspace).WithSandbox(manager)
 	out := registry.Execute(context.Background(), "write_file", map[string]string{"path": "blocked.txt", "content": "bad"})
-	if !strings.Contains(out, "read-only 模式") {
+	if !strings.Contains(out, "read-only mode") {
 		t.Fatalf("read-only output = %q", out)
 	}
 }
@@ -265,7 +265,7 @@ func TestSandboxPolicyHidesAndRejectsUnknownToolBeforeHITL(t *testing.T) {
 		t.Fatalf("hidden tool leaked into prompt: %s", prompt)
 	}
 	out := registry.Execute(context.Background(), "extension_write", nil)
-	if !strings.Contains(out, "需要=full-access") {
+	if !strings.Contains(out, "required=full-access") {
 		t.Fatalf("policy output = %q", out)
 	}
 	if got := executed.Load(); got != 0 {
@@ -297,7 +297,7 @@ func TestSandboxPolicyAllowsWorkspaceToolAndRevalidatesGeneration(t *testing.T) 
 		},
 	})
 	out := registry.Execute(context.Background(), "mcp_write", nil)
-	if !strings.Contains(out, "read-only 模式") {
+	if !strings.Contains(out, "read-only mode") {
 		t.Fatalf("generation revalidation output = %q", out)
 	}
 	if got := executed.Load(); got != 0 {
@@ -722,7 +722,7 @@ func TestExecuteCommandTimeoutHasTimeoutStatus(t *testing.T) {
 		[]llm.ToolCall{{ID: "1", Function: llm.FunctionCall{Name: "execute_command", Arguments: `{"command":"sleep 1"}`}}},
 		ExecutionHooks{},
 	)[0]
-	if result.Status != ToolCallTimeout || !strings.Contains(result.Result, "超时") {
+	if result.Status != ToolCallTimeout || !strings.Contains(result.Result, "timed out") {
 		t.Fatalf("result = %+v", result)
 	}
 }

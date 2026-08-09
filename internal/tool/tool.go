@@ -243,17 +243,17 @@ func defaultGuidelines(tools []Tool) []string {
 		guidelines = append(guidelines, text)
 	}
 	if _, ok := byName["execute_command"]; ok {
-		add("本地目录浏览、文件发现和全文搜索优先使用 execute_command 运行 ls、rg --files、rg <pattern> 或 find。")
-		add("构建、测试、Git 操作和脚本执行使用 execute_command。")
+		add("For local directory exploration, file discovery, and full-text search, prefer execute_command with ls, rg --files, rg <pattern>, or find.")
+		add("Use execute_command for builds, tests, Git operations, and scripts.")
 	}
 	if _, ok := byName["read_file"]; ok {
-		add("读取已知路径的单个文件用 read_file；大文件按返回提示继续使用 offset/limit 读取。")
+		add("Use read_file to read a single file at a known path. For large files, follow the returned guidance and continue reading with offset and limit.")
 	}
 	if _, ok := byName["edit_file"]; ok {
-		add("小范围修改已有文件用 edit_file，old_text 必须精确且唯一匹配。")
+		add("Use edit_file for targeted changes to existing files; old_text must match exactly once.")
 	}
 	if _, ok := byName["write_file"]; ok {
-		add("新建文件或完整覆盖文件用 write_file，不要用它做小范围修改。")
+		add("Use write_file to create a file or replace its entire contents; do not use it for targeted edits.")
 	}
 	for _, candidate := range tools {
 		for _, guideline := range candidate.PromptGuidelines {
@@ -262,7 +262,7 @@ func defaultGuidelines(tools []Tool) []string {
 	}
 	for _, candidate := range tools {
 		if strings.HasPrefix(candidate.Name, "mcp_") {
-			add("mcp__* 只在用户明确要求 MCP、内置工具无法满足，或需要该 MCP server 特有能力时使用。")
+			add("Use mcp__* tools only when the user explicitly requests MCP, built-in tools cannot satisfy the request, or the task requires a capability specific to that MCP server.")
 			break
 		}
 	}
@@ -313,7 +313,7 @@ func (r *Registry) ExecuteWithSandboxModeResult(ctx context.Context, name string
 func (r *Registry) executeJSONOutcome(ctx context.Context, name, argumentsJSON string, modeOverride *sandbox.Mode) ExecutionOutcome {
 	args, err := ParseArguments(argumentsJSON)
 	if err != nil {
-		return ExecutionOutcome{Output: "工具参数解析失败: " + err.Error(), Status: ToolCallFailed}
+		return ExecutionOutcome{Output: "Tool argument parsing failed: " + err.Error(), Status: ToolCallFailed}
 	}
 	return r.executeOutcome(ctx, name, args, modeOverride)
 }
@@ -321,7 +321,7 @@ func (r *Registry) executeJSONOutcome(ctx context.Context, name, argumentsJSON s
 func (r *Registry) executeOutcome(ctx context.Context, name string, args map[string]string, modeOverride *sandbox.Mode) (outcome ExecutionOutcome) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			outcome = ExecutionOutcome{Output: fmt.Sprintf("工具执行失败: panic: %v", recovered), Status: ToolCallFailed}
+			outcome = ExecutionOutcome{Output: fmt.Sprintf("Tool execution failed: panic: %v", recovered), Status: ToolCallFailed}
 		}
 	}()
 	prepared, outcome, ok := r.prepare(ctx, name, args, modeOverride)
@@ -348,7 +348,7 @@ func (r *Registry) prepare(ctx context.Context, name string, args map[string]str
 	if !ok {
 		sort.Strings(names)
 		return preparedExecution{}, ExecutionOutcome{
-			Output: "未知工具: " + name + "，可用工具: " + strings.Join(names, ", "),
+			Output: "Unknown tool: " + name + ". Available tools: " + strings.Join(names, ", "),
 			Status: ToolCallFailed,
 		}, false
 	}
@@ -364,21 +364,21 @@ func (r *Registry) prepare(ctx context.Context, name string, args map[string]str
 		}
 		if result.IsRejected() {
 			if result.Reason == "" {
-				result.Reason = "用户拒绝了此操作"
+				result.Reason = "the user rejected this operation"
 			}
-			return preparedExecution{}, ExecutionOutcome{Output: "[HITL] 操作已被拒绝：" + result.Reason, Status: ToolCallRejected}, false
+			return preparedExecution{}, ExecutionOutcome{Output: "[HITL] Operation was rejected: " + result.Reason, Status: ToolCallRejected}, false
 		}
 		if result.IsSkipped() {
-			return preparedExecution{}, ExecutionOutcome{Output: "[HITL] 操作已被跳过", Status: ToolCallSkipped}, false
+			return preparedExecution{}, ExecutionOutcome{Output: "[HITL] Operation was skipped", Status: ToolCallSkipped}, false
 		}
 		if result.Decision == approval.Modified {
 			modified, err := ParseArguments(result.EffectiveArguments(string(raw)))
 			if err != nil {
-				return preparedExecution{}, ExecutionOutcome{Output: "工具参数解析失败: " + err.Error(), Status: ToolCallFailed}, false
+				return preparedExecution{}, ExecutionOutcome{Output: "Tool argument parsing failed: " + err.Error(), Status: ToolCallFailed}, false
 			}
 			args = modified
 		} else if result.Decision != approval.Approved && result.Decision != approval.ApprovedAll {
-			return preparedExecution{}, ExecutionOutcome{Output: "工具执行失败: HITL 返回了未知决策", Status: ToolCallFailed}, false
+			return preparedExecution{}, ExecutionOutcome{Output: "Tool execution failed: HITL returned an unknown decision", Status: ToolCallFailed}, false
 		}
 		// Approval may take arbitrarily long or modify arguments. Revalidate once
 		// after it returns; execution performs a separate dynamic policy check.
@@ -393,7 +393,7 @@ func (r *Registry) executePrepared(ctx context.Context, prepared preparedExecuti
 	name := prepared.tool.Name
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			outcome = ExecutionOutcome{Output: fmt.Sprintf("工具执行失败: panic: %v", recovered), Status: ToolCallFailed}
+			outcome = ExecutionOutcome{Output: fmt.Sprintf("Tool execution failed: panic: %v", recovered), Status: ToolCallFailed}
 		}
 	}()
 	if err := ctx.Err(); err != nil {
@@ -424,7 +424,7 @@ func (r *Registry) executePrepared(ctx context.Context, prepared preparedExecuti
 
 func validationOutcome(message string) ExecutionOutcome {
 	status := ToolCallRejected
-	if strings.HasPrefix(message, "工具执行失败") || strings.HasPrefix(message, "工具参数解析失败") {
+	if strings.HasPrefix(message, "Tool execution failed") || strings.HasPrefix(message, "Tool argument parsing failed") {
 		status = ToolCallFailed
 	}
 	return ExecutionOutcome{Output: message, Status: status}
@@ -432,9 +432,9 @@ func validationOutcome(message string) ExecutionOutcome {
 
 func contextOutcome(name string, err error) ExecutionOutcome {
 	if errors.Is(err, context.DeadlineExceeded) {
-		return ExecutionOutcome{Output: "工具执行超时，已取消: " + name, Status: ToolCallTimeout}
+		return ExecutionOutcome{Output: "Tool execution timed out and was canceled: " + name, Status: ToolCallTimeout}
 	}
-	return ExecutionOutcome{Output: "工具批次执行被中断: " + name, Status: ToolCallInterrupted}
+	return ExecutionOutcome{Output: "Tool batch execution was interrupted: " + name, Status: ToolCallInterrupted}
 }
 
 func contextOrFailureOutcome(name, output string, err error) ExecutionOutcome {
@@ -452,7 +452,7 @@ func contextOrFailureOutcome(name, output string, err error) ExecutionOutcome {
 		}
 		return outcome
 	}
-	return ExecutionOutcome{Output: "工具执行失败: " + err.Error(), Status: ToolCallFailed}
+	return ExecutionOutcome{Output: "Tool execution failed: " + err.Error(), Status: ToolCallFailed}
 }
 
 func (r *Registry) validateToolRequest(t Tool, args map[string]string, modeOverride *sandbox.Mode) (uint64, string) {
@@ -463,11 +463,11 @@ func (r *Registry) validateToolRequest(t Tool, args map[string]string, modeOverr
 	name := t.Name
 	if name == "execute_command" {
 		if result := r.commandGuard.Check(args["command"]); !result.Allowed {
-			return generation, "命令被安全策略拒绝: " + result.Reason
+			return generation, "Command rejected by security policy: " + result.Reason
 		}
 		if manager := r.sandboxManager(); manager != nil {
 			if err := manager.Preflight(modeOverride); err != nil {
-				return generation, "命令被 sandbox 拒绝: " + err.Error()
+				return generation, "Command rejected by sandbox: " + err.Error()
 			}
 		}
 	}
@@ -475,13 +475,13 @@ func (r *Registry) validateToolRequest(t Tool, args map[string]string, modeOverr
 		rel, err := r.writeTargetRelativePath(args["path"])
 		if err != nil {
 			if errors.Is(err, sandbox.ErrPolicy) {
-				return generation, "命令被 sandbox 拒绝: " + err.Error()
+				return generation, "Command rejected by sandbox: " + err.Error()
 			}
-			return generation, "工具执行失败: " + err.Error()
+			return generation, "Tool execution failed: " + err.Error()
 		}
 		if manager := r.sandboxManager(); manager != nil {
 			if err := manager.CanWriteFile(rel); err != nil {
-				return generation, "命令被 sandbox 拒绝: " + err.Error()
+				return generation, "Command rejected by sandbox: " + err.Error()
 			}
 		}
 	}
@@ -507,13 +507,13 @@ func (r *Registry) validateToolPolicy(t Tool, modeOverride *sandbox.Mode) (uint6
 			source = SourceUnknown
 		}
 		return status.Generation, fmt.Sprintf(
-			"命令被 sandbox 拒绝: %s 模式不允许工具 %s（来源=%s，需要=%s）",
+			"Command rejected by sandbox: %s mode does not permit tool %s (source=%s, required=%s)",
 			mode, t.Name, source, required,
 		)
 	}
 	if t.Policy.RequiresNetwork && !network {
 		return status.Generation, fmt.Sprintf(
-			"命令被 sandbox 拒绝: sandbox network 已关闭，工具 %s 需要网络",
+			"Command rejected by sandbox: sandbox network access is disabled, but tool %s requires network access",
 			t.Name,
 		)
 	}
@@ -569,32 +569,32 @@ func ParseArguments(raw string) (map[string]string, error) {
 func (r *Registry) RegisterBuiltins() {
 	r.Register(Tool{
 		Name:          "read_file",
-		Description:   "读取文件内容，支持 offset/limit 按 1-based 行号分段读取",
-		Parameters:    params(param{"path", "string", "文件路径", true}, param{"offset", "integer", "起始行号", false}, param{"limit", "integer", "最多读取行数", false}),
+		Description:   "Read file contents, with offset and limit for pagination by 1-based line number",
+		Parameters:    params(param{"path", "string", "File path", true}, param{"offset", "integer", "Starting line number", false}, param{"limit", "integer", "Maximum number of lines to read", false}),
 		Exec:          r.readFile,
 		PromptSnippet: "Read known file contents with optional offset/limit",
 		Policy:        Policy{Source: SourceBuiltin, MinimumMode: sandbox.ModeReadOnly, ParallelSafe: true},
 	})
 	r.Register(Tool{
 		Name:          "write_file",
-		Description:   "新建文件或完整覆盖文件内容",
-		Parameters:    params(param{"path", "string", "文件路径", true}, param{"content", "string", "文件内容", true}),
+		Description:   "Create a file or replace its entire contents",
+		Parameters:    params(param{"path", "string", "File path", true}, param{"content", "string", "File content", true}),
 		Exec:          r.writeFile,
 		PromptSnippet: "Create new files or completely overwrite existing files",
 		Policy:        Policy{Source: SourceBuiltin, MinimumMode: sandbox.ModeWorkspaceWrite},
 	})
 	r.Register(Tool{
 		Name:          "edit_file",
-		Description:   "精确修改已有文件中的一段文本，old_text 必须唯一匹配",
-		Parameters:    params(param{"path", "string", "文件路径", true}, param{"old_text", "string", "要替换的原文", true}, param{"new_text", "string", "替换后的文本", true}),
+		Description:   "Precisely replace a text segment in an existing file; old_text must match exactly once",
+		Parameters:    params(param{"path", "string", "File path", true}, param{"old_text", "string", "Exact text to replace", true}, param{"new_text", "string", "Replacement text", true}),
 		Exec:          r.editFile,
 		PromptSnippet: "Make precise small edits by replacing one unique exact text block",
 		Policy:        Policy{Source: SourceBuiltin, MinimumMode: sandbox.ModeWorkspaceWrite},
 	})
 	r.Register(Tool{
 		Name:          "execute_command",
-		Description:   "在工作目录内执行 Shell 命令，用于 ls、rg、find、git、build、test、脚本运行等通用本地操作",
-		Parameters:    params(param{"command", "string", "要执行的命令", true}),
+		Description:   "Execute a shell command in the working directory for general local operations such as ls, rg, find, Git, builds, tests, and scripts",
+		Parameters:    params(param{"command", "string", "Command to execute", true}),
 		Exec:          r.executeCommand,
 		PromptSnippet: "Execute shell commands for ls, rg, find, git, build, test, and scripts",
 		Policy:        Policy{Source: SourceBuiltin, MinimumMode: sandbox.ModeReadOnly},
@@ -632,13 +632,13 @@ func (r *Registry) readFile(ctx context.Context, args map[string]string) (string
 		return "", err
 	}
 	if offset != nil && *offset < 1 {
-		return "offset 必须大于等于 1", nil
+		return "offset must be at least 1", nil
 	}
 	if limit != nil && *limit < 1 {
-		return "limit 必须大于等于 1", nil
+		return "limit must be at least 1", nil
 	}
 	if offset == nil && limit == nil && len(content) <= outputLimit {
-		return "文件内容:\n" + content, nil
+		return "File contents:\n" + content, nil
 	}
 	lines := splitLines(content)
 	totalLines := len(lines)
@@ -648,12 +648,12 @@ func (r *Registry) readFile(ctx context.Context, args map[string]string) (string
 	}
 	if totalLines == 0 {
 		if startLine > 1 {
-			return fmt.Sprintf("offset 超出文件末尾: offset=%d, 文件总行数=0", startLine), nil
+			return fmt.Sprintf("offset is past the end of the file: offset=%d, total lines=0", startLine), nil
 		}
-		return "文件内容 (lines 0-0 of 0):\n", nil
+		return "File contents (lines 0-0 of 0):\n", nil
 	}
 	if startLine > totalLines {
-		return fmt.Sprintf("offset 超出文件末尾: offset=%d, 文件总行数=%d", startLine, totalLines), nil
+		return fmt.Sprintf("offset is past the end of the file: offset=%d, total lines=%d", startLine, totalLines), nil
 	}
 
 	startIndex := startLine - 1
@@ -684,7 +684,7 @@ func (r *Registry) readFile(ctx context.Context, args map[string]string) (string
 	}
 	displayEndLine := max(startLine, endIndex)
 	var result strings.Builder
-	fmt.Fprintf(&result, "文件内容 (lines %d-%d of %d):\n%s", startLine, displayEndLine, totalLines, selected.String())
+	fmt.Fprintf(&result, "File contents (lines %d-%d of %d):\n%s", startLine, displayEndLine, totalLines, selected.String())
 	if partialLine {
 		fmt.Fprintf(&result, "\n\n[Line %d exceeds %d char limit. Use execute_command with sed/head/tail to inspect this long line.]", displayEndLine, outputLimit)
 	}
@@ -720,7 +720,7 @@ func (r *Registry) writeFile(ctx context.Context, args map[string]string) (strin
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	return "文件已写入: " + rel, nil
+	return "File written: " + rel, nil
 }
 
 func (r *Registry) editFile(ctx context.Context, args map[string]string) (string, error) {
@@ -738,7 +738,7 @@ func (r *Registry) editFile(ctx context.Context, args map[string]string) (string
 	defer root.Close()
 	oldText := args["old_text"]
 	if oldText == "" {
-		return "", errors.New("edit_file 失败: old_text 不能为空，文件未修改")
+		return "", errors.New("edit_file failed: old_text must not be empty; the file was not modified")
 	}
 	data, err := root.ReadFile(rel)
 	if err != nil {
@@ -747,10 +747,10 @@ func (r *Registry) editFile(ctx context.Context, args map[string]string) (string
 	content := string(data)
 	count := strings.Count(content, oldText)
 	if count == 0 {
-		return "", errors.New("edit_file 失败: old_text 未在文件中找到，文件未修改: " + rel)
+		return "", errors.New("edit_file failed: old_text was not found; the file was not modified: " + rel)
 	}
 	if count > 1 {
-		return "", fmt.Errorf("edit_file 失败: old_text 匹配多处 (%d)，请提供更精确的 old_text，文件未修改: %s", count, rel)
+		return "", fmt.Errorf("edit_file failed: old_text matched more than once (%d matches); provide more specific old_text; the file was not modified: %s", count, rel)
 	}
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -762,7 +762,7 @@ func (r *Registry) editFile(ctx context.Context, args map[string]string) (string
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("文件已编辑: %s (替换 1 处，%d -> %d 字符)", rel, len(oldText), len(args["new_text"])), nil
+	return fmt.Sprintf("File edited: %s (1 replacement, %d -> %d characters)", rel, len(oldText), len(args["new_text"])), nil
 }
 
 func (r *Registry) executeCommand(ctx context.Context, args map[string]string) (string, error) {
@@ -772,7 +772,7 @@ func (r *Registry) executeCommand(ctx context.Context, args map[string]string) (
 func (r *Registry) executeCommandWithMode(ctx context.Context, args map[string]string, modeOverride *sandbox.Mode) (string, error) {
 	command := strings.TrimSpace(args["command"])
 	if command == "" {
-		return "", errors.New("命令不能为空")
+		return "", errors.New("command must not be empty")
 	}
 	config := r.concurrencyConfig()
 	manager := r.sandboxManager()
@@ -782,12 +782,12 @@ func (r *Registry) executeCommandWithMode(ctx context.Context, args map[string]s
 			return "", err
 		}
 		if result.TimedOut {
-			return "命令执行超时，已终止:\n" + result.Output, &executionStatusError{status: ToolCallTimeout, cause: context.DeadlineExceeded}
+			return "Command timed out and was terminated:\n" + result.Output, &executionStatusError{status: ToolCallTimeout, cause: context.DeadlineExceeded}
 		}
 		if result.Canceled {
-			return "命令执行已取消:\n" + result.Output, &executionStatusError{status: ToolCallInterrupted, cause: context.Canceled}
+			return "Command execution was canceled:\n" + result.Output, &executionStatusError{status: ToolCallInterrupted, cause: context.Canceled}
 		}
-		return fmt.Sprintf("命令执行完成 (exit code: %d)\n%s", result.ExitCode, result.Output), nil
+		return fmt.Sprintf("Command completed (exit code: %d)\n%s", result.ExitCode, result.Output), nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, config.CommandTimeout)
 	defer cancel()
@@ -798,10 +798,10 @@ func (r *Registry) executeCommandWithMode(ctx context.Context, args map[string]s
 	cmd.Stderr = &out
 	err := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
-		return "命令执行超时，已终止:\n" + out.String(), &executionStatusError{status: ToolCallTimeout, cause: context.DeadlineExceeded}
+		return "Command timed out and was terminated:\n" + out.String(), &executionStatusError{status: ToolCallTimeout, cause: context.DeadlineExceeded}
 	}
 	if ctx.Err() == context.Canceled {
-		return "命令执行已取消:\n" + out.String(), &executionStatusError{status: ToolCallInterrupted, cause: context.Canceled}
+		return "Command execution was canceled:\n" + out.String(), &executionStatusError{status: ToolCallInterrupted, cause: context.Canceled}
 	}
 	exit := 0
 	if err != nil {
@@ -812,12 +812,12 @@ func (r *Registry) executeCommandWithMode(ctx context.Context, args map[string]s
 			return "", err
 		}
 	}
-	return fmt.Sprintf("命令执行完成 (exit code: %d)\n%s", exit, out.String()), nil
+	return fmt.Sprintf("Command completed (exit code: %d)\n%s", exit, out.String()), nil
 }
 
 func (r *Registry) relativePath(raw string) (string, error) {
 	if strings.TrimSpace(raw) == "" {
-		return "", errors.New("路径不能为空")
+		return "", errors.New("path must not be empty")
 	}
 	var rel string
 	if filepath.IsAbs(raw) {
@@ -831,14 +831,14 @@ func (r *Registry) relativePath(raw string) (string, error) {
 		rel = filepath.Clean(raw)
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("路径超出工作目录: %s", raw)
+		return "", fmt.Errorf("path is outside the working directory: %s", raw)
 	}
 	return rel, nil
 }
 
 func rejectGitMetadata(rel string) error {
 	if sandbox.IsGitMetadataPath(rel) {
-		return fmt.Errorf("%w: 文件工具禁止直接修改 .git", sandbox.ErrPolicy)
+		return fmt.Errorf("%w: file tools must not modify .git directly", sandbox.ErrPolicy)
 	}
 	return nil
 }
@@ -871,7 +871,7 @@ func (r *Registry) resolveWithinWorkspace(rel string) (string, error) {
 		return "", err
 	}
 	if resolved == ".." || strings.HasPrefix(resolved, ".."+string(os.PathSeparator)) || filepath.IsAbs(resolved) {
-		return "", fmt.Errorf("路径经符号链接解析后超出工作目录: %s", rel)
+		return "", fmt.Errorf("path resolves through a symlink to a location outside the working directory: %s", rel)
 	}
 	return resolved, nil
 }
@@ -916,7 +916,7 @@ func optionalInt(raw, name string) (*int, error) {
 	}
 	n, err := strconv.Atoi(strings.Trim(raw, `"`))
 	if err != nil {
-		return nil, fmt.Errorf("%s 必须是整数: %s", name, raw)
+		return nil, fmt.Errorf("%s must be an integer: %s", name, raw)
 	}
 	return &n, nil
 }
@@ -939,16 +939,16 @@ type CommandGuard struct{}
 
 func (CommandGuard) Check(command string) GuardResult {
 	if strings.TrimSpace(command) == "" {
-		return GuardResult{Reason: "命令不能为空"}
+		return GuardResult{Reason: "command must not be empty"}
 	}
 	lower := strings.ToLower(strings.Join(strings.Fields(command), " "))
 	for _, pattern := range []string{"rm -rf /", "sudo ", "mkfs", "dd if=", ":(){", "chmod -r 777 /", "chown -r ", "diskutil erase"} {
 		if strings.Contains(lower, pattern) {
-			return GuardResult{Reason: "命中危险命令黑名单: " + pattern}
+			return GuardResult{Reason: "command matched the dangerous-command denylist: " + pattern}
 		}
 	}
 	if isFullDiskScan(lower) {
-		return GuardResult{Reason: "禁止全盘扫描或全盘遍历"}
+		return GuardResult{Reason: "full-filesystem scans and traversals are prohibited"}
 	}
 	return GuardResult{Allowed: true}
 }
@@ -981,17 +981,17 @@ func RunToolCall(ctx context.Context, registry *Registry, call llm.ToolCall) (re
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			result = resultFromOutcome(call, start, ExecutionOutcome{
-				Output: fmt.Sprintf("工具执行失败: panic: %v", recovered),
+				Output: fmt.Sprintf("Tool execution failed: panic: %v", recovered),
 				Status: ToolCallFailed,
 			})
 		}
 	}()
 	if registry == nil {
-		return resultFromOutcome(call, start, ExecutionOutcome{Output: "工具执行失败: Registry 不能为空", Status: ToolCallFailed})
+		return resultFromOutcome(call, start, ExecutionOutcome{Output: "Tool execution failed: Registry must not be nil", Status: ToolCallFailed})
 	}
 	args, err := ParseArguments(call.Function.Arguments)
 	if err != nil {
-		return resultFromOutcome(call, start, ExecutionOutcome{Output: "工具参数解析失败: " + err.Error(), Status: ToolCallFailed})
+		return resultFromOutcome(call, start, ExecutionOutcome{Output: "Tool argument parsing failed: " + err.Error(), Status: ToolCallFailed})
 	}
 	prepared, outcome, ok := registry.prepare(ctx, call.Function.Name, args, nil)
 	if ok {
@@ -1125,16 +1125,16 @@ func prepareBatchCall(ctx context.Context, registry *Registry, call llm.ToolCall
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			prepared = preparedExecution{}
-			outcome = ExecutionOutcome{Output: fmt.Sprintf("工具执行失败: panic: %v", recovered), Status: ToolCallFailed}
+			outcome = ExecutionOutcome{Output: fmt.Sprintf("Tool execution failed: panic: %v", recovered), Status: ToolCallFailed}
 			ok = false
 		}
 	}()
 	if registry == nil {
-		return preparedExecution{}, ExecutionOutcome{Output: "工具执行失败: Registry 不能为空", Status: ToolCallFailed}, false
+		return preparedExecution{}, ExecutionOutcome{Output: "Tool execution failed: Registry must not be nil", Status: ToolCallFailed}, false
 	}
 	args, err := ParseArguments(call.Function.Arguments)
 	if err != nil {
-		return preparedExecution{}, ExecutionOutcome{Output: "工具参数解析失败: " + err.Error(), Status: ToolCallFailed}, false
+		return preparedExecution{}, ExecutionOutcome{Output: "Tool argument parsing failed: " + err.Error(), Status: ToolCallFailed}, false
 	}
 	return registry.prepare(ctx, call.Function.Name, args, nil)
 }
@@ -1144,7 +1144,7 @@ func runPreparedCall(ctx context.Context, registry *Registry, call preparedBatch
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			result = resultFromOutcome(call.call, start, ExecutionOutcome{
-				Output: fmt.Sprintf("工具执行失败: panic: %v", recovered),
+				Output: fmt.Sprintf("Tool execution failed: panic: %v", recovered),
 				Status: ToolCallFailed,
 			})
 		}
@@ -1322,9 +1322,9 @@ func ParseToolResult(raw string) (string, []llm.ContentPart) {
 		if err == nil {
 			parts = append(parts, imagePart)
 			// Replace block with fallback text, mirroring Java fallbackText()
-			out.WriteString("[已附加图片: " + source + ", mimeType=" + mimeType + "]")
+			out.WriteString("[Attached image: " + source + ", mimeType=" + mimeType + "]")
 		} else {
-			out.WriteString("[图片内容处理失败: " + err.Error() + "]")
+			out.WriteString("[Failed to process image content: " + err.Error() + "]")
 		}
 		cleaned = cleaned[blockEnd:]
 	}

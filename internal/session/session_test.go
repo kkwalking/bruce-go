@@ -97,7 +97,7 @@ func TestContextIncludesPlanEntriesWithoutLLMHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AppendMessage(llm.User("创建计划")); err != nil {
+	if err := store.AppendMessage(llm.User("Create a plan")); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.AppendPlanEvent(runtime.PlanEvent{ID: "plan_1", Action: runtime.PlanActionPresented, Revision: 1, Content: "# Plan\n\n- Step"}); err != nil {

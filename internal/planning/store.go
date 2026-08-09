@@ -68,7 +68,7 @@ func (s *Store) Read(state runtime.PlanState) (string, error) {
 func (s *Store) Replace(state runtime.PlanState, content, summary string) (runtime.PlanState, error) {
 	content = strings.TrimSpace(content)
 	if content == "" {
-		return runtime.PlanState{}, errors.New("计划内容不能为空")
+		return runtime.PlanState{}, errors.New("plan content must not be empty")
 	}
 	action := runtime.PlanActionUpdated
 	next := state
@@ -94,7 +94,7 @@ func (s *Store) Replace(state runtime.PlanState, content, summary string) (runti
 
 func (s *Store) Record(action runtime.PlanAction, state runtime.PlanState, content, summary string) (runtime.PlanState, error) {
 	if strings.TrimSpace(state.ID) == "" {
-		return runtime.PlanState{}, errors.New("当前没有 active plan")
+		return runtime.PlanState{}, errors.New("there is no active plan")
 	}
 	if strings.TrimSpace(content) == "" {
 		content = state.Content
@@ -147,7 +147,7 @@ func (s *Store) Recover(state runtime.PlanState) runtime.PlanState {
 
 func (s *Store) pathForState(state runtime.PlanState) (string, error) {
 	if strings.TrimSpace(state.ID) == "" {
-		return "", errors.New("当前没有 active plan")
+		return "", errors.New("there is no active plan")
 	}
 	path := state.Path
 	if path == "" {
@@ -156,7 +156,7 @@ func (s *Store) pathForState(state runtime.PlanState) (string, error) {
 	path = filepath.Clean(path)
 	dir := filepath.Clean(s.plansDir)
 	if path != dir && !strings.HasPrefix(path, dir+string(os.PathSeparator)) {
-		return "", fmt.Errorf("plan 路径超出计划目录: %s", path)
+		return "", fmt.Errorf("plan path is outside the plan directory: %s", path)
 	}
 	return path, nil
 }
@@ -174,7 +174,7 @@ func (s *Store) writeAtomic(path, content string) error {
 		return err
 	}
 	if filepath.Dir(filepath.Clean(path)) != filepath.Clean(s.plansDir) {
-		return fmt.Errorf("plan 路径必须位于计划目录下: %s", path)
+		return fmt.Errorf("plan path must be inside the plan directory: %s", path)
 	}
 	if err := rejectSymlink(path); err != nil {
 		return err
@@ -250,7 +250,7 @@ func rejectSymlink(path string) error {
 		return err
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("拒绝跟随 symlink: %s", path)
+		return fmt.Errorf("refusing to follow symlink: %s", path)
 	}
 	return nil
 }

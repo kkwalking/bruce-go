@@ -42,15 +42,15 @@ func TestRuntimeHandlesTaskAndSlashCommands(t *testing.T) {
 		t.Fatalf("message count = %d", rt.Session.Context(rt.Mode).MessageCount)
 	}
 	status := rt.Handle(context.Background(), "/status")
-	if !strings.Contains(status.Output, "RAG: 关闭") || !strings.Contains(status.Output, "fake-model") || !strings.Contains(status.Output, "Sandbox: full-access") {
+	if !strings.Contains(status.Output, "RAG: disabled") || !strings.Contains(status.Output, "fake-model") || !strings.Contains(status.Output, "Sandbox: full-access") {
 		t.Fatalf("status = %s", status.Output)
 	}
 	sandboxStatus := rt.Handle(context.Background(), "/sandbox status")
-	if sandboxStatus.Err != nil || !strings.Contains(sandboxStatus.Output, "mode=full-access") || !strings.Contains(sandboxStatus.Output, "network=开启") {
+	if sandboxStatus.Err != nil || !strings.Contains(sandboxStatus.Output, "mode=full-access") || !strings.Contains(sandboxStatus.Output, "network=on") {
 		t.Fatalf("sandbox status = %+v", sandboxStatus)
 	}
 	network := rt.Handle(context.Background(), "/sandbox network on")
-	if network.Err != nil || !strings.Contains(network.Output, "network=开启") {
+	if network.Err != nil || !strings.Contains(network.Output, "network=on") {
 		t.Fatalf("sandbox network = %+v", network)
 	}
 	readOnly := rt.Handle(context.Background(), "/sandbox mode read-only")
@@ -58,19 +58,19 @@ func TestRuntimeHandlesTaskAndSlashCommands(t *testing.T) {
 		t.Fatalf("sandbox mode = %+v", readOnly)
 	}
 	networkOff := rt.Handle(context.Background(), "/sandbox network off")
-	if networkOff.Err != nil || !strings.Contains(networkOff.Output, "network=关闭") {
+	if networkOff.Err != nil || !strings.Contains(networkOff.Output, "network=off") {
 		t.Fatalf("sandbox network off = %+v", networkOff)
 	}
 	fullAccess := rt.Handle(context.Background(), "/sandbox mode full-access")
-	if fullAccess.Err != nil || !strings.Contains(fullAccess.Output, "mode=full-access") || !strings.Contains(fullAccess.Output, "network=开启") {
+	if fullAccess.Err != nil || !strings.Contains(fullAccess.Output, "mode=full-access") || !strings.Contains(fullAccess.Output, "network=on") {
 		t.Fatalf("sandbox full-access mode = %+v", fullAccess)
 	}
 	networkOff = rt.Handle(context.Background(), "/sandbox network off")
-	if networkOff.Err != nil || !strings.Contains(networkOff.Output, "网络始终开启") || !strings.Contains(networkOff.Output, "network=开启 (配置=关闭)") {
+	if networkOff.Err != nil || !strings.Contains(networkOff.Output, "network access is always enabled") || !strings.Contains(networkOff.Output, "network=on (configured=off)") {
 		t.Fatalf("full-access network off should persist configured value = %+v", networkOff)
 	}
 	workspaceWrite := rt.Handle(context.Background(), "/sandbox mode workspace-write")
-	if workspaceWrite.Err != nil || !strings.Contains(workspaceWrite.Output, "network=关闭") {
+	if workspaceWrite.Err != nil || !strings.Contains(workspaceWrite.Output, "network=off") {
 		t.Fatalf("sandbox should restore safe-mode network setting = %+v", workspaceWrite)
 	}
 	legacyMode := rt.Handle(context.Background(), "/sandbox mode danger-full-access")
@@ -78,7 +78,7 @@ func TestRuntimeHandlesTaskAndSlashCommands(t *testing.T) {
 		t.Fatalf("legacy sandbox mode should fail: %+v", legacyMode)
 	}
 	parallel := rt.Handle(context.Background(), "/parallel off")
-	if parallel.Err != nil || !strings.Contains(parallel.Output, "已关闭") {
+	if parallel.Err != nil || !strings.Contains(parallel.Output, "disabled") {
 		t.Fatalf("parallel result = %+v", parallel)
 	}
 	compact := rt.Handle(context.Background(), "/compact focus")
@@ -98,7 +98,7 @@ func TestRuntimeAgentPromptsIncludeCanonicalWorkspace(t *testing.T) {
 	workspace := t.TempDir()
 	link := filepath.Join(t.TempDir(), "workspace-link")
 	if err := os.Symlink(workspace, link); err != nil {
-		t.Skipf("创建 workspace 符号链接失败: %v", err)
+		t.Skipf("failed to create workspace symlink: %v", err)
 	}
 	expected, err := sandbox.CanonicalAbsolute(workspace)
 	if err != nil {
@@ -117,7 +117,7 @@ func TestRuntimeAgentPromptsIncludeCanonicalWorkspace(t *testing.T) {
 	if rt.Workspace != expected {
 		t.Fatalf("workspace = %q, want canonical path %q", rt.Workspace, expected)
 	}
-	want := "当前工作目录: " + rt.Workspace
+	want := "Current working directory: " + rt.Workspace
 	for name, prompt := range map[string]string{
 		"react": rt.react.SystemPrompt,
 		"plan":  rt.planning.SystemPrompt,
@@ -125,7 +125,7 @@ func TestRuntimeAgentPromptsIncludeCanonicalWorkspace(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("%s system prompt missing %q:\n%s", name, want, prompt)
 		}
-		if link != rt.Workspace && strings.Contains(prompt, "当前工作目录: "+link) {
+		if link != rt.Workspace && strings.Contains(prompt, "Current working directory: "+link) {
 			t.Errorf("%s system prompt contains uncanonical workspace %q", name, link)
 		}
 	}
@@ -254,7 +254,7 @@ func TestRuntimePersistsReactToolTranscriptInSession(t *testing.T) {
 	}
 	cleanupRuntime(t, rt)
 
-	out, err := rt.RunTask(context.Background(), "读取 a.txt")
+	out, err := rt.RunTask(context.Background(), "Read a.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestRuntimePersistsReactToolTranscriptInSession(t *testing.T) {
 }
 
 func TestPlanModePersistsOnlyTopLevelMessagesAndPlanEvents(t *testing.T) {
-	client := &agent.FakeClient{Responses: []llm.ChatResponse{{Content: `{"goal":"分析","tasks":[{"id":"t1","description":"分析目标","type":"ANALYSIS","dependencies":[]}]}`}}}
+	client := &agent.FakeClient{Responses: []llm.ChatResponse{{Content: `{"goal":"Analyze","tasks":[{"id":"t1","description":"Analyze the objective","type":"ANALYSIS","dependencies":[]}]}`}}}
 	rt, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: t.TempDir(), Client: client})
 	if err != nil {
 		t.Fatal(err)
@@ -294,7 +294,7 @@ func TestPlanModePersistsOnlyTopLevelMessagesAndPlanEvents(t *testing.T) {
 		t.Fatal(result.Err)
 	}
 
-	if _, err := rt.RunTask(context.Background(), "分析项目"); err != nil {
+	if _, err := rt.RunTask(context.Background(), "Analyze the project"); err != nil {
 		t.Fatal(err)
 	}
 	ctx := rt.Session.Context(rt.Mode)
@@ -319,7 +319,7 @@ func TestPlanModePersistsOnlyTopLevelMessagesAndPlanEvents(t *testing.T) {
 func TestPlanModeEmitsPresentedPlanEvent(t *testing.T) {
 	client := &recordingChatClient{responses: []llm.ChatResponse{
 		{ToolCalls: []llm.ToolCall{{ID: "call_plan", Function: llm.FunctionCall{Name: "replace_plan", Arguments: `{"content":"# Presented Plan\n\n- Step","summary":"create"}`}}}},
-		{Content: "计划创建完成，请审阅。"},
+		{Content: "The plan is ready for review."},
 	}}
 	rt, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: t.TempDir(), Client: client})
 	if err != nil {
@@ -334,7 +334,7 @@ func TestPlanModeEmitsPresentedPlanEvent(t *testing.T) {
 	})
 	defer unsubscribe()
 
-	planned := rt.Handle(context.Background(), "/plan 生成计划")
+	planned := rt.Handle(context.Background(), "/plan Create a plan")
 	if planned.Err != nil {
 		t.Fatal(planned.Err)
 	}
@@ -350,8 +350,8 @@ func TestPlanModeEmitsPresentedPlanEvent(t *testing.T) {
 func TestPlanDescriptionApproveAndRejectLifecycle(t *testing.T) {
 	client := &recordingChatClient{responses: []llm.ChatResponse{
 		{ToolCalls: []llm.ToolCall{{ID: "call_plan", Function: llm.FunctionCall{Name: "replace_plan", Arguments: `{"content":"# Plan\n\n- Inspect\n- Edit","summary":"create"}`}}}},
-		{Content: "计划已准备"},
-		{Content: "执行完成"},
+		{Content: "Plan ready"},
+		{Content: "Execution complete"},
 	}}
 	workspace := t.TempDir()
 	home := t.TempDir()
@@ -369,7 +369,7 @@ func TestPlanDescriptionApproveAndRejectLifecycle(t *testing.T) {
 	})
 	defer unsubscribe()
 
-	planned := rt.Handle(context.Background(), "/plan 实现新能力")
+	planned := rt.Handle(context.Background(), "/plan Implement a new capability")
 	if planned.Err != nil {
 		t.Fatal(planned.Err)
 	}
@@ -391,7 +391,7 @@ func TestPlanDescriptionApproveAndRejectLifecycle(t *testing.T) {
 	if approved.Err != nil {
 		t.Fatal(approved.Err)
 	}
-	if approved.Output != "执行完成" || rt.Mode != bruntime.ModeReact {
+	if approved.Output != "Execution complete" || rt.Mode != bruntime.ModeReact {
 		t.Fatalf("approved = %+v mode=%s", approved, rt.Mode)
 	}
 	raw, err := os.ReadFile(rt.Session.Context(rt.Mode).File)
@@ -404,7 +404,7 @@ func TestPlanDescriptionApproveAndRejectLifecycle(t *testing.T) {
 			t.Fatalf("session missing %q:\n%s", want, text)
 		}
 	}
-	if strings.Contains(text, "请按已批准计划开始执行") {
+	if strings.Contains(text, "Start executing the approved plan") {
 		t.Fatalf("session should keep the user command, not the internal handoff prompt:\n%s", text)
 	}
 	if len(client.calls) != 3 {
@@ -414,10 +414,10 @@ func TestPlanDescriptionApproveAndRejectLifecycle(t *testing.T) {
 	if !messagesContainUser(approveMessages, "/plan approve") {
 		t.Fatalf("approve call should use the slash command as model input: %+v", approveMessages)
 	}
-	if messagesContainText(approveMessages, "请按已批准计划开始执行") {
+	if messagesContainText(approveMessages, "Start executing the approved plan") {
 		t.Fatalf("approve call should not use the internal handoff prompt: %+v", approveMessages)
 	}
-	if !messagesContainText(approveMessages, "用户输入 `/plan approve` 表示用户已经批准下方计划") {
+	if !messagesContainText(approveMessages, "The user input `/plan approve` confirms that the user approved the plan below") {
 		t.Fatalf("approve call missing approved-plan system context: %+v", approveMessages)
 	}
 	resumed, err := New(context.Background(), Options{Workspace: workspace, HomeDir: home, Client: &agent.FakeClient{}})
@@ -437,7 +437,7 @@ func TestPlanDescriptionApproveAndRejectLifecycle(t *testing.T) {
 		if msg.Content == "/plan approve" {
 			sawApprove = true
 		}
-		if strings.Contains(msg.Content, "请按已批准计划开始执行") {
+		if strings.Contains(msg.Content, "Start executing the approved plan") {
 			sawInternal = true
 		}
 	}
@@ -445,7 +445,7 @@ func TestPlanDescriptionApproveAndRejectLifecycle(t *testing.T) {
 		t.Fatalf("resumed messages sawApprove=%v sawInternal=%v messages=%+v", sawApprove, sawInternal, resumed.Session.Context(resumed.Mode).Messages)
 	}
 	tree := resumed.Session.RenderTree(resumed.Mode)
-	if !strings.Contains(tree, "user /plan approve") || strings.Contains(tree, "请按已批准计划开始执行") {
+	if !strings.Contains(tree, "user /plan approve") || strings.Contains(tree, "Start executing the approved plan") {
 		t.Fatalf("resumed tree should show the slash command only:\n%s", tree)
 	}
 
@@ -457,14 +457,14 @@ func TestPlanDescriptionApproveAndRejectLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	cleanupRuntime(t, rt2)
-	if result := rt2.Handle(context.Background(), "/plan 规划但不执行"); result.Err != nil {
+	if result := rt2.Handle(context.Background(), "/plan Plan without executing"); result.Err != nil {
 		t.Fatal(result.Err)
 	}
-	rejected := rt2.Handle(context.Background(), "/plan reject 不采用")
+	rejected := rt2.Handle(context.Background(), "/plan reject Do not use this plan")
 	if rejected.Err != nil {
 		t.Fatal(rejected.Err)
 	}
-	if rt2.Mode != bruntime.ModeReact || !strings.Contains(rejected.Output, "已拒绝计划") {
+	if rt2.Mode != bruntime.ModeReact || !strings.Contains(rejected.Output, "Plan rejected") {
 		t.Fatalf("rejected = %+v mode=%s", rejected, rt2.Mode)
 	}
 	if action := rt2.Session.Context(rt2.Mode).ActivePlan.Action; action != "rejected" {
@@ -475,7 +475,7 @@ func TestPlanDescriptionApproveAndRejectLifecycle(t *testing.T) {
 func TestPendingPlanNaturalLanguageInputIsGated(t *testing.T) {
 	client := &agent.FakeClient{Responses: []llm.ChatResponse{
 		{Content: "# Full Plan\n\n- should-not-repeat"},
-		{Content: "执行完成"},
+		{Content: "Execution complete"},
 	}}
 	rt, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: t.TempDir(), Client: client})
 	if err != nil {
@@ -483,7 +483,7 @@ func TestPendingPlanNaturalLanguageInputIsGated(t *testing.T) {
 	}
 	cleanupRuntime(t, rt)
 
-	planned := rt.Handle(context.Background(), "/plan 生成计划")
+	planned := rt.Handle(context.Background(), "/plan Create a plan")
 	if planned.Err != nil {
 		t.Fatal(planned.Err)
 	}
@@ -496,7 +496,7 @@ func TestPendingPlanNaturalLanguageInputIsGated(t *testing.T) {
 	}
 	beforeEvents := strings.Count(string(beforeRaw), `"type":"plan_event"`)
 
-	gated := rt.Handle(context.Background(), "开始实现")
+	gated := rt.Handle(context.Background(), "Begin implementation")
 	if gated.Err != nil {
 		t.Fatal(gated.Err)
 	}
@@ -524,7 +524,7 @@ func TestPendingPlanNaturalLanguageInputIsGated(t *testing.T) {
 	if approved.Err != nil {
 		t.Fatal(approved.Err)
 	}
-	if approved.Output != "执行完成" || client.Calls != 2 {
+	if approved.Output != "Execution complete" || client.Calls != 2 {
 		t.Fatalf("approve output=%q calls=%d", approved.Output, client.Calls)
 	}
 }
@@ -535,17 +535,17 @@ func TestPlanContinueAndResumeRecovery(t *testing.T) {
 	client := &agent.FakeClient{Responses: []llm.ChatResponse{
 		{Content: "# Initial Plan"},
 		{ToolCalls: []llm.ToolCall{{ID: "call_edit", Function: llm.FunctionCall{Name: "edit_plan", Arguments: `{"old_text":"Initial","new_text":"Updated","summary":"feedback"}`}}}},
-		{Content: "已更新"},
+		{Content: "Updated"},
 	}}
 	rt, err := New(context.Background(), Options{Workspace: workspace, HomeDir: home, Client: client})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cleanupRuntime(t, rt)
-	if result := rt.Handle(context.Background(), "/plan 初始规划"); result.Err != nil {
+	if result := rt.Handle(context.Background(), "/plan Initial plan"); result.Err != nil {
 		t.Fatal(result.Err)
 	}
-	if result := rt.Handle(context.Background(), "/plan continue 补充反馈"); result.Err != nil {
+	if result := rt.Handle(context.Background(), "/plan continue Additional feedback"); result.Err != nil {
 		t.Fatal(result.Err)
 	}
 	if client.Calls != 3 {
@@ -620,7 +620,7 @@ func TestHandleModelReasoningSubcommand(t *testing.T) {
 	if result.Err != nil {
 		t.Fatal(result.Err)
 	}
-	if !strings.Contains(result.Output, "可选级别") {
+	if !strings.Contains(result.Output, "Available levels") {
 		t.Fatalf("expected level list, got: %q", result.Output)
 	}
 
@@ -687,10 +687,10 @@ func newCompactionRuntime(t *testing.T, client *compactionChatClient) *Runtime {
 		t.Fatal(err)
 	}
 	cleanupRuntime(t, rt)
-	if err := rt.Session.AppendMessage(llm.User(strings.Repeat("旧问题", 40))); err != nil {
+	if err := rt.Session.AppendMessage(llm.User(strings.Repeat("old", 40))); err != nil {
 		t.Fatal(err)
 	}
-	if err := rt.Session.AppendMessage(llm.Assistant(strings.Repeat("旧回答", 40))); err != nil {
+	if err := rt.Session.AppendMessage(llm.Assistant(strings.Repeat("ans", 40))); err != nil {
 		t.Fatal(err)
 	}
 	return rt
@@ -699,36 +699,36 @@ func newCompactionRuntime(t *testing.T, client *compactionChatClient) *Runtime {
 func TestRuntimeOverflowCompactsAndContinuesWithoutDuplicateUser(t *testing.T) {
 	client := &compactionChatClient{window: 100, maxOutput: 50, steps: []compactionChatStep{
 		{err: errors.New("input exceeds the context window")},
-		{response: llm.ChatResponse{Content: "## 目标\n恢复任务"}},
-		{response: llm.ChatResponse{Content: "恢复完成", FinishReason: "stop"}},
+		{response: llm.ChatResponse{Content: "## Objectives\nResume the task"}},
+		{response: llm.ChatResponse{Content: "Resume complete", FinishReason: "stop"}},
 	}}
 	rt := newCompactionRuntime(t, client)
-	out, err := rt.RunTask(context.Background(), "唯一的新问题")
-	if err != nil || out != "恢复完成" {
+	out, err := rt.RunTask(context.Background(), "unique")
+	if err != nil || out != "Resume complete" {
 		t.Fatalf("result = %q, %v", out, err)
 	}
 	if len(client.calls) != 3 {
 		t.Fatalf("calls = %d", len(client.calls))
 	}
-	if !messagesContainText(client.calls[1], "上下文摘要助手") && !messagesContainText(client.calls[1], "超长回合") {
+	if !messagesContainText(client.calls[1], "context-summarization assistant") && !messagesContainText(client.calls[1], "oversized turn") {
 		t.Fatalf("second call is not summarization: %+v", client.calls[1])
 	}
 	users := 0
 	for _, entry := range rt.Session.ActiveEntries() {
-		if entry.Message != nil && entry.Message.Role == llm.RoleUser && entry.Message.Content == "唯一的新问题" {
+		if entry.Message != nil && entry.Message.Role == llm.RoleUser && entry.Message.Content == "unique" {
 			users++
 		}
 	}
 	if users != 1 {
 		t.Fatalf("persisted user count = %d", users)
 	}
-	if countExactUser(client.calls[2], "唯一的新问题") != 1 {
+	if countExactUser(client.calls[2], "unique") != 1 {
 		t.Fatalf("retry context duplicated user: %+v", client.calls[2])
 	}
 }
 
 func TestManualCompactUsesLLMSummaryWhenAutomaticCompactionDisabled(t *testing.T) {
-	client := &compactionChatClient{window: 100, maxOutput: 20, steps: []compactionChatStep{{response: llm.ChatResponse{Content: "## 目标\n手动摘要"}}}}
+	client := &compactionChatClient{window: 100, maxOutput: 20, steps: []compactionChatStep{{response: llm.ChatResponse{Content: "## Objectives\nManual summary"}}}}
 	rt := newCompactionRuntime(t, client)
 	rt.Settings.Compaction.Enabled = false
 	rt.Settings.Compaction.ReserveTokens = 100
@@ -739,16 +739,16 @@ func TestManualCompactUsesLLMSummaryWhenAutomaticCompactionDisabled(t *testing.T
 	if err := rt.Session.AppendMessage(llm.Assistant("y")); err != nil {
 		t.Fatal(err)
 	}
-	result := rt.Handle(context.Background(), "/compact 重点保留接口")
-	if result.Err != nil || !strings.Contains(result.Output, "已压缩") {
+	result := rt.Handle(context.Background(), "/compact Preserve interface details")
+	if result.Err != nil || !strings.Contains(result.Output, "compacted") {
 		t.Fatalf("result = %+v", result)
 	}
-	if len(client.calls) != 1 || !messagesContainText(client.calls[0], "重点保留接口") || client.options[0].MaxTokens != 20 {
+	if len(client.calls) != 1 || !messagesContainText(client.calls[0], "Preserve interface details") || client.options[0].MaxTokens != 20 {
 		t.Fatalf("summary call = %+v opts=%+v", client.calls, client.options)
 	}
 	entries := rt.Session.ActiveEntries()
 	last := entries[len(entries)-1]
-	if last.Type != session.TypeCompaction || last.TokensBefore <= 0 || !strings.Contains(last.Summary, "手动摘要") {
+	if last.Type != session.TypeCompaction || last.TokensBefore <= 0 || !strings.Contains(last.Summary, "Manual summary") {
 		t.Fatalf("compaction entry = %+v", last)
 	}
 }
@@ -756,15 +756,15 @@ func TestManualCompactUsesLLMSummaryWhenAutomaticCompactionDisabled(t *testing.T
 func TestRuntimeLengthOverflowKeepsUserContextForRetry(t *testing.T) {
 	client := &compactionChatClient{window: 100, steps: []compactionChatStep{
 		{response: llm.ChatResponse{InputTokens: 99, FinishReason: "length"}},
-		{response: llm.ChatResponse{Content: "摘要"}},
-		{response: llm.ChatResponse{Content: "重试成功", FinishReason: "stop"}},
+		{response: llm.ChatResponse{Content: "Summary"}},
+		{response: llm.ChatResponse{Content: "Retry succeeded", FinishReason: "stop"}},
 	}}
 	rt := newCompactionRuntime(t, client)
-	out, err := rt.RunTask(context.Background(), "必须保留的请求")
-	if err != nil || out != "重试成功" {
+	out, err := rt.RunTask(context.Background(), "required request")
+	if err != nil || out != "Retry succeeded" {
 		t.Fatalf("result=%q err=%v", out, err)
 	}
-	if len(client.calls) != 3 || countExactUser(client.calls[2], "必须保留的请求") != 1 {
+	if len(client.calls) != 3 || countExactUser(client.calls[2], "required request") != 1 {
 		t.Fatalf("retry context = %+v", client.calls)
 	}
 	foundPersistedOverflow := false
@@ -795,12 +795,12 @@ func TestRuntimeLengthOverflowKeepsUserContextForRetry(t *testing.T) {
 func TestRuntimeOverflowRetriesOnlyOnce(t *testing.T) {
 	client := &compactionChatClient{window: 100, steps: []compactionChatStep{
 		{err: errors.New("prompt is too long")},
-		{response: llm.ChatResponse{Content: "摘要"}},
+		{response: llm.ChatResponse{Content: "Summary"}},
 		{err: errors.New("prompt is too long")},
 	}}
 	rt := newCompactionRuntime(t, client)
 	_, err := rt.RunTask(context.Background(), "new")
-	if err == nil || !strings.Contains(err.Error(), "仍然溢出") {
+	if err == nil || !strings.Contains(err.Error(), "still overflowed") {
 		t.Fatalf("error = %v", err)
 	}
 	if len(client.calls) != 3 {
@@ -809,14 +809,14 @@ func TestRuntimeOverflowRetriesOnlyOnce(t *testing.T) {
 }
 
 func TestRuntimeSuccessfulSilentOverflowCompactsWithoutRetry(t *testing.T) {
-	client := &compactionChatClient{window: 100, steps: []compactionChatStep{
-		{response: llm.ChatResponse{Content: "答案", InputTokens: 101, FinishReason: "stop"}},
-		{response: llm.ChatResponse{Content: "摘要"}},
+	client := &compactionChatClient{window: 2000, steps: []compactionChatStep{
+		{response: llm.ChatResponse{Content: "Answer", InputTokens: 2001, FinishReason: "stop"}},
+		{response: llm.ChatResponse{Content: "Summary"}},
 	}}
 	rt := newCompactionRuntime(t, client)
-	rt.Settings.Compaction.KeepRecentTokens = 2
+	rt.Settings.Compaction.KeepRecentTokens = 3
 	out, err := rt.RunTask(context.Background(), "new")
-	if err != nil || out != "答案" {
+	if err != nil || out != "Answer" {
 		t.Fatalf("result = %q, %v", out, err)
 	}
 	if len(client.calls) != 2 {
@@ -829,7 +829,7 @@ func TestRuntimeSuccessfulSilentOverflowCompactsWithoutRetry(t *testing.T) {
 
 func TestRuntimeThresholdBeforeAndAfterModelCalls(t *testing.T) {
 	t.Run("before", func(t *testing.T) {
-		client := &compactionChatClient{window: 100, steps: []compactionChatStep{{response: llm.ChatResponse{Content: "摘要"}}, {response: llm.ChatResponse{Content: "答案", FinishReason: "stop"}}}}
+		client := &compactionChatClient{window: 100, steps: []compactionChatStep{{response: llm.ChatResponse{Content: "Summary"}}, {response: llm.ChatResponse{Content: "Answer", FinishReason: "stop"}}}}
 		rt := newCompactionRuntime(t, client)
 		entries := rt.Session.ActiveEntries()
 		used := *entries[len(entries)-1].Message
@@ -838,7 +838,7 @@ func TestRuntimeThresholdBeforeAndAfterModelCalls(t *testing.T) {
 			t.Fatal(err)
 		}
 		out, err := rt.RunTask(context.Background(), "new")
-		if err != nil || out != "答案" || len(client.calls) != 2 {
+		if err != nil || out != "Answer" || len(client.calls) != 2 {
 			t.Fatalf("result=%q err=%v calls=%d", out, err, len(client.calls))
 		}
 		if !messagesContainText(client.calls[0], "conversation") {
@@ -847,11 +847,11 @@ func TestRuntimeThresholdBeforeAndAfterModelCalls(t *testing.T) {
 	})
 
 	t.Run("after", func(t *testing.T) {
-		client := &compactionChatClient{window: 100, steps: []compactionChatStep{{response: llm.ChatResponse{Content: "答案", InputTokens: 92, OutputTokens: 1, FinishReason: "stop"}}, {response: llm.ChatResponse{Content: "摘要"}}}}
+		client := &compactionChatClient{window: 2000, steps: []compactionChatStep{{response: llm.ChatResponse{Content: "Answer", InputTokens: 1592, OutputTokens: 1, FinishReason: "stop"}}, {response: llm.ChatResponse{Content: "Summary"}}}}
 		rt := newCompactionRuntime(t, client)
-		rt.Settings.Compaction.KeepRecentTokens = 2
+		rt.Settings.Compaction.KeepRecentTokens = 3
 		out, err := rt.RunTask(context.Background(), "new")
-		if err != nil || out != "答案" || len(client.calls) != 2 {
+		if err != nil || out != "Answer" || len(client.calls) != 2 {
 			t.Fatalf("result=%q err=%v calls=%d", out, err, len(client.calls))
 		}
 	})
@@ -892,7 +892,7 @@ func TestRuntimeRejectsInvalidCompactionWindowAtStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := &compactionChatClient{window: 100}
-	if _, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: homeDir, SettingsPath: settingsPath, Client: client}); err == nil || !strings.Contains(err.Error(), "自动压缩配置无效") {
+	if _, err := New(context.Background(), Options{Workspace: t.TempDir(), HomeDir: homeDir, SettingsPath: settingsPath, Client: client}); err == nil || !strings.Contains(err.Error(), "invalid automatic-compaction configuration") {
 		t.Fatalf("startup error = %v", err)
 	}
 }
@@ -910,7 +910,7 @@ func TestRuntimeThresholdDisabledUnknownWindowAndOldCompactionUsage(t *testing.T
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			client := &compactionChatClient{window: test.window, steps: []compactionChatStep{{response: llm.ChatResponse{Content: "答案", FinishReason: "stop"}}}}
+			client := &compactionChatClient{window: test.window, steps: []compactionChatStep{{response: llm.ChatResponse{Content: "Answer", FinishReason: "stop"}}}}
 			rt := newCompactionRuntime(t, client)
 			rt.Settings.Compaction.Enabled = test.enabled
 			entries := rt.Session.ActiveEntries()
@@ -921,11 +921,11 @@ func TestRuntimeThresholdDisabledUnknownWindowAndOldCompactionUsage(t *testing.T
 			}
 			if test.oldCompact {
 				entries = rt.Session.ActiveEntries()
-				if err := rt.Session.AppendCompaction("旧摘要", entries[0].ID, 95, nil); err != nil {
+				if err := rt.Session.AppendCompaction("Previous summary", entries[0].ID, 95, nil); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if out, err := rt.RunTask(context.Background(), "new"); err != nil || out != "答案" {
+			if out, err := rt.RunTask(context.Background(), "new"); err != nil || out != "Answer" {
 				t.Fatalf("result=%q err=%v", out, err)
 			}
 			if len(client.calls) != 1 {
@@ -936,7 +936,7 @@ func TestRuntimeThresholdDisabledUnknownWindowAndOldCompactionUsage(t *testing.T
 }
 
 func TestRuntimePostTurnCompactionFailurePreservesAnswer(t *testing.T) {
-	client := &compactionChatClient{window: 100, steps: []compactionChatStep{{response: llm.ChatResponse{Content: "已完成答案", InputTokens: 92, FinishReason: "stop"}}, {err: errors.New("summary unavailable")}}}
+	client := &compactionChatClient{window: 100, steps: []compactionChatStep{{response: llm.ChatResponse{Content: "Completed answer", InputTokens: 92, FinishReason: "stop"}}, {err: errors.New("summary unavailable")}}}
 	rt := newCompactionRuntime(t, client)
 	rt.Settings.Compaction.KeepRecentTokens = 2
 	var activities []string
@@ -946,10 +946,10 @@ func TestRuntimePostTurnCompactionFailurePreservesAnswer(t *testing.T) {
 		}
 	})
 	out, err := rt.RunTask(context.Background(), "new")
-	if err != nil || out != "已完成答案" {
+	if err != nil || out != "Completed answer" {
 		t.Fatalf("result=%q err=%v", out, err)
 	}
-	if !messagesContainRawText(activities, "当前回答已完成") {
+	if !messagesContainRawText(activities, "current response completed successfully") {
 		t.Fatalf("activities = %v", activities)
 	}
 }

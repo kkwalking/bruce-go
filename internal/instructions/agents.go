@@ -65,7 +65,7 @@ func appendFile(file string, b *bounded, diagnostics *[]string) {
 		return
 	}
 	if err != nil {
-		*diagnostics = append(*diagnostics, file+": AGENTS.md 读取失败: "+err.Error())
+		*diagnostics = append(*diagnostics, file+": failed to read AGENTS.md: "+err.Error())
 		return
 	}
 	b.append(string(data))

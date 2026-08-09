@@ -39,7 +39,7 @@ func serverStartBlock(cfg config.MCPServerSetting, status sandbox.Status) string
 		return ""
 	}
 	if isHTTPTransport(cfg.Type) && !status.NetworkAccess {
-		return "sandbox network 已关闭，HTTP MCP 未初始化"
+		return "sandbox network access is disabled; HTTP MCP was not initialized"
 	}
 	for _, access := range cfg.ToolAccess {
 		required, err := sandbox.ParseMode(strings.TrimSpace(access))
@@ -56,7 +56,7 @@ func serverStartBlock(cfg config.MCPServerSetting, status sandbox.Status) string
 			return ""
 		}
 	}
-	return "当前 sandbox policy 下没有通过 toolAccess 授权的 MCP 工具"
+	return "no MCP tools are authorized by toolAccess under the current sandbox policy"
 }
 
 func enforcementText(cfg config.MCPServerSetting, status sandbox.Status) string {

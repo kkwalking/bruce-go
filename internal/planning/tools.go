@@ -23,12 +23,12 @@ func NewToolRegistry(base *tool.Registry, store *Store, active ActivePlanFunc) *
 	}
 	registry.Register(tool.Tool{
 		Name:          "execute_command",
-		Description:   "在 plan mode 中执行只读 Shell 探索命令，仅允许 ls、pwd、find、rg、grep、sed -n、head、tail、cat、git status/log/show/diff 等保守 allowlist",
-		Parameters:    rawSchema(param{"command", "string", "要执行的只读命令", true}),
+		Description:   "Run a read-only shell command for exploration in plan mode. Only a conservative allowlist is permitted, including ls, pwd, find, rg, grep, sed -n, head, tail, cat, and git status/log/show/diff",
+		Parameters:    rawSchema(param{"command", "string", "Read-only command to execute", true}),
 		Exec:          planExecuteCommand(base),
 		PromptSnippet: "Execute read-only shell commands for inspecting the workspace",
 		PromptGuidelines: []string{
-			"plan mode 中只能执行只读探索命令；不要运行构建、测试、安装、格式化、写文件或会修改 Git/workspace 的命令。",
+			"Plan mode permits only read-only exploration commands. Do not run builds, tests, installers, formatters, file-writing commands, or any command that modifies Git or the workspace.",
 		},
 		Policy: tool.Policy{Source: tool.SourcePlan, MinimumMode: sandbox.ModeReadOnly},
 	})
@@ -39,7 +39,7 @@ func NewToolRegistry(base *tool.Registry, store *Store, active ActivePlanFunc) *
 func RegisterPlanTools(registry *tool.Registry, store *Store, active ActivePlanFunc) {
 	registry.Register(tool.Tool{
 		Name:          "read_plan",
-		Description:   "读取当前 active markdown 计划",
+		Description:   "Read the current active Markdown plan",
 		Parameters:    rawSchema(),
 		Exec:          readPlan(store, active),
 		PromptSnippet: "Read the current markdown plan",
@@ -47,16 +47,16 @@ func RegisterPlanTools(registry *tool.Registry, store *Store, active ActivePlanF
 	})
 	registry.Register(tool.Tool{
 		Name:          "replace_plan",
-		Description:   "创建或完整替换当前 active markdown 计划内容",
-		Parameters:    rawSchema(param{"content", "string", "完整 markdown 计划内容", true}, param{"summary", "string", "本次修改摘要", false}),
+		Description:   "Create the active Markdown plan or replace its entire content",
+		Parameters:    rawSchema(param{"content", "string", "Complete Markdown plan content", true}, param{"summary", "string", "Summary of this change", false}),
 		Exec:          replacePlan(store, active),
 		PromptSnippet: "Create or replace the current markdown plan",
 		Policy:        tool.Policy{Source: tool.SourcePlan, MinimumMode: sandbox.ModeReadOnly},
 	})
 	registry.Register(tool.Tool{
 		Name:          "edit_plan",
-		Description:   "精确修改当前 active markdown 计划中的一段文本，old_text 必须唯一匹配",
-		Parameters:    rawSchema(param{"old_text", "string", "要替换的原文", true}, param{"new_text", "string", "替换后的文本", true}, param{"summary", "string", "本次修改摘要", false}),
+		Description:   "Precisely replace a text segment in the active Markdown plan; old_text must match exactly once",
+		Parameters:    rawSchema(param{"old_text", "string", "Exact text to replace", true}, param{"new_text", "string", "Replacement text", true}, param{"summary", "string", "Summary of this change", false}),
 		Exec:          editPlan(store, active),
 		PromptSnippet: "Make one exact edit to the current markdown plan",
 		Policy:        tool.Policy{Source: tool.SourcePlan, MinimumMode: sandbox.ModeReadOnly},
@@ -75,7 +75,7 @@ func replacePlan(store *Store, active ActivePlanFunc) tool.Executor {
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("计划已%s: %s rev=%d\n%s", actionText(state.Action), state.ID, state.Revision, state.Path), nil
+		return fmt.Sprintf("Plan %s: %s rev=%d\n%s", actionText(state.Action), state.ID, state.Revision, state.Path), nil
 	}
 }
 
@@ -83,11 +83,11 @@ func editPlan(store *Store, active ActivePlanFunc) tool.Executor {
 	return func(_ context.Context, args map[string]string) (string, error) {
 		state := active()
 		if state.Empty() {
-			return "", errors.New("当前没有 active plan，请先使用 replace_plan 创建计划")
+			return "", errors.New("there is no active plan; create one with replace_plan first")
 		}
 		oldText := args["old_text"]
 		if oldText == "" {
-			return "", errors.New("old_text 不能为空")
+			return "", errors.New("old_text must not be empty")
 		}
 		content, err := store.Read(state)
 		if err != nil {
@@ -95,17 +95,17 @@ func editPlan(store *Store, active ActivePlanFunc) tool.Executor {
 		}
 		count := strings.Count(content, oldText)
 		if count == 0 {
-			return "", errors.New("old_text 未在当前计划中找到，计划未修改")
+			return "", errors.New("old_text was not found in the current plan; the plan was not modified")
 		}
 		if count > 1 {
-			return "", fmt.Errorf("old_text 匹配多处 (%d)，请提供更精确的文本，计划未修改", count)
+			return "", fmt.Errorf("old_text matched more than once (%d matches); provide more specific text; the plan was not modified", count)
 		}
 		updated := strings.Replace(content, oldText, args["new_text"], 1)
 		next, err := store.Replace(state, updated, args["summary"])
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("计划已编辑: %s rev=%d", next.ID, next.Revision), nil
+		return fmt.Sprintf("Plan edited: %s rev=%d", next.ID, next.Revision), nil
 	}
 }
 
@@ -113,7 +113,7 @@ func planExecuteCommand(base *tool.Registry) tool.Executor {
 	return func(ctx context.Context, args map[string]string) (string, error) {
 		command := args["command"]
 		if result := CheckReadOnlyCommand(command); !result.Allowed {
-			message := "命令被 plan mode 安全策略拒绝: " + result.Reason
+			message := "Command rejected by the plan-mode security policy: " + result.Reason
 			return message, tool.NewExecutionError(tool.ToolCallRejected, errors.New(message))
 		}
 		var outcome tool.ExecutionOutcome
@@ -132,7 +132,7 @@ func planExecuteCommand(base *tool.Registry) tool.Executor {
 func CheckReadOnlyCommand(command string) tool.GuardResult {
 	normalized := strings.TrimSpace(command)
 	if normalized == "" {
-		return tool.GuardResult{Reason: "命令不能为空"}
+		return tool.GuardResult{Reason: "command must not be empty"}
 	}
 	if result := (tool.CommandGuard{}).Check(normalized); !result.Allowed {
 		return result
@@ -146,13 +146,13 @@ func CheckReadOnlyCommand(command string) tool.GuardResult {
 		" npm ", "npm ", " pnpm ", "pnpm ", " yarn ", "yarn ", " cargo ", "cargo ",
 	} {
 		if strings.Contains(" "+lower+" ", banned) {
-			return tool.GuardResult{Reason: "plan mode 仅允许只读探索命令，拒绝片段: " + strings.TrimSpace(banned)}
+			return tool.GuardResult{Reason: "plan mode permits only read-only exploration commands; rejected segment: " + strings.TrimSpace(banned)}
 		}
 	}
 	segments := strings.Split(normalized, "|")
 	for _, segment := range segments {
 		if !readOnlySegmentAllowed(strings.TrimSpace(segment)) {
-			return tool.GuardResult{Reason: "命令不在 plan mode 只读 allowlist 中: " + strings.TrimSpace(segment)}
+			return tool.GuardResult{Reason: "command is not on the plan-mode read-only allowlist: " + strings.TrimSpace(segment)}
 		}
 	}
 	return tool.GuardResult{Allowed: true}
@@ -198,9 +198,9 @@ func filepathBase(value string) string {
 
 func actionText(action runtime.PlanAction) string {
 	if action == runtime.PlanActionCreated {
-		return "创建"
+		return "created"
 	}
-	return "更新"
+	return "updated"
 }
 
 type param struct {

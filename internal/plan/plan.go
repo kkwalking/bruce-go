@@ -72,10 +72,10 @@ func NewExecutionPlan(goal string) *ExecutionPlan {
 
 func (p *ExecutionPlan) AddTask(task *Task) error {
 	if task == nil || task.ID == "" {
-		return errors.New("任务 id 不能为空")
+		return errors.New("task ID must not be empty")
 	}
 	if _, exists := p.Tasks[task.ID]; exists {
-		return errors.New("重复任务 ID: " + task.ID)
+		return errors.New("duplicate task ID: " + task.ID)
 	}
 	if task.Status == "" {
 		task.Status = TaskPending
@@ -87,7 +87,7 @@ func (p *ExecutionPlan) AddTask(task *Task) error {
 func (p *ExecutionPlan) AddDependency(taskID, depID string) error {
 	task := p.Tasks[taskID]
 	if task == nil || p.Tasks[depID] == nil {
-		return errors.New("依赖不存在")
+		return errors.New("dependency does not exist")
 	}
 	for _, dep := range task.Dependencies {
 		if dep == depID {
@@ -110,7 +110,7 @@ func (p *ExecutionPlan) TopologicalOrder() ([]*Task, error) {
 	visit = func(task *Task) error {
 		switch state[task.ID] {
 		case 1:
-			return errors.New("DAG 中存在环，任务参与环路: " + task.ID)
+			return errors.New("DAG contains a cycle involving task: " + task.ID)
 		case 2:
 			return nil
 		}
@@ -118,7 +118,7 @@ func (p *ExecutionPlan) TopologicalOrder() ([]*Task, error) {
 		for _, depID := range task.Dependencies {
 			dep := p.Tasks[depID]
 			if dep == nil {
-				return fmt.Errorf("任务 %s 依赖不存在的任务: %s", task.ID, depID)
+				return fmt.Errorf("task %s depends on nonexistent task: %s", task.ID, depID)
 			}
 			if err := visit(dep); err != nil {
 				return err
@@ -171,7 +171,7 @@ func (p *ExecutionPlan) SkipBlocked() {
 			for _, dep := range task.Dependencies {
 				if p.Tasks[dep] == nil || p.Tasks[dep].Status == TaskFailed || p.Tasks[dep].Status == TaskSkipped {
 					task.Status = TaskSkipped
-					task.Error = "依赖任务失败或被跳过"
+					task.Error = "a dependency failed or was skipped"
 					changed = true
 					break
 				}
@@ -196,7 +196,7 @@ func (Parser) Parse(raw, fallbackGoal string) (*ExecutionPlan, error) {
 		root.Goal = fallbackGoal
 	}
 	if len(root.Tasks) == 0 {
-		return nil, errors.New("计划 JSON 中必须包含非空 tasks 数组")
+		return nil, errors.New("plan JSON must contain a non-empty tasks array")
 	}
 	p := NewExecutionPlan(root.Goal)
 	p.Summary = root.Summary
@@ -205,7 +205,7 @@ func (Parser) Parse(raw, fallbackGoal string) (*ExecutionPlan, error) {
 		task := root.Tasks[i]
 		oldID := task.ID
 		if oldID == "" {
-			return nil, errors.New("任务缺少必填字段: id")
+			return nil, errors.New("task is missing required field: id")
 		}
 		if !strings.HasPrefix(oldID, "task_") {
 			task.ID = fmt.Sprintf("task_%d", i+1)
@@ -221,7 +221,7 @@ func (Parser) Parse(raw, fallbackGoal string) (*ExecutionPlan, error) {
 		for _, dep := range task.Dependencies {
 			mapped := idMap[dep]
 			if mapped == "" {
-				return nil, errors.New("依赖不存在: " + dep)
+				return nil, errors.New("dependency does not exist: " + dep)
 			}
 			if err := p.AddDependency(idMap[task.ID], mapped); err != nil {
 				return nil, err
@@ -262,7 +262,7 @@ type LLMPlanner struct {
 func (p LLMPlanner) Plan(ctx context.Context, goal, supplemental, taskContext string) (*ExecutionPlan, error) {
 	user := goal
 	if supplemental != "" {
-		user = "用户原始目标:\n" + goal + "\n\n可用补充上下文:\n" + supplemental
+		user = "Original user objective:\n" + goal + "\n\nAvailable supplemental context:\n" + supplemental
 	}
 	messages := []llm.Message{llm.System(planPrompt)}
 	if taskContext != "" {
@@ -283,18 +283,18 @@ func (p LLMPlanner) Plan(ctx context.Context, goal, supplemental, taskContext st
 		}
 		messages = append(messages, llm.Message{Role: llm.RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls})
 		for _, call := range resp.ToolCalls {
-			result := "规划阶段不允许调用工具"
+			result := "Tool calls are not permitted during planning"
 			if p.Tools != nil {
 				result = p.Tools.ExecuteJSON(ctx, call.Function.Name, call.Function.Arguments)
 			}
 			messages = append(messages, llm.ToolMessage(call.ID, result))
 		}
 	}
-	return nil, errors.New("规划器读取资源次数超过限制")
+	return nil, errors.New("planner exceeded the resource-read limit")
 }
 
 func (p LLMPlanner) Replan(ctx context.Context, failed *ExecutionPlan, reason, supplemental, taskContext string) (*ExecutionPlan, error) {
-	return p.Plan(ctx, "请基于失败上下文重新规划任务。\n原目标: "+failed.Goal+"\n失败原因: "+reason, supplemental, taskContext)
+	return p.Plan(ctx, "Replan the task based on the failure context.\nOriginal objective: "+failed.Goal+"\nFailure reason: "+reason, supplemental, taskContext)
 }
 
 type Executor struct {
@@ -336,7 +336,7 @@ func (e Executor) Execute(ctx context.Context, p *ExecutionPlan) Report {
 			for _, task := range p.Tasks {
 				if task.Status == TaskPending {
 					task.Status = TaskSkipped
-					task.Error = "没有可执行依赖路径"
+					task.Error = "no executable dependency path"
 				}
 			}
 			break
@@ -379,7 +379,7 @@ func (e Executor) executeOne(ctx context.Context, task *Task) {
 	var result string
 	switch task.Type {
 	case TaskPlanning, TaskAnalysis:
-		result = "已完成: " + task.Description
+		result = "Completed: " + task.Description
 	case TaskFileRead:
 		result = e.Tools.Execute(ctx, "read_file", map[string]string{"path": task.Path})
 	case TaskFileWrite:
@@ -387,13 +387,13 @@ func (e Executor) executeOne(ctx context.Context, task *Task) {
 	case TaskCommand, TaskVerification:
 		result = e.Tools.Execute(ctx, "execute_command", map[string]string{"command": task.Command})
 	default:
-		result = "工具执行失败: 未知任务类型"
+		result = "Tool execution failed: unknown task type"
 	}
 	task.Result = result
-	if strings.HasPrefix(result, "[HITL] 操作已被跳过") {
+	if strings.HasPrefix(result, "[HITL] Operation was skipped") {
 		task.Status = TaskSkipped
 		task.Error = result
-	} else if strings.HasPrefix(result, "[HITL] 操作已被拒绝") || strings.HasPrefix(result, "工具执行失败") || strings.HasPrefix(result, "工具参数解析失败") || strings.HasPrefix(result, "命令被安全策略拒绝") {
+	} else if strings.HasPrefix(result, "[HITL] Operation was rejected") || strings.HasPrefix(result, "Tool execution failed") || strings.HasPrefix(result, "Tool argument parsing failed") || strings.HasPrefix(result, "Command rejected by security policy") {
 		task.Status = TaskFailed
 		task.Error = result
 	} else {
@@ -413,7 +413,7 @@ func (a Agent) Run(ctx context.Context, goal, supplemental, taskContext string) 
 	}
 	report := a.Executor.Execute(ctx, p)
 	if !report.Success() && report.SuccessRate() < 0.5 {
-		replanned, err := a.Planner.Replan(ctx, report.Plan, "执行成功率低于 50%", supplemental, taskContext)
+		replanned, err := a.Planner.Replan(ctx, report.Plan, "execution success rate was below 50%", supplemental, taskContext)
 		if err != nil {
 			return report, nil
 		}
@@ -431,6 +431,6 @@ func hasPending(p *ExecutionPlan) bool {
 	return false
 }
 
-const planPrompt = `你是 BruceCLI 的 Plan-and-Execute 规划器。
-你的任务是把用户目标拆解为可执行 DAG 任务，只返回 JSON，不要返回 Markdown。
-JSON 格式必须包含 goal、summary、tasks；任务 type 可为 PLANNING、FILE_READ、FILE_WRITE、COMMAND、ANALYSIS、VERIFICATION。`
+const planPrompt = `You are BruceCLI's Plan-and-Execute planner.
+Decompose the user's objective into an executable directed acyclic graph (DAG) of tasks. Return JSON only; do not return Markdown.
+The JSON object must contain goal, summary, and tasks. Each task type must be one of PLANNING, FILE_READ, FILE_WRITE, COMMAND, ANALYSIS, or VERIFICATION.`

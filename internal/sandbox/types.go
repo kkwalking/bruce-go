@@ -20,7 +20,7 @@ func ParseMode(raw string) (Mode, error) {
 	case ModeReadOnly, ModeWorkspaceWrite, ModeFullAccess:
 		return Mode(raw), nil
 	default:
-		return "", errors.New("未知 sandbox mode: " + raw)
+		return "", errors.New("unknown sandbox mode: " + raw)
 	}
 }
 
@@ -104,6 +104,6 @@ type LongRunningProcess interface {
 }
 
 var (
-	ErrUnavailable = errors.New("sandbox backend 不可用")
-	ErrPolicy      = errors.New("sandbox 策略拒绝")
+	ErrUnavailable = errors.New("sandbox backend is unavailable")
+	ErrPolicy      = errors.New("sandbox policy rejected the operation")
 )

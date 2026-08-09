@@ -49,14 +49,14 @@ func (seatbeltRunner) Run(ctx context.Context, spec CommandSpec, policy Policy) 
 	args = append(args, "--", "/bin/bash", "--noprofile", "--norc", "-c", spec.Command)
 	result, err := runProcess(ctx, seatbeltExecutable, args, spec)
 	if err != nil {
-		return result, fmt.Errorf("Seatbelt 启动失败: %w", err)
+		return result, fmt.Errorf("failed to start Seatbelt: %w", err)
 	}
 	return result, nil
 }
 
 func (seatbeltRunner) PrepareProcess(spec ProcessSpec, policy Policy) (PreparedProcess, error) {
 	if strings.TrimSpace(spec.Program) == "" {
-		return PreparedProcess{}, fmt.Errorf("%w: program 不能为空", ErrPolicy)
+		return PreparedProcess{}, fmt.Errorf("%w: program must not be empty", ErrPolicy)
 	}
 	profile, definitions := buildSeatbeltProfile(policy)
 	args := []string{"-p", profile}

@@ -24,25 +24,25 @@ type CommandInfo struct {
 }
 
 var Commands = []CommandInfo{
-	{Name: "react", Usage: "/react", Description: "切换到 ReAct 模式"},
-	{Name: "plan", Usage: "/plan [任务|approve|reject|cancel|continue]", Description: "进入计划模式、维护计划或审批计划"},
-	{Name: "model", Usage: "/model [provider/model | reasoning [off|low|medium|high|max]]", Description: "查看或切换模型、调整推理级别"},
-	{Name: "web", Usage: "/web on|off|status|search <query>|fetch <url>", Description: "开关、查看或手动使用 WebSearch/WebFetch"},
-	{Name: "mcp", Usage: "/mcp [restart|logs|disable|enable <name>]", Description: "查看或管理 MCP server"},
-	{Name: "skill", Usage: "/skill list|show <name>|reload", Description: "查看、展示或重新加载 Skill"},
-	{Name: "hitl", Usage: "/hitl on|off|status", Description: "开关或查看人工审批"},
-	{Name: "sandbox", Usage: "/sandbox [status|mode <mode>|network on|off]", Description: "查看或切换命令沙箱"},
-	{Name: "parallel", Usage: "/parallel on|off|status", Description: "开关或查看并行工具调用"},
-	{Name: "status", Usage: "/status", Description: "查看统一运行状态"},
-	{Name: "session", Usage: "/session", Description: "查看当前 session"},
-	{Name: "sessions", Usage: "/sessions", Description: "列出当前工作目录的 session"},
-	{Name: "new", Usage: "/new", Description: "新建 session"},
-	{Name: "resume", Usage: "/resume <id|path>", Description: "恢复指定 session"},
-	{Name: "tree", Usage: "/tree [entryId]", Description: "查看或切换 session 树节点"},
-	{Name: "compact", Usage: "/compact [instructions]", Description: "压缩较早 session 历史"},
-	{Name: "clear", Usage: "/clear", Description: "开启新 session 并清空本轮状态"},
-	{Name: "help", Usage: "/help", Description: "显示帮助"},
-	{Name: "exit", Usage: "/exit", Description: "退出程序"},
+	{Name: "react", Usage: "/react", Description: "Switch to ReAct mode"},
+	{Name: "plan", Usage: "/plan [task|approve|reject|cancel|continue]", Description: "Enter plan mode, revise a plan, or review a plan"},
+	{Name: "model", Usage: "/model [provider/model | reasoning [off|low|medium|high|max]]", Description: "View or switch models and adjust reasoning effort"},
+	{Name: "web", Usage: "/web on|off|status|search <query>|fetch <url>", Description: "Enable, disable, inspect, or manually use WebSearch and WebFetch"},
+	{Name: "mcp", Usage: "/mcp [restart|logs|disable|enable <name>]", Description: "View or manage MCP servers"},
+	{Name: "skill", Usage: "/skill list|show <name>|reload", Description: "List, inspect, or reload Skills"},
+	{Name: "hitl", Usage: "/hitl on|off|status", Description: "Enable, disable, or inspect human approval"},
+	{Name: "sandbox", Usage: "/sandbox [status|mode <mode>|network on|off]", Description: "View or change the command sandbox"},
+	{Name: "parallel", Usage: "/parallel on|off|status", Description: "Enable, disable, or inspect parallel tool calls"},
+	{Name: "status", Usage: "/status", Description: "View unified runtime status"},
+	{Name: "session", Usage: "/session", Description: "View the current session"},
+	{Name: "sessions", Usage: "/sessions", Description: "List sessions for the current working directory"},
+	{Name: "new", Usage: "/new", Description: "Create a new session"},
+	{Name: "resume", Usage: "/resume <id|path>", Description: "Resume a session"},
+	{Name: "tree", Usage: "/tree [entryId]", Description: "View or select a session-tree node"},
+	{Name: "compact", Usage: "/compact [instructions]", Description: "Compact earlier session history"},
+	{Name: "clear", Usage: "/clear", Description: "Start a new session and clear current state"},
+	{Name: "help", Usage: "/help", Description: "Show help"},
+	{Name: "exit", Usage: "/exit", Description: "Exit the program"},
 }
 
 func Parse(input string) (Command, bool) {
@@ -67,7 +67,7 @@ func Parse(input string) (Command, bool) {
 
 func Help() string {
 	var b strings.Builder
-	b.WriteString("Bruce Go 可用命令:\n\n")
+	b.WriteString("Available Bruce Go commands:\n\n")
 	for _, cmd := range Commands {
 		b.WriteString(cmd.Usage)
 		if len(cmd.Usage) < 28 {
@@ -78,11 +78,11 @@ func Help() string {
 		b.WriteString(cmd.Description)
 		b.WriteByte('\n')
 	}
-	b.WriteString("\n输入语法:\n")
-	b.WriteString("$<skill> <任务>                 显式加载 Skill，最多 3 个\n")
-	b.WriteString("@image:<path>                   附加图片文件\n")
-	b.WriteString("@image:<file:///path with space> 附加 file:// 图片\n")
-	b.WriteString("@clipboard                      附加 macOS 剪贴板图片\n")
+	b.WriteString("\nInput syntax:\n")
+	b.WriteString("$<skill> <task>                 Explicitly load up to three Skills\n")
+	b.WriteString("@image:<path>                   Attach an image file\n")
+	b.WriteString("@image:<file:///path with space> Attach a file:// image\n")
+	b.WriteString("@clipboard                      Attach an image from the macOS clipboard\n")
 	return strings.TrimSpace(b.String())
 }
 

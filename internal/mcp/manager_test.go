@@ -63,7 +63,7 @@ func TestManagerEnablePropagatesInitializeError(t *testing.T) {
 		t.Fatalf("close count = %d", got)
 	}
 	status := manager.Status()[0]
-	if status.Ready || !strings.Contains(status.Error, "MCP initialize 失败") || !strings.Contains(status.Error, initializeErr.Error()) {
+	if status.Ready || !strings.Contains(status.Error, "MCP initialize failed") || !strings.Contains(status.Error, initializeErr.Error()) {
 		t.Fatalf("status = %+v", status)
 	}
 }
@@ -73,7 +73,7 @@ func TestInitializeAndListStopsAfterInitializedNotificationError(t *testing.T) {
 	transport := &handshakeTransport{notifyErr: notifyErr}
 
 	_, err := initializeAndList(context.Background(), transport)
-	if !errors.Is(err, notifyErr) || !strings.Contains(err.Error(), "MCP notifications/initialized 失败") {
+	if !errors.Is(err, notifyErr) || !strings.Contains(err.Error(), "MCP notifications/initialized failed") {
 		t.Fatalf("initializeAndList error = %v", err)
 	}
 	if got := strings.Join(transport.calls, ","); got != "initialize,notifications/initialized" {
@@ -101,7 +101,7 @@ func TestInitializeAndListAddsToolsListErrorContext(t *testing.T) {
 	transport := &handshakeTransport{listErr: listErr}
 
 	_, err := initializeAndList(context.Background(), transport)
-	if !errors.Is(err, listErr) || !strings.Contains(err.Error(), "MCP tools/list 失败") {
+	if !errors.Is(err, listErr) || !strings.Contains(err.Error(), "MCP tools/list failed") {
 		t.Fatalf("initializeAndList error = %v", err)
 	}
 }
@@ -147,7 +147,7 @@ func TestMCPToolAccessFiltersDefinitionsAndRejectsStaleCalls(t *testing.T) {
 		t.Fatalf("read-only definitions = %+v", defs)
 	}
 	out := registry.Execute(context.Background(), "mcp_filesystem_write", map[string]string{"path": "blocked"})
-	if !strings.Contains(out, "需要=workspace-write") {
+	if !strings.Contains(out, "required=workspace-write") {
 		t.Fatalf("write policy output = %q", out)
 	}
 	if got := transport.toolCalls.Load(); got != 0 {

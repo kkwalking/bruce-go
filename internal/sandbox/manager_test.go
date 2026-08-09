@@ -108,7 +108,7 @@ func TestManagerValidatesWorkspaceBeforeDynamicWorkspaceWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = manager.Close() })
-	if err := manager.SetMode(ModeWorkspaceWrite); err == nil || !strings.Contains(err.Error(), "过宽") {
+	if err := manager.SetMode(ModeWorkspaceWrite); err == nil || !strings.Contains(err.Error(), "overly broad") {
 		t.Fatalf("dynamic workspace-write should reject HOME workspace: %v", err)
 	}
 	if manager.Mode() != ModeFullAccess {

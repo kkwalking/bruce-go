@@ -12,14 +12,14 @@ import (
 	"bruce-go/internal/tool"
 )
 
-const baseSystemPrompt = `你是 Bruce Coding Agent，一个智能编程助手，可以帮助用户完成各种任务。
+const baseSystemPrompt = `You are Bruce Coding Agent, an intelligent coding assistant that helps users complete a wide range of software-engineering tasks.
 
-当需要观察文件、修改代码、执行命令或创建项目时，请使用工具调用。
-使用工具后，根据工具返回的结果继续思考下一步行动。
-如果任务已经完成，请直接给出最终答复，不要继续调用工具。
-回答用户时保持简洁，并清晰标注相关文件路径。
+Use tool calls whenever you need to inspect files, modify code, run commands, or create project artifacts.
+After each tool call, use its result to determine the next action.
+Once the task is complete, provide the final response immediately and stop calling tools.
+Keep responses concise and clearly identify relevant file paths.
 
-请用中文回复用户。`
+Respond in the language most appropriate for the user. Normally, use the language of the user's latest request. If the user explicitly requests a different language, use the requested language. For mixed-language requests, use the dominant language unless the context clearly indicates otherwise.`
 
 const maxRetries = 2
 
@@ -64,10 +64,10 @@ func (a *Agent) RestoreHistory(messages []llm.Message) {
 
 func (a *Agent) Run(ctx context.Context, input llm.PreparedInput, taskContext string, runID string) (string, error) {
 	if strings.TrimSpace(input.Message.Content) == "" && len(input.Message.ContentParts) == 0 {
-		return "请输入任务内容", nil
+		return "Please enter a task.", nil
 	}
 	if input.Message.HasImages() && !a.Client.SupportsImages() {
-		msg := "当前模型 " + a.Client.ModelName() + " [" + a.Client.ProviderName() + "] 不支持图片，请切换到支持视觉的模型（如 glm-5v-turbo）"
+		msg := "The current model, " + a.Client.ModelName() + " [" + a.Client.ProviderName() + "], does not support images. Switch to a vision-capable model, such as glm-5v-turbo."
 		a.emit(event.NewMessageCompleted(runID, llm.Assistant(msg), false))
 		return msg, nil
 	}
@@ -104,7 +104,7 @@ func (a *Agent) run(ctx context.Context, taskContext string, runID string) (stri
 	for i := 0; i < a.MaxIterations; i++ {
 		select {
 		case <-ctx.Done():
-			return "任务已被用户中断", nil
+			return "The task was interrupted by the user.", nil
 		default:
 		}
 		if a.skipBeforeChat {
@@ -120,7 +120,7 @@ func (a *Agent) run(ctx context.Context, taskContext string, runID string) (stri
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				a.emit(event.NewMessageCompleted(runID, llm.Assistant(""), false))
-				return "任务已被用户中断", nil
+				return "The task was interrupted by the user.", nil
 			}
 			if llm.IsContextOverflowError(err) {
 				a.emit(event.NewMessageCompleted(runID, llm.Assistant(""), false))
@@ -130,7 +130,7 @@ func (a *Agent) run(ctx context.Context, taskContext string, runID string) (stri
 				retryCount++
 				continue
 			}
-			out := "网络错误: " + err.Error()
+			out := "Network error: " + err.Error()
 			a.emit(event.NewMessageCompleted(runID, llm.Assistant(out), false))
 			return out, nil
 		}
@@ -158,11 +158,11 @@ func (a *Agent) run(ctx context.Context, taskContext string, runID string) (stri
 		a.append(assistant)
 		a.emit(event.NewMessageCompleted(runID, assistant, true))
 		if overflow := llm.DetectContextOverflowResponse(resp, a.Client.MaxContextWindow()); overflow.Retry {
-			return "", &llm.ContextOverflowError{Cause: errors.New("模型因上下文窗口耗尽而未生成输出")}
+			return "", &llm.ContextOverflowError{Cause: errors.New("the model produced no output because its context window was exhausted")}
 		}
 		return resp.Content, nil
 	}
-	stopped := "达到最大迭代次数限制"
+	stopped := "Maximum iteration limit reached."
 	a.appendDurable(runID, llm.Assistant(stopped))
 	return stopped, nil
 }
@@ -217,7 +217,7 @@ func (a *Agent) appendImageToolMessages(runID string, results []tool.ToolCallRes
 		}
 		parts := make([]llm.ContentPart, 0, len(result.ImageParts)+1)
 		parts = append(parts, llm.TextPart(
-			"工具 "+result.ToolCall.Function.Name+" 返回了图片内容，请结合上面的工具文本结果分析。",
+			"Tool "+result.ToolCall.Function.Name+" returned image content. Analyze it together with the tool's text result above.",
 		))
 		parts = append(parts, result.ImageParts...)
 		msg := llm.Message{
@@ -252,7 +252,7 @@ func (a *Agent) appendDurable(runID string, msg llm.Message) {
 
 func (a *Agent) durableToolMessage(call llm.ToolCall, msg llm.Message) llm.Message {
 	if skill.IsSkillTool(call.Function.Name) {
-		return llm.ToolMessage(msg.ToolCallID, "[Skill 内容仅对原任务有效，已从历史中移除]")
+		return llm.ToolMessage(msg.ToolCallID, "[Skill content was valid only for the original task and has been removed from history]")
 	}
 	return msg
 }
@@ -271,7 +271,7 @@ func (a *Agent) redactSkillToolResults() {
 	}
 	for i, msg := range a.History {
 		if msg.Role == llm.RoleTool && skillCallIDs[msg.ToolCallID] {
-			a.History[i] = llm.ToolMessage(msg.ToolCallID, "[Skill 内容仅对原任务有效，已从历史中移除]")
+			a.History[i] = llm.ToolMessage(msg.ToolCallID, "[Skill content was valid only for the original task and has been removed from history]")
 		}
 	}
 }

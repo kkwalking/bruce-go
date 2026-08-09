@@ -115,44 +115,44 @@ func RequiresApproval(toolName string) bool {
 
 func DangerLevel(toolName string) string {
 	if strings.HasPrefix(toolName, "mcp_") || strings.HasPrefix(toolName, "mcp__") {
-		return "中危"
+		return "medium risk"
 	}
 	switch toolName {
 	case "execute_command":
-		return "高危"
+		return "high risk"
 	case "edit_file", "write_file", "create_project":
-		return "中危"
+		return "medium risk"
 	default:
-		return "安全"
+		return "safe"
 	}
 }
 
 func RiskDescription(toolName string) string {
 	if strings.HasPrefix(toolName, "mcp_") || strings.HasPrefix(toolName, "mcp__") {
-		return "将调用第三方 MCP 工具，可能访问本地或远程资源"
+		return "Calls a third-party MCP tool that may access local or remote resources"
 	}
 	switch toolName {
 	case "execute_command":
-		return "将在系统上执行 Shell 命令，可能修改文件、安装软件或影响系统状态"
+		return "Executes a shell command that may modify files, install software, or affect system state"
 	case "edit_file":
-		return "将修改文件中的匹配文本"
+		return "Modifies matching text in a file"
 	case "write_file":
-		return "将写入或覆盖文件内容"
+		return "Writes or overwrites file content"
 	case "create_project":
-		return "将在磁盘上创建新目录和文件"
+		return "Creates new directories and files on disk"
 	default:
-		return "安全的只读操作"
+		return "Safe read-only operation"
 	}
 }
 
 func (r Request) DisplayText() string {
 	args := formatArgs(r.Arguments)
 	lines := []string{
-		"需要审批",
-		"工具: " + r.ToolName,
-		"等级: " + r.DangerLevel,
-		"风险: " + r.RiskDescription,
-		"参数:",
+		"Approval required",
+		"Tool: " + r.ToolName,
+		"Level: " + r.DangerLevel,
+		"Risk: " + r.RiskDescription,
+		"Arguments:",
 	}
 	lines = append(lines, args...)
 	width := 58
@@ -169,7 +169,7 @@ func (r Request) DisplayText() string {
 
 func formatArgs(raw string) []string {
 	if strings.TrimSpace(raw) == "" {
-		return []string{"  (空)"}
+		return []string{"  (empty)"}
 	}
 	var data map[string]any
 	if json.Unmarshal([]byte(raw), &data) == nil {

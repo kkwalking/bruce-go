@@ -37,7 +37,7 @@ func discoverGitLayout(workspace string) (GitLayout, error) {
 		line := strings.TrimSpace(strings.SplitN(string(data), "\n", 2)[0])
 		value, ok := strings.CutPrefix(line, "gitdir:")
 		if !ok || strings.TrimSpace(value) == "" {
-			return GitLayout{}, errors.New("无效 .git gitdir 指针")
+			return GitLayout{}, errors.New("invalid .git gitdir pointer")
 		}
 		value = strings.TrimSpace(value)
 		if !filepath.IsAbs(value) {
@@ -45,20 +45,20 @@ func discoverGitLayout(workspace string) (GitLayout, error) {
 		}
 		gitDir, err = canonicalAbsolute(value)
 	} else {
-		return GitLayout{}, errors.New(".git 既不是目录也不是普通文件")
+		return GitLayout{}, errors.New(".git is neither a directory nor a regular file")
 	}
 	if err != nil {
 		return GitLayout{}, err
 	}
 	if err := ownedDirectory(gitDir); err != nil {
-		return GitLayout{}, fmt.Errorf("gitdir 不可信: %w", err)
+		return GitLayout{}, fmt.Errorf("untrusted gitdir: %w", err)
 	}
 
 	commonDir := gitDir
 	if data, readErr := os.ReadFile(filepath.Join(gitDir, "commondir")); readErr == nil {
 		value := strings.TrimSpace(string(data))
 		if value == "" {
-			return GitLayout{}, errors.New("空 commondir")
+			return GitLayout{}, errors.New("commondir is empty")
 		}
 		if !filepath.IsAbs(value) {
 			value = filepath.Join(gitDir, value)
@@ -69,11 +69,11 @@ func discoverGitLayout(workspace string) (GitLayout, error) {
 		}
 	}
 	if err := ownedDirectory(commonDir); err != nil {
-		return GitLayout{}, fmt.Errorf("git common dir 不可信: %w", err)
+		return GitLayout{}, fmt.Errorf("untrusted Git common directory: %w", err)
 	}
 	for _, required := range []string{"HEAD", "objects", "refs"} {
 		if _, statErr := os.Stat(filepath.Join(commonDir, required)); statErr != nil {
-			return GitLayout{}, fmt.Errorf("git common dir 缺少 %s", required)
+			return GitLayout{}, fmt.Errorf("Git common directory is missing %s", required)
 		}
 	}
 
@@ -81,14 +81,14 @@ func discoverGitLayout(workspace string) (GitLayout, error) {
 	if linked {
 		worktreesRoot := filepath.Join(commonDir, "worktrees")
 		if !pathContains(worktreesRoot, gitDir) {
-			return GitLayout{}, errors.New("linked worktree gitdir 不在 common/worktrees 下")
+			return GitLayout{}, errors.New("linked-worktree gitdir is not under common/worktrees")
 		}
 		backPointer, readErr := os.ReadFile(filepath.Join(gitDir, "gitdir"))
 		if readErr != nil {
-			return GitLayout{}, errors.New("linked worktree 缺少 gitdir 回指")
+			return GitLayout{}, errors.New("linked worktree is missing its gitdir backlink")
 		}
 		if filepath.Clean(strings.TrimSpace(string(backPointer))) != filepath.Clean(marker) {
-			return GitLayout{}, errors.New("linked worktree gitdir 回指与 workspace 不匹配")
+			return GitLayout{}, errors.New("linked-worktree gitdir backlink does not match the workspace")
 		}
 	}
 
@@ -138,14 +138,14 @@ func ownedDirectory(path string) error {
 		return err
 	}
 	if !info.IsDir() {
-		return errors.New("不是目录")
+		return errors.New("not a directory")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return errors.New("无法读取目录所有者")
+		return errors.New("cannot determine directory owner")
 	}
 	if int(stat.Uid) != os.Geteuid() {
-		return fmt.Errorf("目录 uid=%d，当前 uid=%d", stat.Uid, os.Geteuid())
+		return fmt.Errorf("directory uid=%d, current uid=%d", stat.Uid, os.Geteuid())
 	}
 	return nil
 }

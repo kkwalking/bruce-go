@@ -75,7 +75,7 @@ func loadDir(dir string, source Source, skills map[string]Definition, diagnostic
 		return
 	}
 	if err != nil {
-		*diagnostics = append(*diagnostics, dir+": 无法扫描目录: "+err.Error())
+		*diagnostics = append(*diagnostics, dir+": failed to scan directory: "+err.Error())
 		return
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
@@ -90,7 +90,7 @@ func loadDir(dir string, source Source, skills map[string]Definition, diagnostic
 			continue
 		}
 		if previous, ok := skills[def.Name]; ok {
-			*overrides = append(*overrides, def.Name+": "+string(source)+" 覆盖 "+string(previous.Source))
+			*overrides = append(*overrides, def.Name+": "+string(source)+" overrides "+string(previous.Source))
 		}
 		skills[def.Name] = def
 	}
@@ -103,7 +103,7 @@ func parseFile(file string, source Source) (Definition, error) {
 	}
 	lines := strings.Split(string(data), "\n")
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
-		return Definition{}, errors.New("必须以 YAML frontmatter 开头")
+		return Definition{}, errors.New("file must begin with YAML frontmatter")
 	}
 	meta := map[string]string{}
 	close := -1
@@ -118,19 +118,19 @@ func parseFile(file string, source Source) (Definition, error) {
 		}
 	}
 	if close < 0 {
-		return Definition{}, errors.New("YAML frontmatter 缺少结束标记 ---")
+		return Definition{}, errors.New("YAML frontmatter is missing the closing --- delimiter")
 	}
 	name := strings.TrimSpace(meta["name"])
 	description := strings.TrimSpace(meta["description"])
 	instructions := strings.TrimSpace(strings.Join(lines[close+1:], "\n"))
 	if !validName.MatchString(name) {
-		return Definition{}, errors.New("name 必须匹配 [a-z0-9._-]+")
+		return Definition{}, errors.New("name must match [a-z0-9._-]+")
 	}
 	if description == "" {
-		return Definition{}, errors.New("description 不能为空")
+		return Definition{}, errors.New("description must not be empty")
 	}
 	if instructions == "" {
-		return Definition{}, errors.New("Skill 指令正文不能为空")
+		return Definition{}, errors.New("Skill instruction body must not be empty")
 	}
 	return Definition{Name: name, Description: description, Instructions: instructions, RootDir: filepath.Dir(file), File: file, Source: source}, nil
 }
@@ -202,7 +202,7 @@ func (c *Catalog) CatalogPrompt() string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("可用 Skills（当前仅提供名称和描述）：\n当用户任务与某个 Skill 描述匹配时，先调用 load_skill(name) 加载完整指令，再继续任务。\n")
+	b.WriteString("Available Skills (only names and descriptions are provided here):\nWhen the user's task matches a Skill description, call load_skill(name) to load its complete instructions before continuing the task.\n")
 	for _, skill := range skills {
 		line := "- " + skill.Name + ": " + skill.Description + "\n"
 		if b.Len()+len(line) > 8000 {
@@ -228,7 +228,7 @@ func (c *Catalog) LoadSkill(name string) (string, error) {
 		return existing, nil
 	}
 	if len(c.active) >= 3 {
-		return "", errors.New("当前任务最多激活 3 个 Skill")
+		return "", errors.New("at most three Skills may be active for the current task")
 	}
 	var def Definition
 	found := false
@@ -240,9 +240,9 @@ func (c *Catalog) LoadSkill(name string) (string, error) {
 		}
 	}
 	if !found {
-		return "", errors.New("未知 Skill: " + name)
+		return "", errors.New("unknown Skill: " + name)
 	}
-	section := "## Skill: " + def.Name + "\n描述: " + def.Description + "\n\n" + def.Instructions
+	section := "## Skill: " + def.Name + "\nDescription: " + def.Description + "\n\n" + def.Instructions
 	if len(section) > 24000 {
 		section = section[:24000]
 	}
@@ -266,14 +266,14 @@ func (c *Catalog) ReadResource(skillName, rawPath string) (string, error) {
 	active := c.active[skillName] != ""
 	c.mu.Unlock()
 	if !active {
-		return "", errors.New("Skill 未在当前任务中激活: " + skillName)
+		return "", errors.New("Skill is not active for the current task: " + skillName)
 	}
 	def, ok := c.Find(skillName)
 	if !ok {
-		return "", errors.New("未知 Skill: " + skillName)
+		return "", errors.New("unknown Skill: " + skillName)
 	}
 	if filepath.IsAbs(rawPath) || strings.TrimSpace(rawPath) == "" {
-		return "", errors.New("资源路径必须是 Skill 内的相对路径")
+		return "", errors.New("resource path must be relative to the Skill directory")
 	}
 	rootReal, err := filepath.EvalSymlinks(def.RootDir)
 	if err != nil {
@@ -282,10 +282,10 @@ func (c *Catalog) ReadResource(skillName, rawPath string) (string, error) {
 	target := filepath.Clean(filepath.Join(def.RootDir, rawPath))
 	targetReal, err := filepath.EvalSymlinks(target)
 	if err != nil {
-		return "", errors.New("资源不存在: " + rawPath)
+		return "", errors.New("resource does not exist: " + rawPath)
 	}
 	if !strings.HasPrefix(targetReal, rootReal+string(os.PathSeparator)) && targetReal != rootReal {
-		return "", errors.New("资源路径通过符号链接逃逸 Skill 目录: " + rawPath)
+		return "", errors.New("resource path escapes the Skill directory through a symlink: " + rawPath)
 	}
 	data, err := os.ReadFile(targetReal)
 	if err != nil {
@@ -293,7 +293,7 @@ func (c *Catalog) ReadResource(skillName, rawPath string) (string, error) {
 	}
 	text := string(data)
 	if len(text) > 12000 {
-		text = text[:12000] + "\n... Skill 资源过长，已截断 ..."
+		text = text[:12000] + "\n... Skill resource exceeded the limit and was truncated ..."
 	}
 	return text, nil
 }
@@ -301,8 +301,8 @@ func (c *Catalog) ReadResource(skillName, rawPath string) (string, error) {
 func RegisterTools(registry *tool.Registry, catalog *Catalog) {
 	registry.Register(tool.Tool{
 		Name:        LoadToolName,
-		Description: "加载一个 Skill 的完整工作流指令；仅当用户任务与 Skill 描述匹配时调用",
-		Parameters:  rawSchema("name", "要加载的 Skill name"),
+		Description: "Load a Skill's complete workflow instructions; call only when the user's task matches the Skill description",
+		Parameters:  rawSchema("name", "Name of the Skill to load"),
 		Exec: func(_ context.Context, args map[string]string) (string, error) {
 			return catalog.LoadSkill(args["name"])
 		},
@@ -310,8 +310,8 @@ func RegisterTools(registry *tool.Registry, catalog *Catalog) {
 	})
 	registry.Register(tool.Tool{
 		Name:        ResourceToolName,
-		Description: "读取当前任务已加载 Skill 目录内的只读资源文件；必须先调用 load_skill",
-		Parameters:  rawSchema("skill", "已激活 Skill 的 name", "path", "Skill 目录内的相对资源路径"),
+		Description: "Read a resource file from a Skill loaded for the current task; load_skill must be called first",
+		Parameters:  rawSchema("skill", "Name of the active Skill", "path", "Resource path relative to the Skill directory"),
 		Exec: func(_ context.Context, args map[string]string) (string, error) {
 			return catalog.ReadResource(args["skill"], args["path"])
 		},
@@ -351,13 +351,13 @@ func ParseInvocation(input string) (Invocation, error) {
 			seen[name] = true
 			names = append(names, name)
 			if len(names) > 3 {
-				return Invocation{}, errors.New("一次最多显式指定 3 个 Skill")
+				return Invocation{}, errors.New("at most three Skills may be specified explicitly at once")
 			}
 		}
 		remaining = strings.TrimLeft(remaining[match[1]:], " \t\r\n")
 	}
 	if len(names) > 0 && strings.TrimSpace(remaining) == "" {
-		return Invocation{}, errors.New("显式 Skill 后缺少任务内容，用法: $skill-name <任务>")
+		return Invocation{}, errors.New("task text is required after an explicit Skill; usage: $skill-name <task>")
 	}
 	return Invocation{Names: names, Task: remaining}, nil
 }

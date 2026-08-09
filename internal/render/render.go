@@ -28,7 +28,7 @@ Messages: %d`, ctx.SessionID, ctx.File, ctx.Mode, empty(ctx.ActiveLeaf, "(none)"
 
 func Sessions(summaries []session.Summary) string {
 	if len(summaries) == 0 {
-		return "当前工作目录没有可恢复的 session。"
+		return "There are no resumable sessions in the current working directory."
 	}
 	var b strings.Builder
 	for _, summary := range summaries {
@@ -44,7 +44,7 @@ func Sessions(summaries []session.Summary) string {
 func Skills(skills []skill.Definition, diagnostics, overrides []string) string {
 	var b strings.Builder
 	if len(skills) == 0 {
-		b.WriteString("未发现 Skill。")
+		b.WriteString("No Skills found.")
 	} else {
 		for _, def := range skills {
 			fmt.Fprintf(&b, "- %s [%s]: %s\n", def.Name, def.Source, def.Description)
@@ -77,7 +77,7 @@ Description: %s
 
 func MCP(statuses []mcp.ServerStatus) string {
 	if len(statuses) == 0 {
-		return "未配置 MCP server。"
+		return "No MCP servers configured."
 	}
 	var b strings.Builder
 	for _, s := range statuses {

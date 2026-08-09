@@ -12,6 +12,20 @@ import (
 	"bruce-go/internal/tool"
 )
 
+func TestBaseSystemPromptSelectsTheAppropriateResponseLanguage(t *testing.T) {
+	for _, want := range []string{
+		"You are Bruce Coding Agent",
+		"Use tool calls whenever",
+		"use the language of the user's latest request",
+		"explicitly requests a different language",
+		"For mixed-language requests, use the dominant language",
+	} {
+		if !strings.Contains(baseSystemPrompt, want) {
+			t.Fatalf("base system prompt missing %q:\n%s", want, baseSystemPrompt)
+		}
+	}
+}
+
 func TestReActRunsToolCallsAndReturnsFinalAnswer(t *testing.T) {
 	registry := tool.EmptyRegistry(t.TempDir())
 	registry.Register(tool.Tool{
@@ -25,7 +39,7 @@ func TestReActRunsToolCallsAndReturnsFinalAnswer(t *testing.T) {
 	})
 	client := &FakeClient{Responses: []llm.ChatResponse{
 		{ToolCalls: []llm.ToolCall{{ID: "call_1", Function: llm.FunctionCall{Name: "echo", Arguments: `{"text":"hello"}`}}}},
-		{Content: "完成"},
+		{Content: "Done"},
 	}}
 	a := New(client, registry, "", runtime.DefaultConcurrency(), nil)
 
@@ -33,7 +47,7 @@ func TestReActRunsToolCallsAndReturnsFinalAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out != "完成" {
+	if out != "Done" {
 		t.Fatalf("out = %q", out)
 	}
 	if client.Calls != 2 {
@@ -53,7 +67,7 @@ func TestReActRunsToolCallsAndReturnsFinalAnswer(t *testing.T) {
 func TestAgentPersistsAssistantMetadataAndUsage(t *testing.T) {
 	client := &FakeClient{Provider: "provider-x", Model: "model-y", Responses: []llm.ChatResponse{
 		{ToolCalls: []llm.ToolCall{{ID: "call", Function: llm.FunctionCall{Name: "missing", Arguments: `{}`}}}, InputTokens: 10, OutputTokens: 2, CachedInputTokens: 3, FinishReason: "tool_calls"},
-		{Content: "完成", InputTokens: 20, OutputTokens: 4, CachedInputTokens: 5, FinishReason: "stop"},
+		{Content: "Done", InputTokens: 20, OutputTokens: 4, CachedInputTokens: 5, FinishReason: "stop"},
 	}}
 	a := New(client, tool.EmptyRegistry(t.TempDir()), "", runtime.DefaultConcurrency(), nil)
 	if _, err := a.Run(context.Background(), llm.PreparedInput{Message: llm.User("run")}, "", "run"); err != nil {
@@ -79,18 +93,18 @@ func TestAgentPersistsAssistantMetadataAndUsage(t *testing.T) {
 func TestAgentOverflowIsTypedAndContinueDoesNotDuplicateUser(t *testing.T) {
 	client := &FakeClient{Err: errors.New("input exceeds the context window")}
 	a := New(client, tool.EmptyRegistry(t.TempDir()), "", runtime.DefaultConcurrency(), nil)
-	_, err := a.Run(context.Background(), llm.PreparedInput{Message: llm.User("唯一用户消息")}, "", "run")
+	_, err := a.Run(context.Background(), llm.PreparedInput{Message: llm.User("The only user message")}, "", "run")
 	if !llm.IsContextOverflowError(err) {
 		t.Fatalf("error = %v", err)
 	}
 	client.Err = nil
-	client.Responses = []llm.ChatResponse{{Content: "恢复完成", FinishReason: "stop"}}
-	if out, err := a.Continue(context.Background(), "", "run"); err != nil || out != "恢复完成" {
+	client.Responses = []llm.ChatResponse{{Content: "Resume complete", FinishReason: "stop"}}
+	if out, err := a.Continue(context.Background(), "", "run"); err != nil || out != "Resume complete" {
 		t.Fatalf("continue = %q, %v", out, err)
 	}
 	users := 0
 	for _, message := range a.History {
-		if message.Role == llm.RoleUser && message.Content == "唯一用户消息" {
+		if message.Role == llm.RoleUser && message.Content == "The only user message" {
 			users++
 		}
 	}
@@ -126,7 +140,7 @@ func TestReActEmitsDurableToolTranscriptInProtocolOrder(t *testing.T) {
 	bus.Subscribe(func(evt event.Event) { events = append(events, evt) })
 	client := &FakeClient{Responses: []llm.ChatResponse{
 		{ToolCalls: []llm.ToolCall{{ID: "call_1", Function: llm.FunctionCall{Name: "echo", Arguments: `{"text":"hello"}`}}}},
-		{Content: "完成"},
+		{Content: "Done"},
 	}}
 	a := New(client, registry, "", runtime.DefaultConcurrency(), bus)
 
@@ -173,7 +187,7 @@ func TestReActAppendsAllToolMessagesBeforeImageMessage(t *testing.T) {
 			{ID: "image_1", Function: llm.FunctionCall{Name: "image_tool", Arguments: `{}`}},
 			{ID: "echo_1", Function: llm.FunctionCall{Name: "echo", Arguments: `{}`}},
 		}},
-		{Content: "完成"},
+		{Content: "Done"},
 	}}
 	a := New(client, registry, "", runtime.DefaultConcurrency(), nil)
 	if _, err := a.Run(context.Background(), llm.PreparedInput{Text: "run", Message: llm.User("run")}, "", "run_1"); err != nil {
@@ -212,7 +226,7 @@ func TestNetworkErrorAssistantIsNonDurable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "网络错误") {
+	if !strings.Contains(out, "Network error") {
 		t.Fatalf("out = %q", out)
 	}
 	if len(completed) != 2 || !completed[0].Durable || completed[0].Message.Role != llm.RoleUser || completed[1].Durable || completed[1].Message.Role != llm.RoleAssistant {
@@ -232,7 +246,7 @@ func TestSkillToolResultIsRedactedAfterTask(t *testing.T) {
 	})
 	client := &recordingClient{responses: []llm.ChatResponse{
 		{ToolCalls: []llm.ToolCall{{ID: "load_1", Function: llm.FunctionCall{Name: "load_skill", Arguments: `{"name":"review"}`}}}},
-		{Content: "完成"},
+		{Content: "Done"},
 	}}
 	a := New(client, registry, "", runtime.DefaultConcurrency(), nil)
 
@@ -242,7 +256,7 @@ func TestSkillToolResultIsRedactedAfterTask(t *testing.T) {
 	if len(client.calls) < 2 || !messagesContain(client.calls[1], "SECRET_SKILL_INSTRUCTIONS") {
 		t.Fatalf("same-task model call did not receive raw skill result: %+v", client.calls)
 	}
-	if messagesContain(a.History, "SECRET_SKILL_INSTRUCTIONS") || !messagesContain(a.History, "已从历史中移除") {
+	if messagesContain(a.History, "SECRET_SKILL_INSTRUCTIONS") || !messagesContain(a.History, "removed from history") {
 		t.Fatalf("history was not redacted: %+v", a.History)
 	}
 }
@@ -343,7 +357,7 @@ func TestAgentRetriesOnNetworkError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "网络错误") {
+	if !strings.Contains(out, "Network error") {
 		t.Fatalf("expected network error, got %q", out)
 	}
 }
@@ -359,7 +373,7 @@ func TestAgentRetryExhaustsAndReturnsError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "网络错误") {
+	if !strings.Contains(out, "Network error") {
 		t.Fatalf("expected network error in output, got %q", out)
 	}
 }

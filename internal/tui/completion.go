@@ -75,7 +75,7 @@ func completeSlash(input, word string, rt *integrated.Runtime) []CompletionItem 
 		for _, command := range cli.Commands {
 			value := topLevelCommandValue(command)
 			if matches(value, input) {
-				out = append(out, completion(value, command.Description, "bruce 命令"))
+				out = append(out, completion(value, command.Description, "Bruce command"))
 			}
 		}
 		return out
@@ -94,26 +94,26 @@ func completeSlash(input, word string, rt *integrated.Runtime) []CompletionItem 
 	case "plan":
 		if len(parts) <= 1 || (len(parts) == 2 && !strings.HasSuffix(input, " ")) {
 			return matchingOptions(prefix, "Plan", []CompletionItem{
-				completion("approve", "批准当前计划并开始执行", "Plan"),
-				completion("continue ", "带反馈继续规划", "Plan"),
-				completion("reject ", "拒绝当前计划", "Plan"),
-				completion("cancel", "取消当前计划", "Plan"),
+				completion("approve", "Approve the current plan and begin execution", "Plan"),
+				completion("continue ", "Continue planning with feedback", "Plan"),
+				completion("reject ", "Reject the current plan", "Plan"),
+				completion("cancel", "Cancel the current plan", "Plan"),
 			})
 		}
 	case "hitl", "parallel", "concurrency":
-		return matchingOptions(prefix, "状态", []CompletionItem{
-			completion("on", "开启", "状态"),
-			completion("off", "关闭", "状态"),
-			completion("status", "查看状态", "状态"),
+		return matchingOptions(prefix, "Status", []CompletionItem{
+			completion("on", "Enable", "Status"),
+			completion("off", "Disable", "Status"),
+			completion("status", "View status", "Status"),
 		})
 	case "web":
 		if len(parts) <= 1 || (len(parts) == 2 && !strings.HasSuffix(input, " ")) {
 			return matchingOptions(prefix, "Web", []CompletionItem{
-				completion("on", "开启 Web 工具", "Web"),
-				completion("off", "关闭 Web 工具", "Web"),
-				completion("status", "查看状态", "Web"),
-				completion("search ", "联网搜索", "Web"),
-				completion("fetch ", "抓取网页正文", "Web"),
+				completion("on", "Enable Web tools", "Web"),
+				completion("off", "Disable Web tools", "Web"),
+				completion("status", "View status", "Web"),
+				completion("search ", "Search the web", "Web"),
+				completion("fetch ", "Fetch web-page content", "Web"),
 			})
 		}
 	case "mcp":
@@ -139,25 +139,25 @@ func topLevelCommandValue(command cli.CommandInfo) string {
 func completeSandbox(parts []string, prefix string, inputEndsWithSpace bool) []CompletionItem {
 	if len(parts) <= 1 || (len(parts) == 2 && !inputEndsWithSpace) {
 		return matchingOptions(prefix, "Sandbox", []CompletionItem{
-			completion("status", "查看沙箱状态", "Sandbox"),
-			completion("mode ", "切换文件系统权限模式", "Sandbox"),
-			completion("network ", "切换命令网络访问", "Sandbox"),
+			completion("status", "View sandbox status", "Sandbox"),
+			completion("mode ", "Change filesystem permission mode", "Sandbox"),
+			completion("network ", "Change command network access", "Sandbox"),
 		})
 	}
 	switch strings.ToLower(parts[1]) {
 	case "mode":
 		if len(parts) == 2 || (len(parts) == 3 && !inputEndsWithSpace) {
 			return matchingOptions(prefix, "Sandbox mode", []CompletionItem{
-				completion("read-only", "workspace 只读", "Sandbox mode"),
-				completion("workspace-write", "仅允许写入 workspace", "Sandbox mode"),
-				completion("full-access", "关闭原生 Shell 沙箱", "Sandbox mode"),
+				completion("read-only", "Read-only workspace", "Sandbox mode"),
+				completion("workspace-write", "Allow writes only within the workspace", "Sandbox mode"),
+				completion("full-access", "Disable native shell sandboxing", "Sandbox mode"),
 			})
 		}
 	case "network":
 		if len(parts) == 2 || (len(parts) == 3 && !inputEndsWithSpace) {
 			return matchingOptions(prefix, "Sandbox network", []CompletionItem{
-				completion("on", "允许命令联网", "Sandbox network"),
-				completion("off", "禁止命令联网", "Sandbox network"),
+				completion("on", "Allow commands to access the network", "Sandbox network"),
+				completion("off", "Prevent commands from accessing the network", "Sandbox network"),
 			})
 		}
 	}
@@ -192,7 +192,7 @@ func completeModel(input string, rt *integrated.Runtime) []CompletionItem {
 			}
 			desc := ""
 			if strings.EqualFold(level, current) {
-				desc = "当前"
+				desc = "Current"
 			}
 			out = append(out, CompletionItem{
 				Value:       level,
@@ -217,7 +217,7 @@ func completeModel(input string, rt *integrated.Runtime) []CompletionItem {
 		}
 		description := ""
 		if option.Provider == currentModel.Provider && option.Model == currentModel.Model {
-			description = "当前模型"
+			description = "Current model"
 		}
 		out = append(out, CompletionItem{
 			Value:       selector,
@@ -233,11 +233,11 @@ func completeModel(input string, rt *integrated.Runtime) []CompletionItem {
 func completeMCP(parts []string, prefix string, inputEndsWithSpace bool, rt *integrated.Runtime) []CompletionItem {
 	if len(parts) <= 1 || (len(parts) == 2 && !inputEndsWithSpace) {
 		return matchingOptions(prefix, "MCP", []CompletionItem{
-			completion("status", "查看状态", "MCP"),
-			completion("restart ", "重启 server", "MCP"),
-			completion("logs ", "查看日志", "MCP"),
-			completion("disable ", "禁用 server", "MCP"),
-			completion("enable ", "启用 server", "MCP"),
+			completion("status", "View status", "MCP"),
+			completion("restart ", "Restart a server", "MCP"),
+			completion("logs ", "View logs", "MCP"),
+			completion("disable ", "Disable a server", "MCP"),
+			completion("enable ", "Enable a server", "MCP"),
 		})
 	}
 	sub := strings.ToLower(parts[1])
@@ -247,7 +247,7 @@ func completeMCP(parts []string, prefix string, inputEndsWithSpace bool, rt *int
 	var out []CompletionItem
 	for _, name := range rt.MCPServerNames() {
 		if matches(name, prefix) {
-			out = append(out, completion(name, "已配置 server", "MCP server"))
+			out = append(out, completion(name, "Configured server", "MCP server"))
 		}
 	}
 	return out
@@ -256,9 +256,9 @@ func completeMCP(parts []string, prefix string, inputEndsWithSpace bool, rt *int
 func completeSkill(parts []string, prefix string, inputEndsWithSpace bool, rt *integrated.Runtime) []CompletionItem {
 	if len(parts) <= 1 || (len(parts) == 2 && !inputEndsWithSpace) {
 		return matchingOptions(prefix, "Skill", []CompletionItem{
-			completion("list", "列出 Skill", "Skill"),
-			completion("show ", "查看 Skill", "Skill"),
-			completion("reload", "重新扫描", "Skill"),
+			completion("list", "List Skills", "Skill"),
+			completion("show ", "Inspect a Skill", "Skill"),
+			completion("reload", "Rescan Skills", "Skill"),
 		})
 	}
 	if strings.EqualFold(parts[1], "show") {
@@ -333,7 +333,7 @@ func completeImagePath(word string) []CompletionItem {
 		if angle {
 			value = "@image:<" + valuePath
 		}
-		out = append(out, CompletionItem{Value: value, Display: value, Description: ternary(entry.IsDir(), "目录", "文件"), Group: "图片路径", Complete: !entry.IsDir()})
+		out = append(out, CompletionItem{Value: value, Display: value, Description: ternary(entry.IsDir(), "Directory", "File"), Group: "Image path", Complete: !entry.IsDir()})
 	}
 	return out
 }

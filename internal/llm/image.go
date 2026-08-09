@@ -104,7 +104,7 @@ func ProcessImageFile(path string) (ContentPart, error) {
 
 func ProcessImageBytes(data []byte, mimeType, source string) (ContentPart, error) {
 	if len(data) == 0 {
-		return ContentPart{}, errors.New("图片内容为空: " + source)
+		return ContentPart{}, errors.New("image content is empty: " + source)
 	}
 	img, format, err := image.Decode(bytes.NewReader(data))
 	if err == nil && mimeType == "" {
@@ -131,7 +131,7 @@ func ProcessImageBytes(data []byte, mimeType, source string) (ContentPart, error
 			return ImagePart("data:image/jpeg;base64,"+base64.StdEncoding.EncodeToString(out.Bytes()), "image/jpeg", source), nil
 		}
 	}
-	return ContentPart{}, errors.New("图片压缩后仍超过限制: " + source)
+	return ContentPart{}, errors.New("image still exceeds the size limit after compression: " + source)
 }
 
 func ReadClipboardPNG(ctx context.Context) ([]byte, string, error) {
@@ -158,7 +158,7 @@ end run`
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	if err := cmd.Run(); err != nil {
-		return nil, "", errors.New("剪贴板图片读取失败: " + out.String())
+		return nil, "", errors.New("failed to read image from clipboard: " + out.String())
 	}
 	data, err := os.ReadFile(path)
 	return data, "image/png", err
@@ -171,16 +171,16 @@ func readImageRef(input string, start int) (string, int, error) {
 	}
 	pos := start + prefixLen
 	if pos >= len(input) {
-		return "", 0, errors.New("@image: 后缺少图片路径")
+		return "", 0, errors.New("missing image path after @image:")
 	}
 	if input[pos] == '<' {
 		end := strings.IndexByte(input[pos+1:], '>')
 		if end < 0 {
-			return "", 0, errors.New("@image:<...> 缺少结束的 >")
+			return "", 0, errors.New("@image:<...> is missing the closing >")
 		}
 		ref := strings.TrimSpace(input[pos+1 : pos+1+end])
 		if ref == "" {
-			return "", 0, errors.New("@image:<...> 中的图片路径不能为空")
+			return "", 0, errors.New("image path in @image:<...> must not be empty")
 		}
 		return ref, pos + 1 + end + 1, nil
 	}
@@ -190,7 +190,7 @@ func readImageRef(input string, start int) (string, int, error) {
 	}
 	ref := strings.TrimSpace(input[pos:end])
 	if ref == "" {
-		return "", 0, errors.New("@image: 后缺少图片路径")
+		return "", 0, errors.New("missing image path after @image:")
 	}
 	return ref, end, nil
 }
@@ -200,7 +200,7 @@ func resolveImagePath(ref, root string) (string, error) {
 	if strings.HasPrefix(ref, "file://") {
 		u, err := url.Parse(ref)
 		if err != nil {
-			return "", errors.New("非法 file:// 图片路径: " + ref)
+			return "", errors.New("invalid file:// image path: " + ref)
 		}
 		path = u.Path
 	} else {
@@ -212,7 +212,7 @@ func resolveImagePath(ref, root string) (string, error) {
 	path = filepath.Clean(path)
 	info, err := os.Stat(path)
 	if err != nil || info.IsDir() {
-		return "", errors.New("图片文件不存在或不是普通文件: " + path)
+		return "", errors.New("image file does not exist or is not a regular file: " + path)
 	}
 	return path, nil
 }

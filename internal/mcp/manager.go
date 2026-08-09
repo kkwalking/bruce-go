@@ -120,7 +120,7 @@ func (m *Manager) Status() []ServerStatus {
 		blockedTools := len(server.Tools) - available
 		blockedReason := server.Blocked
 		if blockedTools > 0 && blockedReason == "" {
-			blockedReason = "部分工具因当前 sandbox policy 或缺少精确 toolAccess 被阻止"
+			blockedReason = "some tools are blocked by the current sandbox policy or by missing explicit toolAccess entries"
 		}
 		statuses = append(statuses, ServerStatus{
 			Name:             server.Name,
@@ -153,7 +153,7 @@ func (m *Manager) enable(ctx context.Context, name string) error {
 	server := m.servers[name]
 	if server == nil {
 		m.mu.Unlock()
-		return errors.New("未知 MCP server: " + name)
+		return errors.New("unknown MCP server: " + name)
 	}
 	server.Enabled = true
 	if server.Ready {
@@ -194,7 +194,7 @@ func (m *Manager) enable(ctx context.Context, name string) error {
 	server = m.servers[name]
 	if server == nil {
 		_ = transport.Close()
-		return errors.New("未知 MCP server: " + name)
+		return errors.New("unknown MCP server: " + name)
 	}
 	if server.transport != nil {
 		_ = server.transport.Close()
@@ -219,7 +219,7 @@ func (m *Manager) disable(name string) error {
 	defer m.mu.Unlock()
 	server := m.servers[name]
 	if server == nil {
-		return errors.New("未知 MCP server: " + name)
+		return errors.New("unknown MCP server: " + name)
 	}
 	if server.transport != nil {
 		_ = server.transport.Close()

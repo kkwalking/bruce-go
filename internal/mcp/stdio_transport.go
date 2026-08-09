@@ -72,7 +72,7 @@ func NewStdioTransport(ctx context.Context, cfg config.MCPServerSetting, workspa
 
 func newStdioTransport(ctx context.Context, cfg config.MCPServerSetting, workspace string, launcher *sandbox.Manager) (*StdioTransport, error) {
 	if strings.TrimSpace(cfg.Command) == "" {
-		return nil, errors.New("MCP stdio command 不能为空")
+		return nil, errors.New("MCP stdio command must not be empty")
 	}
 	home, _ := os.UserHomeDir()
 	command := expandMCPVars(cfg.Command, workspace, home)

@@ -102,7 +102,7 @@ func TestSandboxCancellationKillsDescendants(t *testing.T) {
 }
 
 func TestSandboxHandlesQuotedUnicodeWorkspace(t *testing.T) {
-	workspace := filepath.Join(t.TempDir(), "space ' quote 中文")
+	workspace := filepath.Join(t.TempDir(), "space ' quote café")
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -83,7 +83,7 @@ func validateCompactionWindow(settings config.Compaction, client llm.ChatClient)
 		return nil
 	}
 	if _, err := settings.Threshold(client.MaxContextWindow()); err != nil {
-		return fmt.Errorf("模型 %s/%s 的自动压缩配置无效: %w", client.ProviderName(), client.ModelName(), err)
+		return fmt.Errorf("invalid automatic-compaction configuration for model %s/%s: %w", client.ProviderName(), client.ModelName(), err)
 	}
 	return nil
 }
@@ -220,20 +220,20 @@ func (r *Runtime) Start(ctx context.Context) {
 		}
 	}
 	if enabled == 0 {
-		r.emit(event.NewActivity("", "未配置需要启动的 MCP server。"))
+		r.emit(event.NewActivity("", "No MCP servers are configured to start."))
 		return
 	}
-	r.emit(event.NewActivity("", fmt.Sprintf("启动 MCP server (%d 个)...", enabled)))
+	r.emit(event.NewActivity("", fmt.Sprintf("Starting MCP servers (%d)...", enabled)))
 	startCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	r.MCP.StartEnabled(startCtx)
 	r.refreshMCPTools()
 	for _, status := range r.MCP.Status() {
 		if status.Error != "" {
-			r.emit(event.NewActivity("", "MCP 初始化失败: "+status.Name+": "+status.Error))
+			r.emit(event.NewActivity("", "MCP initialization failed: "+status.Name+": "+status.Error))
 		}
 	}
-	r.emit(event.NewActivity("", "MCP server 启动完成。"))
+	r.emit(event.NewActivity("", "MCP server startup complete."))
 }
 
 func (r *Runtime) Handle(ctx context.Context, input string) cli.Result {
@@ -317,7 +317,7 @@ func (r *Runtime) HandleCommand(ctx context.Context, command cli.Command) cli.Re
 		result.Output = "bye"
 	case "react":
 		result.Err = r.setMode(runtime.ModeReact)
-		result.Output = "已切换到 ReAct 模式"
+		result.Output = "Switched to ReAct mode."
 	case "plan":
 		result.Output, result.Err = r.handlePlan(ctx, command.Args, command.Raw)
 	case "model":
@@ -345,9 +345,9 @@ func (r *Runtime) HandleCommand(ctx context.Context, command cli.Command) cli.Re
 		result.Err = r.newSession()
 		if command.Name == "clear" {
 			r.HITL.ClearApprovedAll()
-			result.Output = "已清空当前对话并开启新 session"
+			result.Output = "Cleared the current conversation and started a new session."
 		} else {
-			result.Output = "已开启新 session"
+			result.Output = "Started a new session."
 		}
 		if result.Err == nil {
 			r.emit(event.NewSessionChanged(command.Name, r.Session.Context(r.Mode)))
@@ -357,7 +357,7 @@ func (r *Runtime) HandleCommand(ctx context.Context, command cli.Command) cli.Re
 		result.Err = r.Session.Resume(ref)
 		if result.Err == nil {
 			r.Mode = r.Session.Context(r.Mode).Mode
-			result.Output = "已恢复 session: " + r.Session.Context(r.Mode).SessionID
+			result.Output = "Resumed session: " + r.Session.Context(r.Mode).SessionID
 			r.rebuildAgents()
 			r.emit(event.NewSessionChanged("resume", r.Session.Context(r.Mode)))
 		}
@@ -376,7 +376,7 @@ func (r *Runtime) HandleCommand(ctx context.Context, command cli.Command) cli.Re
 			r.emit(event.NewSessionChanged("compact", r.Session.Context(r.Mode)))
 		}
 	default:
-		result.Err = errors.New("未知命令: /" + command.Name)
+		result.Err = errors.New("unknown command: /" + command.Name)
 	}
 	if result.Err != nil && result.Output == "" {
 		result.Output = result.Err.Error()
@@ -417,14 +417,14 @@ func (r *Runtime) Status() runtime.Status {
 
 func (r *Runtime) handleSandbox(ctx context.Context, args []string) (string, error) {
 	if r.Sandbox == nil {
-		return "", errors.New("sandbox 未初始化")
+		return "", errors.New("sandbox is not initialized")
 	}
 	statusText := func() string {
 		status := r.Sandbox.Status()
 		available := status.Capabilities.Available || status.Mode == sandbox.ModeFullAccess
 		network := onOff(status.NetworkAccess)
 		if status.NetworkAccess != status.ConfiguredNetworkAccess {
-			network += fmt.Sprintf(" (配置=%s)", onOff(status.ConfiguredNetworkAccess))
+			network += fmt.Sprintf(" (configured=%s)", onOff(status.ConfiguredNetworkAccess))
 		}
 		text := fmt.Sprintf("Sandbox: mode=%s, backend=%s, network=%s, available=%s",
 			status.Mode, status.Capabilities.Backend, network, onOff(available))
@@ -442,7 +442,7 @@ func (r *Runtime) handleSandbox(ctx context.Context, args []string) (string, err
 	switch args[0] {
 	case "mode":
 		if len(args) != 2 {
-			return "", errors.New("用法: /sandbox mode read-only|workspace-write|full-access")
+			return "", errors.New("usage: /sandbox mode read-only|workspace-write|full-access")
 		}
 		mode, err := sandbox.ParseMode(args[1])
 		if err != nil {
@@ -461,7 +461,7 @@ func (r *Runtime) handleSandbox(ctx context.Context, args []string) (string, err
 		return statusText(), nil
 	case "network":
 		if len(args) != 2 || (args[1] != "on" && args[1] != "off") {
-			return "", errors.New("用法: /sandbox network on|off")
+			return "", errors.New("usage: /sandbox network on|off")
 		}
 		enabled := args[1] == "on"
 		if err := r.MCP.Reconfigure(ctx, func() error {
@@ -474,11 +474,11 @@ func (r *Runtime) handleSandbox(ctx context.Context, args []string) (string, err
 		r.rebuildAgents()
 		text := statusText()
 		if !enabled && r.Sandbox.Mode() == sandbox.ModeFullAccess {
-			text += "\n注意: full-access 模式下网络始终开启，该设置将在切换到受限模式后生效"
+			text += "\nNote: network access is always enabled in full-access mode; this setting will take effect after switching to a restricted mode."
 		}
 		return text, nil
 	default:
-		return "", errors.New("用法: /sandbox [status|mode <mode>|network on|off]")
+		return "", errors.New("usage: /sandbox [status|mode <mode>|network on|off]")
 	}
 }
 
@@ -487,7 +487,7 @@ func (r *Runtime) handlePlan(ctx context.Context, args []string, raw string) (st
 		if err := r.setMode(runtime.ModePlan); err != nil {
 			return "", err
 		}
-		return "已切换到 Plan 模式。输入任务开始规划，或使用 /plan <任务> 直接开始。", nil
+		return "Switched to Plan mode. Enter a task to begin planning, or use /plan <task> directly.", nil
 	}
 	sub := strings.ToLower(args[0])
 	switch sub {
@@ -503,7 +503,7 @@ func (r *Runtime) handlePlan(ctx context.Context, args []string, raw string) (st
 		}
 		feedback := strings.TrimSpace(strings.Join(args[1:], " "))
 		if feedback == "" {
-			feedback = "请继续完善当前计划。"
+			feedback = "Continue refining the current plan."
 		}
 		return r.runTask(ctx, feedback, true)
 	default:
@@ -519,12 +519,12 @@ func (r *Runtime) handleModel(args []string) (string, error) {
 		return r.handleModelReasoning(args[1:])
 	}
 	if r.switchable == nil {
-		return fmt.Sprintf("当前模型: %s/%s", r.Client.ProviderName(), r.Client.ModelName()), nil
+		return fmt.Sprintf("Current model: %s/%s", r.Client.ProviderName(), r.Client.ModelName()), nil
 	}
 	if len(args) == 0 {
 		current := r.switchable.Current()
 		var b strings.Builder
-		b.WriteString("当前模型: " + current.Selector() + "\n可用模型:\n")
+		b.WriteString("Current model: " + current.Selector() + "\nAvailable models:\n")
 		for _, opt := range r.switchable.Options() {
 			prefix := "  "
 			if opt.Provider == current.Provider && opt.Model == current.Model {
@@ -532,7 +532,7 @@ func (r *Runtime) handleModel(args []string) (string, error) {
 			}
 			b.WriteString(prefix + opt.Selector() + "\n")
 		}
-		b.WriteString("\n当前推理级别: " + r.ReasoningEffort() + "（/model reasoning <级别> 调整）")
+		b.WriteString("\nCurrent reasoning effort: " + r.ReasoningEffort() + " (adjust with /model reasoning <level>)")
 		return strings.TrimSpace(b.String()), nil
 	}
 	next, err := r.switchable.Switch(strings.Join(args, " "))
@@ -541,18 +541,18 @@ func (r *Runtime) handleModel(args []string) (string, error) {
 	}
 	r.Client = r.switchable
 	r.rebuildAgents()
-	return "已切换模型: " + next.Selector() + " " + r.ReasoningEffort(), nil
+	return "Switched model: " + next.Selector() + " " + r.ReasoningEffort(), nil
 }
 
 func (r *Runtime) handleModelReasoning(args []string) (string, error) {
 	current := r.ReasoningEffort()
 	if len(args) == 0 {
-		return fmt.Sprintf("当前推理级别: %s\n可选级别: off / low / medium / high / max", current), nil
+		return fmt.Sprintf("Current reasoning effort: %s\nAvailable levels: off / low / medium / high / max", current), nil
 	}
 	if err := r.SetReasoningEffort(args[0]); err != nil {
 		return "", err
 	}
-	return "已切换推理级别: " + r.ReasoningEffort(), nil
+	return "Switched reasoning effort: " + r.ReasoningEffort(), nil
 }
 
 func (r *Runtime) handleWeb(ctx context.Context, args []string) (string, error) {
@@ -562,13 +562,13 @@ func (r *Runtime) handleWeb(ctx context.Context, args []string) (string, error) 
 	switch args[0] {
 	case "on":
 		r.Web.SetEnabled(true)
-		return "Web 已开启", nil
+		return "Web enabled.", nil
 	case "off":
 		r.Web.SetEnabled(false)
-		return "Web 已关闭", nil
+		return "Web disabled.", nil
 	case "search":
 		if len(args) < 2 {
-			return "", errors.New("用法: /web search <query>")
+			return "", errors.New("usage: /web search <query>")
 		}
 		results, err := r.Web.Search(ctx, strings.Join(args[1:], " "), 5)
 		if err != nil {
@@ -577,7 +577,7 @@ func (r *Runtime) handleWeb(ctx context.Context, args []string) (string, error) 
 		return formatSearch(results), nil
 	case "fetch":
 		if len(args) != 2 {
-			return "", errors.New("用法: /web fetch <url>")
+			return "", errors.New("usage: /web fetch <url>")
 		}
 		page, err := r.Web.Fetch(ctx, args[1])
 		if err != nil {
@@ -585,7 +585,7 @@ func (r *Runtime) handleWeb(ctx context.Context, args []string) (string, error) 
 		}
 		return fmt.Sprintf("%s\n\n%s", page.Title, page.Text), nil
 	default:
-		return "", errors.New("用法: /web on|off|status|search <query>|fetch <url>")
+		return "", errors.New("usage: /web on|off|status|search <query>|fetch <url>")
 	}
 }
 
@@ -594,7 +594,7 @@ func (r *Runtime) handleMCP(ctx context.Context, args []string) (string, error) 
 		return render.MCP(r.MCP.Status()), nil
 	}
 	if len(args) < 2 {
-		return "", errors.New("用法: /mcp restart|logs|disable|enable <name>")
+		return "", errors.New("usage: /mcp restart|logs|disable|enable <name>")
 	}
 	name := args[1]
 	switch args[0] {
@@ -603,7 +603,7 @@ func (r *Runtime) handleMCP(ctx context.Context, args []string) (string, error) 
 			return "", err
 		}
 		r.refreshMCPTools()
-		return "已重启 MCP server: " + name, nil
+		return "Restarted MCP server: " + name, nil
 	case "logs":
 		return render.Lines(r.MCP.Logs(name)), nil
 	case "disable":
@@ -611,15 +611,15 @@ func (r *Runtime) handleMCP(ctx context.Context, args []string) (string, error) 
 			return "", err
 		}
 		r.refreshMCPTools()
-		return "已禁用 MCP server: " + name, nil
+		return "Disabled MCP server: " + name, nil
 	case "enable":
 		if err := r.MCP.Enable(ctx, name); err != nil {
 			return "", err
 		}
 		r.refreshMCPTools()
-		return "已启用 MCP server: " + name, nil
+		return "Enabled MCP server: " + name, nil
 	default:
-		return "", errors.New("用法: /mcp restart|logs|disable|enable <name>")
+		return "", errors.New("usage: /mcp restart|logs|disable|enable <name>")
 	}
 }
 
@@ -630,11 +630,11 @@ func (r *Runtime) handleSkill(args []string) (string, error) {
 	switch args[0] {
 	case "show":
 		if len(args) != 2 {
-			return "", errors.New("用法: /skill show <name>")
+			return "", errors.New("usage: /skill show <name>")
 		}
 		def, ok := r.Skills.Find(args[1])
 		if !ok {
-			return "", errors.New("未知 Skill: " + args[1])
+			return "", errors.New("unknown Skill: " + args[1])
 		}
 		return render.Skill(def), nil
 	case "reload":
@@ -642,7 +642,7 @@ func (r *Runtime) handleSkill(args []string) (string, error) {
 		r.rebuildAgents()
 		return render.Skills(result.Skills, result.Diagnostics, result.Overrides), nil
 	default:
-		return "", errors.New("用法: /skill list|show <name>|reload")
+		return "", errors.New("usage: /skill list|show <name>|reload")
 	}
 }
 
@@ -653,12 +653,12 @@ func (r *Runtime) handleToggle(args []string, label string, current bool, set fu
 	switch args[0] {
 	case "on":
 		set(true)
-		return label + " 已开启", nil
+		return label + " enabled.", nil
 	case "off":
 		set(false)
-		return label + " 已关闭", nil
+		return label + " disabled.", nil
 	default:
-		return "", errors.New("用法: /" + strings.ToLower(label) + " on|off|status")
+		return "", errors.New("usage: /" + strings.ToLower(label) + " on|off|status")
 	}
 }
 
@@ -702,11 +702,11 @@ func (r *Runtime) runAgentWithCompaction(ctx context.Context, currentAgent *agen
 		switch {
 		case errors.Is(err, errCompactionRequired):
 			if thresholdRetries >= 3 {
-				return "", errors.New("上下文在自动压缩后仍持续超过阈值")
+				return "", errors.New("context remains above the threshold after automatic compaction")
 			}
 			thresholdRetries++
-			if _, compactErr := r.autoCompact(ctx, runID, "阈值"); compactErr != nil {
-				r.emit(event.NewActivity(runID, "自动压缩失败，将尝试继续当前任务: "+compactErr.Error()))
+			if _, compactErr := r.autoCompact(ctx, runID, "threshold"); compactErr != nil {
+				r.emit(event.NewActivity(runID, "Automatic compaction failed; attempting to continue the current task: "+compactErr.Error()))
 				currentAgent.SkipNextBeforeChat()
 			} else {
 				currentAgent.RestoreHistory(r.Session.Context(r.Mode).Messages)
@@ -714,14 +714,14 @@ func (r *Runtime) runAgentWithCompaction(ctx context.Context, currentAgent *agen
 			out, err = currentAgent.Continue(ctx, taskContext, runID)
 		case llm.IsContextOverflowError(err):
 			if !r.Settings.Compaction.Enabled {
-				return "", fmt.Errorf("模型上下文已溢出，且自动压缩已禁用: %w", err)
+				return "", fmt.Errorf("model context overflowed and automatic compaction is disabled: %w", err)
 			}
 			if overflowRetries >= 1 {
-				return "", fmt.Errorf("自动压缩后模型上下文仍然溢出，已停止重试: %w", err)
+				return "", fmt.Errorf("model context still overflowed after automatic compaction; retries stopped: %w", err)
 			}
 			overflowRetries++
-			if _, compactErr := r.autoCompact(ctx, runID, "上下文溢出恢复"); compactErr != nil {
-				return "", fmt.Errorf("上下文溢出后的自动压缩失败: %w", compactErr)
+			if _, compactErr := r.autoCompact(ctx, runID, "context-overflow recovery"); compactErr != nil {
+				return "", fmt.Errorf("automatic compaction after context overflow failed: %w", compactErr)
 			}
 			currentAgent.RestoreHistory(r.Session.Context(r.Mode).Messages)
 			currentAgent.DiscardTrailingOverflowResponse()
@@ -742,22 +742,22 @@ func (r *Runtime) compactAfterSuccessfulTurn(ctx context.Context, runID string) 
 			if !r.Settings.Compaction.Enabled {
 				return
 			}
-			if _, err := r.autoCompact(ctx, runID, "成功响应 usage 超出上下文窗口"); err != nil {
-				r.emit(event.NewActivity(runID, "自动压缩失败，但当前回答已完成: "+err.Error()))
+			if _, err := r.autoCompact(ctx, runID, "successful response usage exceeded the context window"); err != nil {
+				r.emit(event.NewActivity(runID, "Automatic compaction failed, but the current response completed successfully: "+err.Error()))
 			}
 			return
 		}
 	}
 	needed, _, _, thresholdErr := r.compactionThreshold()
 	if thresholdErr != nil {
-		r.emit(event.NewActivity(runID, "自动压缩阈值配置无效，但当前回答已完成: "+thresholdErr.Error()))
+		r.emit(event.NewActivity(runID, "The automatic-compaction threshold is invalid, but the current response completed successfully: "+thresholdErr.Error()))
 		return
 	}
 	if !needed {
 		return
 	}
-	if _, err := r.autoCompact(ctx, runID, "回合结束阈值"); err != nil {
-		r.emit(event.NewActivity(runID, "自动压缩失败，但当前回答已完成: "+err.Error()))
+	if _, err := r.autoCompact(ctx, runID, "end-of-turn threshold"); err != nil {
+		r.emit(event.NewActivity(runID, "Automatic compaction failed, but the current response completed successfully: "+err.Error()))
 	}
 }
 
@@ -826,7 +826,7 @@ func (r *Runtime) latestAssistantResponseAfterCompaction() (llm.ChatResponse, bo
 func (r *Runtime) performCompaction(ctx context.Context, instructions string) (session.CompactionResult, error) {
 	preparation, ok := session.PrepareCompaction(r.Session.ActiveEntries(), r.Settings.Compaction)
 	if !ok {
-		return session.CompactionResult{}, errors.New("当前会话没有可安全压缩的历史，或最新节点已经是 compaction")
+		return session.CompactionResult{}, errors.New("the current session has no history that can be compacted safely, or its latest node is already a compaction")
 	}
 	result, err := session.Compact(ctx, r.Client, *preparation, instructions)
 	if err != nil {
@@ -843,7 +843,7 @@ func (r *Runtime) autoCompact(ctx context.Context, runID, reason string) (sessio
 	if err != nil {
 		return session.CompactionResult{}, err
 	}
-	r.emit(event.NewActivity(runID, fmt.Sprintf("已执行自动压缩（%s，压缩前约 %d tokens）。", reason, result.TokensBefore)))
+	r.emit(event.NewActivity(runID, fmt.Sprintf("Automatic compaction completed (%s; approximately %d tokens before compaction).", reason, result.TokensBefore)))
 	r.emit(event.NewSessionChanged("compact", r.Session.Context(r.Mode)))
 	return result, nil
 }
@@ -851,14 +851,14 @@ func (r *Runtime) autoCompact(ctx context.Context, runID, reason string) (sessio
 func (r *Runtime) compact(ctx context.Context, extra string) (string, error) {
 	entries := r.Session.ActiveEntries()
 	if len(entries) == 0 {
-		return "当前 session 没有可压缩的历史。", nil
+		return "The current session has no history to compact.", nil
 	}
 	if entries[len(entries)-1].Type == session.TypeCompaction {
-		return "", errors.New("最新节点已经是 compaction，不能连续压缩")
+		return "", errors.New("the latest node is already a compaction; consecutive compactions are not allowed")
 	}
 	preparation, ok := session.PrepareCompaction(entries, r.Settings.Compaction)
 	if !ok {
-		return "当前 session 没有可安全淘汰的历史，无需 compaction。", nil
+		return "The current session has no history that can be evicted safely; compaction is unnecessary.", nil
 	}
 	result, err := session.Compact(ctx, r.Client, *preparation, extra)
 	if err != nil {
@@ -868,7 +868,7 @@ func (r *Runtime) compact(ctx context.Context, extra string) (string, error) {
 		return "", err
 	}
 	r.rebuildAgents()
-	return fmt.Sprintf("已压缩会话上下文（压缩前约 %d tokens，保留边界 %s）。", result.TokensBefore, result.FirstKeptEntryID), nil
+	return fmt.Sprintf("Session context compacted (approximately %d tokens before compaction; retained boundary: %s).", result.TokensBefore, result.FirstKeptEntryID), nil
 }
 
 func (r *Runtime) refreshMCPTools() {
@@ -890,7 +890,7 @@ func (r *Runtime) refreshMCPTools() {
 }
 
 func (r *Runtime) rebuildAgents() {
-	additional := "当前工作目录: " + r.Workspace
+	additional := "Current working directory: " + r.Workspace
 	if catalog := strings.TrimSpace(r.Skills.CatalogPrompt()); catalog != "" {
 		additional += "\n\n" + catalog
 	}
@@ -902,12 +902,12 @@ func (r *Runtime) rebuildAgents() {
 	beforeChat := func(messages []llm.Message) error {
 		needed, tokens, threshold, err := r.compactionThresholdFor(messages)
 		if err != nil {
-			return fmt.Errorf("自动压缩阈值配置无效: %w", err)
+			return fmt.Errorf("invalid automatic-compaction threshold configuration: %w", err)
 		}
 		if !needed {
 			return nil
 		}
-		return fmt.Errorf("%w: 当前约 %d tokens，阈值 %d", errCompactionRequired, tokens, threshold)
+		return fmt.Errorf("%w: current estimate is approximately %d tokens; threshold is %d", errCompactionRequired, tokens, threshold)
 	}
 	r.react.BeforeChat = beforeChat
 	r.planning.BeforeChat = beforeChat
@@ -936,7 +936,7 @@ func (r *Runtime) ReasoningEffort() string {
 
 func (r *Runtime) SetReasoningEffort(level string) error {
 	if r.switchable == nil {
-		return errors.New("当前运行时不支持调整推理级别")
+		return errors.New("the current runtime does not support changing reasoning effort")
 	}
 	return r.switchable.SetReasoningEffort(level)
 }
@@ -963,12 +963,12 @@ func (r *Runtime) subscribeSessionRecorder() {
 		case event.MessageCompleted:
 			if e.Durable {
 				if err := r.Session.AppendMessage(e.Message); err != nil {
-					r.emit(event.NewActivity(e.RunID, "Session 写入失败: "+err.Error()))
+					r.emit(event.NewActivity(e.RunID, "Failed to write session: "+err.Error()))
 				}
 			}
 		case event.ModeChanged:
 			if err := r.Session.AppendModeChange(e.Mode); err != nil {
-				r.emit(event.NewActivity(e.RunID, "Session 写入失败: "+err.Error()))
+				r.emit(event.NewActivity(e.RunID, "Failed to write session: "+err.Error()))
 			}
 		}
 	})
@@ -977,7 +977,7 @@ func (r *Runtime) subscribeSessionRecorder() {
 func (r *Runtime) taskContext() string {
 	var sections []string
 	if loaded := strings.TrimSpace(instructions.Load(r.HomeDir, r.Workspace).Prompt); loaded != "" {
-		sections = append(sections, "AGENTS 指令:\n"+loaded)
+		sections = append(sections, "AGENTS instructions:\n"+loaded)
 	}
 	if active := strings.TrimSpace(r.Skills.ActiveInstructions()); active != "" {
 		sections = append(sections, active)
@@ -997,9 +997,9 @@ func (r *Runtime) taskContextWithPlan(base string) string {
 	content, _ := r.readPlanContent(state)
 	switch {
 	case r.Mode == runtime.ModePlan && state.Pending():
-		sections = append(sections, fmt.Sprintf("当前待审批计划:\nPlan ID: %s\nRevision: %d\nPath: %s\n\n%s", state.ID, state.Revision, state.Path, content))
+		sections = append(sections, fmt.Sprintf("Current plan pending approval:\nPlan ID: %s\nRevision: %d\nPath: %s\n\n%s", state.ID, state.Revision, state.Path, content))
 	case r.Mode == runtime.ModeReact && state.Approved():
-		sections = append(sections, fmt.Sprintf("已批准计划执行上下文:\n用户输入 `/plan approve` 表示用户已经批准下方计划，并要求你立即按该计划执行项目修改。遇到该输入时，不要把它当作普通 slash command，也不要重新要求用户审批计划。\nPlan ID: %s\nRevision: %d\nPath: %s\n\n%s", state.ID, state.Revision, state.Path, content))
+		sections = append(sections, fmt.Sprintf("Approved-plan execution context:\nThe user input `/plan approve` confirms that the user approved the plan below and requires you to implement its project changes immediately. Treat that input as approval and authorization to execute the plan, not as an ordinary slash command. Do not request plan approval again.\nPlan ID: %s\nRevision: %d\nPath: %s\n\n%s", state.ID, state.Revision, state.Path, content))
 	}
 	return strings.Join(sections, "\n\n")
 }
@@ -1027,13 +1027,13 @@ func (r *Runtime) presentPlan(runID, out string) (string, error) {
 		return out, nil
 	}
 	if state.Empty() {
-		next, err := r.planStore.Replace(state, content, "Planning Agent 输出计划")
+		next, err := r.planStore.Replace(state, content, "Planning Agent produced plan")
 		if err != nil {
 			return "", err
 		}
 		state = next
 	}
-	presented, err := r.planStore.Record(runtime.PlanActionPresented, state, content, "计划已展示")
+	presented, err := r.planStore.Record(runtime.PlanActionPresented, state, content, "Plan presented")
 	if err != nil {
 		return "", err
 	}
@@ -1056,20 +1056,20 @@ func planEventFromState(state runtime.PlanState) runtime.PlanEvent {
 func (r *Runtime) approvePlan(ctx context.Context, raw string) (string, error) {
 	state := r.currentPlanState()
 	if state.Empty() || !state.Pending() {
-		return "", errors.New("当前没有待批准计划")
+		return "", errors.New("there is no plan pending approval")
 	}
 	content, err := r.readPlanContent(state)
 	if err != nil {
 		return "", err
 	}
-	approved, err := r.planStore.Record(runtime.PlanActionApproved, state, content, "用户批准计划")
+	approved, err := r.planStore.Record(runtime.PlanActionApproved, state, content, "User approved plan")
 	if err != nil {
 		return "", err
 	}
 	if err := r.setMode(runtime.ModeReact); err != nil {
 		return "", err
 	}
-	if _, err := r.planStore.Record(runtime.PlanActionHandoff, approved, content, "交接给 ReAct 执行"); err != nil {
+	if _, err := r.planStore.Record(runtime.PlanActionHandoff, approved, content, "Handed off to ReAct for execution"); err != nil {
 		return "", err
 	}
 	display := strings.TrimSpace(raw)
@@ -1082,12 +1082,12 @@ func (r *Runtime) approvePlan(ctx context.Context, raw string) (string, error) {
 func (r *Runtime) rejectPlan(action runtime.PlanAction, reason string) (string, error) {
 	state := r.currentPlanState()
 	if state.Empty() {
-		return "", errors.New("当前没有 active plan")
+		return "", errors.New("there is no active plan")
 	}
 	content, _ := r.readPlanContent(state)
-	summary := "用户取消计划"
+	summary := "User canceled plan"
 	if action == runtime.PlanActionRejected {
-		summary = "用户拒绝计划"
+		summary = "User rejected plan"
 	}
 	if strings.TrimSpace(reason) != "" {
 		summary += ": " + strings.TrimSpace(reason)
@@ -1099,15 +1099,15 @@ func (r *Runtime) rejectPlan(action runtime.PlanAction, reason string) (string, 
 		return "", err
 	}
 	if action == runtime.PlanActionRejected {
-		return "已拒绝计划，未执行项目修改。", nil
+		return "Plan rejected; no project changes were made.", nil
 	}
-	return "已取消计划，未执行项目修改。", nil
+	return "Plan canceled; no project changes were made.", nil
 }
 
 func (r *Runtime) readPlanContent(state runtime.PlanState) (string, error) {
 	if r.planStore == nil {
 		if strings.TrimSpace(state.Content) == "" {
-			return "", errors.New("plan store 未初始化")
+			return "", errors.New("plan store is not initialized")
 		}
 		return state.Content, nil
 	}
@@ -1130,7 +1130,7 @@ func (r *Runtime) pendingPlanInputPrompt() (string, bool) {
 		return "", false
 	}
 	var b strings.Builder
-	b.WriteString("当前已有待审批计划。要开始实现，请输入 `/plan approve`。")
+	b.WriteString("A plan is currently pending approval. Enter `/plan approve` to begin implementation.")
 	if state.ID != "" {
 		fmt.Fprintf(&b, "\nPlan: %s", state.ID)
 		if state.Revision > 0 {
@@ -1140,13 +1140,13 @@ func (r *Runtime) pendingPlanInputPrompt() (string, bool) {
 			fmt.Fprintf(&b, " path=%s", state.Path)
 		}
 	}
-	b.WriteString("\n如需调整计划，请使用 `/plan continue <反馈>`；如需放弃，请使用 `/plan reject` 或 `/plan cancel`。")
+	b.WriteString("\nTo revise the plan, use `/plan continue <feedback>`. To discard it, use `/plan reject` or `/plan cancel`.")
 	return b.String(), true
 }
 
 func formatSearch(results []web.Result) string {
 	if len(results) == 0 {
-		return "没有搜索结果"
+		return "No search results."
 	}
 	var b strings.Builder
 	for i, result := range results {
@@ -1157,9 +1157,9 @@ func formatSearch(results []web.Result) string {
 
 func onOff(v bool) string {
 	if v {
-		return "开启"
+		return "on"
 	}
-	return "关闭"
+	return "off"
 }
 
 func abs(path string) string {

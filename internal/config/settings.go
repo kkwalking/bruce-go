@@ -100,10 +100,10 @@ type Compaction struct {
 
 func (c Compaction) Validate() error {
 	if c.ContextWindowRatio <= 0 || c.ContextWindowRatio > 1 || math.IsNaN(c.ContextWindowRatio) {
-		return errors.New("compaction.contextWindowRatio 必须大于 0 且不超过 1")
+		return errors.New("compaction.contextWindowRatio must be greater than 0 and at most 1")
 	}
 	if c.ReserveTokens < 0 {
-		return errors.New("compaction.reserveTokens 不能为负数")
+		return errors.New("compaction.reserveTokens must not be negative")
 	}
 	return nil
 }
@@ -119,7 +119,7 @@ func (c Compaction) Threshold(contextWindow int) (int, error) {
 	threshold := usableWindow - c.ReserveTokens
 	if threshold <= 0 {
 		return 0, fmt.Errorf(
-			"compaction 自动压缩阈值无效: contextWindow(%d) × contextWindowRatio(%g) = %d，必须大于 reserveTokens(%d)",
+			"invalid automatic-compaction threshold: contextWindow(%d) * contextWindowRatio(%g) = %d; it must be greater than reserveTokens(%d)",
 			contextWindow,
 			c.ContextWindowRatio,
 			usableWindow,
@@ -252,19 +252,19 @@ func validateLLM(settings LLMSettings) error {
 		for model, capability := range provider.ModelCapabilities {
 			model = strings.TrimSpace(model)
 			if model == "" {
-				return fmt.Errorf("llm.providers.%s.modelCapabilities 包含空模型名", providerName)
+				return fmt.Errorf("llm.providers.%s.modelCapabilities contains an empty model name", providerName)
 			}
 			if !declared[model] {
-				return fmt.Errorf("llm.providers.%s.modelCapabilities[%q] 未在 models 中声明", providerName, model)
+				return fmt.Errorf("llm.providers.%s.modelCapabilities[%q] is not declared in models", providerName, model)
 			}
 			if capability.ContextWindow < 0 {
-				return fmt.Errorf("llm.providers.%s.modelCapabilities[%q].contextWindow 必须为正数", providerName, model)
+				return fmt.Errorf("llm.providers.%s.modelCapabilities[%q].contextWindow must be positive", providerName, model)
 			}
 			if capability.MaxOutputTokens < 0 {
-				return fmt.Errorf("llm.providers.%s.modelCapabilities[%q].maxOutputTokens 必须为正数", providerName, model)
+				return fmt.Errorf("llm.providers.%s.modelCapabilities[%q].maxOutputTokens must be positive", providerName, model)
 			}
 			if capability.ContextWindow == 0 && capability.MaxOutputTokens == 0 {
-				return fmt.Errorf("llm.providers.%s.modelCapabilities[%q] 至少配置一个模型能力", providerName, model)
+				return fmt.Errorf("llm.providers.%s.modelCapabilities[%q] must configure at least one model capability", providerName, model)
 			}
 		}
 	}
@@ -329,15 +329,15 @@ func validateSandbox(settings SandboxSettings) error {
 	switch settings.Mode {
 	case "read-only", "workspace-write", "full-access":
 	default:
-		return fmt.Errorf("sandbox.mode 无效: %q（允许 read-only、workspace-write、full-access）", settings.Mode)
+		return fmt.Errorf("invalid sandbox.mode: %q (allowed values: read-only, workspace-write, full-access)", settings.Mode)
 	}
 	for _, name := range settings.AllowedEnv {
 		if !environmentNamePattern.MatchString(name) {
-			return fmt.Errorf("sandbox.allowedEnv 包含非法环境变量名: %q", name)
+			return fmt.Errorf("sandbox.allowedEnv contains an invalid environment variable name: %q", name)
 		}
 	}
 	if settings.CommandTimeoutSeconds < 0 {
-		return fmt.Errorf("sandbox.commandTimeoutSeconds 不能为负数: %d", settings.CommandTimeoutSeconds)
+		return fmt.Errorf("sandbox.commandTimeoutSeconds must not be negative: %d", settings.CommandTimeoutSeconds)
 	}
 	return nil
 }
@@ -366,21 +366,21 @@ func validateAndNormalizeMCP(settings *MCPSettings) error {
 			name := strings.TrimSpace(rawName)
 			access := strings.TrimSpace(rawAccess)
 			if name == "" {
-				return fmt.Errorf("mcp.servers.%s.toolAccess 包含空工具名", serverName)
+				return fmt.Errorf("mcp.servers.%s.toolAccess contains an empty tool name", serverName)
 			}
 			if strings.ContainsAny(name, "*?[]") {
-				return fmt.Errorf("mcp.servers.%s.toolAccess 不支持通配符工具名: %q", serverName, rawName)
+				return fmt.Errorf("mcp.servers.%s.toolAccess does not support wildcard tool names: %q", serverName, rawName)
 			}
 			if _, exists := normalized[name]; exists {
-				return fmt.Errorf("mcp.servers.%s.toolAccess 工具名去除空白后重复: %q", serverName, name)
+				return fmt.Errorf("mcp.servers.%s.toolAccess contains a duplicate tool name after trimming whitespace: %q", serverName, name)
 			}
 			switch access {
 			case "read-only", "workspace-write", "full-access":
 			default:
-				return fmt.Errorf("mcp.servers.%s.toolAccess[%q] 无效: %q（允许 read-only、workspace-write、full-access）", serverName, name, rawAccess)
+				return fmt.Errorf("invalid mcp.servers.%s.toolAccess[%q]: %q (allowed values: read-only, workspace-write, full-access)", serverName, name, rawAccess)
 			}
 			if isHTTPMCPType(server.Type) && access == "workspace-write" {
-				return fmt.Errorf("mcp.servers.%s.toolAccess[%q] 不能设为 workspace-write：HTTP MCP 无法强制 workspace 文件边界", serverName, name)
+				return fmt.Errorf("mcp.servers.%s.toolAccess[%q] cannot be workspace-write: HTTP MCP cannot enforce workspace filesystem boundaries", serverName, name)
 			}
 			normalized[name] = access
 		}

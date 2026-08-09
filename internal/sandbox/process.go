@@ -59,7 +59,7 @@ func runProcess(ctx context.Context, program string, args []string, spec Command
 	cmd.Stdout = buffer
 	cmd.Stderr = buffer
 	if err := cmd.Start(); err != nil {
-		return RunResult{}, fmt.Errorf("启动 sandbox 进程: %w", err)
+		return RunResult{}, fmt.Errorf("start sandbox process: %w", err)
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -80,7 +80,7 @@ func runProcess(ctx context.Context, program string, args []string, spec Command
 	}
 	result.Output, result.Truncated = buffer.snapshot()
 	if result.Truncated {
-		result.Output += "\n... 输出过长，已截断 ..."
+		result.Output += "\n... Output exceeded the limit and was truncated ..."
 	}
 	if cmd.ProcessState != nil {
 		result.ExitCode = cmd.ProcessState.ExitCode()
@@ -115,7 +115,7 @@ func startManagedProcess(ctx context.Context, prepared PreparedProcess, cleanup 
 		if cleanup != nil {
 			cleanup()
 		}
-		return nil, errors.New("启动 sandbox 长驻进程: program 不能为空")
+		return nil, errors.New("start long-running sandbox process: program must not be empty")
 	}
 	select {
 	case <-ctx.Done():
@@ -160,7 +160,7 @@ func startManagedProcess(ctx context.Context, prepared PreparedProcess, cleanup 
 		if cleanup != nil {
 			cleanup()
 		}
-		return nil, fmt.Errorf("启动 sandbox 长驻进程: %w", err)
+		return nil, fmt.Errorf("start long-running sandbox process: %w", err)
 	}
 	return &managedProcess{
 		cmd:     cmd,

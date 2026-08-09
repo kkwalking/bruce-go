@@ -37,7 +37,7 @@ type SwitchableClient struct {
 
 func NewSwitchable(settings config.Settings, loader config.Loader) (*SwitchableClient, error) {
 	if len(settings.LLM.Providers) == 0 {
-		return nil, errors.New("错误: 未配置 llm.providers")
+		return nil, errors.New("error: llm.providers is not configured")
 	}
 	options := []ModelOption{}
 	suppliers := map[string]func() ChatClient{}
@@ -65,7 +65,7 @@ func NewSwitchable(settings config.Settings, loader config.Loader) (*SwitchableC
 		}
 	}
 	if len(options) == 0 {
-		return nil, errors.New("错误: setting.json 中没有可用 LLM provider")
+		return nil, errors.New("error: setting.json contains no usable LLM provider")
 	}
 	initial := initialModel(settings.LLM, options, defaults)
 	c := &SwitchableClient{
@@ -195,7 +195,7 @@ func (c *SwitchableClient) Switch(selector string) (ModelOption, error) {
 	}
 	supplier := c.suppliers[key(next)]
 	if supplier == nil {
-		return ModelOption{}, errors.New("未知模型: " + next.Display())
+		return ModelOption{}, errors.New("unknown model: " + next.Display())
 	}
 	nextClient := supplier()
 	if err := validateCompactionWindow(c.settings.Compaction, next, nextClient); err != nil {
@@ -221,7 +221,7 @@ func validateCompactionWindow(settings config.Compaction, model ModelOption, cli
 		return nil
 	}
 	if _, err := settings.Threshold(client.MaxContextWindow()); err != nil {
-		return fmt.Errorf("模型 %s 的自动压缩配置无效: %w", model.Selector(), err)
+		return fmt.Errorf("invalid automatic-compaction configuration for model %s: %w", model.Selector(), err)
 	}
 	return nil
 }
@@ -235,7 +235,7 @@ func (c *SwitchableClient) ReasoningEffort() string {
 func (c *SwitchableClient) SetReasoningEffort(level string) error {
 	level = strings.TrimSpace(strings.ToLower(level))
 	if !validReasoningEffort(level) {
-		return fmt.Errorf("无效的推理级别: %s（可选 off/low/medium/high/max）", level)
+		return fmt.Errorf("invalid reasoning effort: %s (allowed values: off, low, medium, high, max)", level)
 	}
 	c.mu.Lock()
 	old := c.settings.LLM.ReasoningEffort
@@ -276,9 +276,9 @@ func (c *SwitchableClient) resolve(selector string) (ModelOption, error) {
 		return matches[0], nil
 	}
 	if len(matches) > 1 {
-		return ModelOption{}, errors.New("模型名重复: " + value + "，请使用 /model provider/model")
+		return ModelOption{}, errors.New("model name is ambiguous: " + value + "; use /model provider/model")
 	}
-	return ModelOption{}, errors.New("未知模型: " + value)
+	return ModelOption{}, errors.New("unknown model: " + value)
 }
 
 func (c *SwitchableClient) find(provider, model string) (ModelOption, error) {
@@ -287,7 +287,7 @@ func (c *SwitchableClient) find(provider, model string) (ModelOption, error) {
 			return opt, nil
 		}
 	}
-	return ModelOption{}, errors.New("未知模型: " + provider + "/" + model)
+	return ModelOption{}, errors.New("unknown model: " + provider + "/" + model)
 }
 
 func supportedModels(provider string, settings config.ProviderSetting) []string {

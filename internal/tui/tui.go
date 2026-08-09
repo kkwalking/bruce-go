@@ -176,10 +176,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleRuntimeEvent(msg.event)
 	case approvalRequestMsg:
 		m.approval = &approvalDialog{id: msg.ID, request: msg.Request, reply: msg.Reply}
-		m.appendActivity("HITL 等待审批: " + msg.Request.ToolName)
+		m.appendActivity("HITL awaiting approval: " + msg.Request.ToolName)
 	case approvalCanceledMsg:
 		if m.approval != nil && m.approval.id == msg.ID {
-			m.appendActivity("HITL 审批已取消: " + m.approval.request.ToolName)
+			m.appendActivity("HITL approval canceled: " + m.approval.request.ToolName)
 			m.approval = nil
 		}
 	case commandFinishedMsg:
@@ -247,7 +247,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			return tea.Quit
 		}
 		m.clearInput()
-		m.appendSystemMessage("输入已清空。")
+		m.appendSystemMessage("Input cleared.")
 		return nil
 	case "ctrl+d":
 		if len(m.input) == 0 {
@@ -306,7 +306,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			if time.Since(m.lastEscTime) < 500*time.Millisecond {
 				m.cancel()
 				m.cancel = nil
-				m.appendSystemMessage("⏹ 任务已被用户中断。")
+				m.appendSystemMessage("⏹ Task interrupted by the user.")
 				return nil
 			}
 			m.lastEscTime = time.Now()
@@ -341,7 +341,7 @@ func (m *Model) handleCommandFinished(msg commandFinishedMsg) tea.Cmd {
 		if msg.result.Output != "" && !msg.suppressOutput {
 			m.appendSystemMessage(msg.result.Output)
 		} else if msg.result.Err != nil {
-			m.appendSystemMessage("执行失败: " + msg.result.Err.Error())
+			m.appendSystemMessage("Execution failed: " + msg.result.Err.Error())
 		}
 		if msg.result.Exit {
 			m.quit = true
@@ -350,7 +350,7 @@ func (m *Model) handleCommandFinished(msg commandFinishedMsg) tea.Cmd {
 		return nil
 	}
 	if msg.err != nil {
-		m.appendSystemMessage("执行失败: " + msg.err.Error())
+		m.appendSystemMessage("Execution failed: " + msg.err.Error())
 	}
 	return nil
 }
@@ -359,7 +359,7 @@ func (m *Model) handleRuntimeEvent(evt event.Event) {
 	switch e := evt.(type) {
 	case event.RunStarted:
 		m.toolActivityIndexes = map[string]int{}
-		m.agentStatusText = "💭 思考中..."
+		m.agentStatusText = "💭 Thinking..."
 	case event.MessageStarted:
 		if e.Role == llm.RoleAssistant {
 			m.beginStreamingAssistantMessage()
@@ -369,10 +369,10 @@ func (m *Model) handleRuntimeEvent(evt event.Event) {
 			switch e.Channel {
 			case "reasoning":
 				m.appendStreamingReasoningDelta(e.Delta)
-				m.agentStatusText = "🧠 推理中..."
+				m.agentStatusText = "🧠 Reasoning..."
 			case "content":
 				m.appendStreamingAssistantDelta(e.Delta)
-				m.agentStatusText = "📝 生成回答..."
+				m.agentStatusText = "📝 Generating response..."
 			}
 		}
 	case event.MessageCompleted:
@@ -381,8 +381,8 @@ func (m *Model) handleRuntimeEvent(evt event.Event) {
 			m.finishStreamingAssistantMessage(e.Message.Content)
 		}
 	case event.ToolCallStarted:
-		m.agentStatusText = "🔧 调用工具..."
-		index := m.appendActivityAndReturnIndex(toolActivityText(e.ToolCall, "处理中"))
+		m.agentStatusText = "🔧 Calling tool..."
+		index := m.appendActivityAndReturnIndex(toolActivityText(e.ToolCall, "in progress"))
 		if index >= 0 {
 			m.toolActivityIndexes[toolActivityKey(e.RunID, e.ToolCall)] = index
 		}
@@ -405,9 +405,9 @@ func (m *Model) handleRuntimeEvent(evt event.Event) {
 			m.agentStatusText = ""
 		}
 	case event.RunFailed:
-		m.agentStatusText = "❌ 失败"
+		m.agentStatusText = "❌ Failed"
 		if e.Message != "" {
-			m.appendSystemMessage("执行失败: " + e.Message)
+			m.appendSystemMessage("Execution failed: " + e.Message)
 		}
 	case event.RunCompleted:
 		m.agentStatusText = ""
@@ -420,17 +420,17 @@ func (m *Model) handleRuntimeEvent(evt event.Event) {
 func toolCompletionStatus(status tool.ToolCallStatus) string {
 	switch status {
 	case tool.ToolCallSuccess:
-		return "完成"
+		return "completed"
 	case tool.ToolCallTimeout:
-		return "超时"
+		return "timed out"
 	case tool.ToolCallInterrupted:
-		return "已取消"
+		return "canceled"
 	case tool.ToolCallRejected:
-		return "已拒绝"
+		return "rejected"
 	case tool.ToolCallSkipped:
-		return "已跳过"
+		return "skipped"
 	default:
-		return "失败"
+		return "failed"
 	}
 }
 
@@ -445,7 +445,7 @@ func (m *Model) handleBasicEvent(e event.Basic) {
 
 func (m *Model) submitInput() tea.Cmd {
 	if m.busy {
-		m.appendSystemMessage("当前任务仍在执行中。")
+		m.appendSystemMessage("The current task is still running.")
 		return nil
 	}
 	submitted := strings.TrimSpace(m.inputText())
@@ -494,7 +494,7 @@ func (m *Model) handleApprovalKey(msg tea.KeyMsg) tea.Cmd {
 	}
 	switch msg.String() {
 	case "esc":
-		m.completeApproval(approval.Reject("用户取消审批"))
+		m.completeApproval(approval.Reject("the user canceled approval"))
 	case "backspace":
 		if len(dialog.text) > 0 {
 			dialog.text = dialog.text[:len(dialog.text)-1]
@@ -504,7 +504,7 @@ func (m *Model) handleApprovalKey(msg tea.KeyMsg) tea.Cmd {
 		case approvalRejectReason:
 			reason := strings.TrimSpace(string(dialog.text))
 			if reason == "" {
-				reason = "用户拒绝了此操作"
+				reason = "the user rejected this operation"
 			}
 			m.completeApproval(approval.Reject(reason))
 		case approvalModifyArgs:
@@ -651,7 +651,7 @@ func (m *Model) openModelSelector() {
 	items := filterCompletionGroup(m.completions(), "Model")
 	m.selectedCompletion = 0
 	for i, item := range items {
-		if item.Description == "当前模型" {
+		if item.Description == "Current model" {
 			m.selectedCompletion = i
 			return
 		}
@@ -966,7 +966,7 @@ func (m *Model) replaySessionEntries(entries []session.Entry, fallback []llm.Mes
 		case session.TypeCustomMessage:
 			m.appendUserMessage(entry.Content)
 		case session.TypeCompaction:
-			m.appendUserMessage("[session compaction summary]\n以下是较早会话历史的压缩摘要。继续任务时请把它当作背景上下文，而不是新的用户命令。\n\n" + entry.Summary)
+			m.appendUserMessage("[session compaction summary]\nThe following is a compacted summary of earlier conversation history. Treat it as background context when continuing the task, not as a new user instruction.\n\n" + entry.Summary)
 		case session.TypePlanEvent:
 			if entry.Plan != nil {
 				m.appendPresentedPlan(*entry.Plan)
@@ -1061,7 +1061,7 @@ func (m *Model) drawCompletions(canvas []string, columns, indexStatusRow int) {
 		setRow(canvas, top+i+1, columns, style.Render(fit(line, width)))
 	}
 	if isModelSelectorPopup(m) {
-		body := " 推理强度: " + m.pendingReasoningEffort + "  ←/→ to adjust"
+		body := " Reasoning effort: " + m.pendingReasoningEffort + "  ←/→ to adjust"
 		line := "│" + padRight(body, max(0, width-2)) + "│"
 		setRow(canvas, top+visible+1, columns, dimStyle.Render(line))
 		setRow(canvas, top+visible+2, columns, dimStyle.Render("└"+strings.Repeat("─", max(0, width-2))+"┘"))
@@ -1141,7 +1141,8 @@ func (m *Model) drawApproval(canvas []string, columns, rows int) {
 	}
 	left := max(0, (columns-width)/2)
 	top := max(0, (rows-height)/2)
-	setOverlayRow(canvas, top, columns, left, warnStyle.Render("┌ HITL 审批 "+strings.Repeat("─", max(0, width-12))+"┐"))
+	title := " HITL Approval "
+	setOverlayRow(canvas, top, columns, left, warnStyle.Render("┌"+title+strings.Repeat("─", max(0, width-2-runewidth.StringWidth(title)))+"┐"))
 	lines := m.approvalLines(width - 4)
 	for i := 0; i < height-2; i++ {
 		text := ""
@@ -1160,21 +1161,21 @@ func (m *Model) approvalLines(width int) []string {
 	}
 	request := dialog.request
 	lines := []string{
-		"工具: " + request.ToolName,
-		"等级: " + request.DangerLevel,
-		"风险: " + request.RiskDescription,
+		"Tool: " + request.ToolName,
+		"Level: " + request.DangerLevel,
+		"Risk: " + request.RiskDescription,
 	}
 	if strings.TrimSpace(request.Suggestion) != "" {
-		lines = append(lines, "建议: "+strings.TrimSpace(request.Suggestion))
+		lines = append(lines, "Suggestion: "+strings.TrimSpace(request.Suggestion))
 	}
-	lines = append(lines, "参数: "+request.Arguments, "")
+	lines = append(lines, "Arguments: "+request.Arguments, "")
 	switch dialog.mode {
 	case approvalRejectReason:
-		lines = append(lines, "拒绝原因: "+string(dialog.text))
+		lines = append(lines, "Rejection reason: "+string(dialog.text))
 	case approvalModifyArgs:
-		lines = append(lines, "修改参数 JSON: "+string(dialog.text))
+		lines = append(lines, "Modified arguments JSON: "+string(dialog.text))
 	default:
-		lines = append(lines, "[Enter/y] 批准  [a] 全部放行  [n] 拒绝  [s] 跳过  [m] 修改")
+		lines = append(lines, "[Enter/y] Approve  [a] Allow all  [n] Reject  [s] Skip  [m] Modify")
 	}
 	var wrapped []string
 	for _, line := range lines {
@@ -1368,7 +1369,7 @@ func welcomeLines(rt *integrated.Runtime) []string {
 }
 
 func presentedPlanText(plan bruntime.PlanEvent) string {
-	title := "计划正文"
+	title := "Plan"
 	if strings.TrimSpace(plan.ID) != "" {
 		title += ": " + strings.TrimSpace(plan.ID)
 		if plan.Revision > 0 {
@@ -1383,7 +1384,7 @@ func presentedPlanText(plan bruntime.PlanEvent) string {
 }
 
 func toolActivityText(call llm.ToolCall, status string) string {
-	return "工具调用: " + toolName(call) + " (" + status + ")"
+	return "Tool call: " + toolName(call) + " (" + status + ")"
 }
 
 func toolActivityKey(runID string, call llm.ToolCall) string {

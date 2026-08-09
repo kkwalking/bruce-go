@@ -38,7 +38,7 @@ func defaultTransportFactory(ctx context.Context, cfg config.MCPServerSetting, w
 	case "http", "streamable_http", "streamable-http", "streamablehttp":
 		return NewHTTPTransport(cfg), nil
 	default:
-		return nil, errors.New("不支持的 MCP transport: " + cfg.Type)
+		return nil, errors.New("unsupported MCP transport: " + cfg.Type)
 	}
 }
 
@@ -48,20 +48,20 @@ func initializeAndList(ctx context.Context, transport Transport) ([]Tool, error)
 		"clientInfo":      map[string]string{"name": "bruce-go", "version": version.Current},
 		"capabilities":    map[string]any{},
 	}); err != nil {
-		return nil, fmt.Errorf("MCP initialize 失败: %w", err)
+		return nil, fmt.Errorf("MCP initialize failed: %w", err)
 	}
 	if err := transport.Notify(ctx, "notifications/initialized", map[string]any{}); err != nil {
-		return nil, fmt.Errorf("MCP notifications/initialized 失败: %w", err)
+		return nil, fmt.Errorf("MCP notifications/initialized failed: %w", err)
 	}
 	raw, err := transport.Call(ctx, "tools/list", map[string]any{})
 	if err != nil {
-		return nil, fmt.Errorf("MCP tools/list 失败: %w", err)
+		return nil, fmt.Errorf("MCP tools/list failed: %w", err)
 	}
 	var payload struct {
 		Tools []Tool `json:"tools"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		return nil, fmt.Errorf("MCP tools/list 响应解析失败: %w", err)
+		return nil, fmt.Errorf("failed to parse MCP tools/list response: %w", err)
 	}
 	return payload.Tools, nil
 }

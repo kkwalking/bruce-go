@@ -69,11 +69,11 @@ func (m Message) WithoutImages() Message {
 	if !m.HasImages() {
 		return m
 	}
-	m.ContentParts = []ContentPart{TextPart("[历史图片内容已移除，仅保留文字占位]")}
+	m.ContentParts = []ContentPart{TextPart("[Historical image content removed; text placeholder retained]")}
 	if m.Content == "" {
-		m.Content = "[历史图片内容已移除，仅保留文字占位]"
+		m.Content = "[Historical image content removed; text placeholder retained]"
 	} else {
-		m.Content += "\n[历史图片内容已移除，仅保留文字占位]"
+		m.Content += "\n[Historical image content removed; text placeholder retained]"
 	}
 	return m
 }

@@ -23,11 +23,11 @@ func TestParseImageReferencesFileAndClipboard(t *testing.T) {
 		return data, "image/png", nil
 	}
 
-	prepared, err := ParseImageReferences(context.Background(), "分析 @image:shot.png 和 @clipboard", dir, clipboard)
+	prepared, err := ParseImageReferences(context.Background(), "Analyze @image:shot.png and @clipboard", dir, clipboard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prepared.Text != "分析 和" {
+	if prepared.Text != "Analyze and" {
 		t.Fatalf("text = %q", prepared.Text)
 	}
 	if len(prepared.Message.ContentParts) != 3 {

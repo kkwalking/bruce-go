@@ -70,16 +70,16 @@ func (m *Manager) CallTool(ctx context.Context, serverName, toolName string, arg
 	server := m.servers[serverName]
 	if m.transitioning {
 		m.mu.RUnlock()
-		return "", errors.New("MCP policy transition 正在进行")
+		return "", errors.New("MCP policy transition is in progress")
 	}
 	if server == nil || !server.Enabled || !server.Ready || server.transport == nil {
 		m.mu.RUnlock()
-		return "", errors.New("MCP server 未就绪: " + serverName)
+		return "", errors.New("MCP server is not ready: " + serverName)
 	}
 	if !toolAllowed(server.Config, toolName, policy) {
 		required := configuredToolMode(server.Config, toolName)
 		m.mu.RUnlock()
-		return "", fmt.Errorf("MCP 工具被 sandbox policy 拒绝: %s/%s 需要 %s，当前 %s", serverName, toolName, required, policy.Mode)
+		return "", fmt.Errorf("MCP tool rejected by sandbox policy: %s/%s requires %s, current mode is %s", serverName, toolName, required, policy.Mode)
 	}
 	transport := server.transport
 	m.calls.Add(1)

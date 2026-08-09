@@ -19,12 +19,12 @@ func messageEntry(id string, message llm.Message) Entry {
 func TestPrepareCompactionKeepsToolProtocolIntact(t *testing.T) {
 	toolCall := llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "call-1", Function: llm.FunctionCall{Name: "read_file", Arguments: `{"path":"a.txt","padding":"` + strings.Repeat("x", 400) + `"}`}}}}
 	entries := []Entry{
-		messageEntry("u-old", llm.User(strings.Repeat("旧", 200))),
-		messageEntry("a-old", llm.Assistant("旧回复")),
-		messageEntry("u-current", llm.User("读取文件")),
+		messageEntry("u-old", llm.User(strings.Repeat("x", 200))),
+		messageEntry("a-old", llm.Assistant("Old response")),
+		messageEntry("u-current", llm.User("Read the file")),
 		messageEntry("a-call", toolCall),
-		messageEntry("tool-result", llm.ToolMessage("call-1", "内容")),
-		messageEntry("a-final", llm.Assistant("完成")),
+		messageEntry("tool-result", llm.ToolMessage("call-1", "Content")),
+		messageEntry("a-final", llm.Assistant("Done")),
 	}
 	preparation, ok := PrepareCompaction(entries, config.Compaction{ReserveTokens: 100, KeepRecentTokens: 50})
 	if !ok {
@@ -45,9 +45,9 @@ func TestPrepareCompactionKeepsToolProtocolIntact(t *testing.T) {
 func TestLengthOverflowEntryIsPersistedButExcludedFromRetryContext(t *testing.T) {
 	overflow := llm.Message{Role: llm.RoleAssistant, InputTokens: 99, FinishReason: "length"}
 	entries := []Entry{
-		messageEntry("u-old", llm.User(strings.Repeat("旧", 40))),
-		messageEntry("a-old", llm.Assistant(strings.Repeat("答", 40))),
-		messageEntry("u-current", llm.User("当前请求")),
+		messageEntry("u-old", llm.User(strings.Repeat("x", 40))),
+		messageEntry("a-old", llm.Assistant(strings.Repeat("y", 40))),
+		messageEntry("u-current", llm.User("Current request")),
 		messageEntry("a-overflow", overflow),
 	}
 	preparation, ok := PrepareCompaction(entries, config.Compaction{KeepRecentTokens: 1})
@@ -67,10 +67,10 @@ func TestLengthOverflowEntryIsPersistedButExcludedFromRetryContext(t *testing.T)
 
 func TestPrepareCompactionNormalCustomSmallAndContinuous(t *testing.T) {
 	entries := []Entry{
-		messageEntry("u1", llm.User(strings.Repeat("旧", 40))),
-		messageEntry("a1", llm.Assistant(strings.Repeat("答", 40))),
-		messageEntry("u2", llm.User("新问")),
-		messageEntry("a2", llm.Assistant("新答复")),
+		messageEntry("u1", llm.User(strings.Repeat("x", 40))),
+		messageEntry("a1", llm.Assistant(strings.Repeat("y", 40))),
+		messageEntry("u2", llm.User("Q?")),
+		messageEntry("a2", llm.Assistant("New")),
 	}
 	preparation, ok := PrepareCompaction(entries, config.Compaction{KeepRecentTokens: 2})
 	if !ok || preparation.FirstKeptEntryID != "u2" || preparation.IsSplitTurn {
@@ -80,8 +80,8 @@ func TestPrepareCompactionNormalCustomSmallAndContinuous(t *testing.T) {
 		t.Fatalf("summarized messages = %d", len(preparation.MessagesToSummarize))
 	}
 
-	custom := Entry{Type: TypeCustomMessage, ID: "custom", Content: "自定义上下文"}
-	customEntries := append(entries[:2:2], custom, messageEntry("a3", llm.Assistant("答")))
+	custom := Entry{Type: TypeCustomMessage, ID: "custom", Content: "Custom"}
+	customEntries := append(entries[:2:2], custom, messageEntry("a3", llm.Assistant("A")))
 	customPreparation, ok := PrepareCompaction(customEntries, config.Compaction{KeepRecentTokens: 3})
 	if !ok || customPreparation.FirstKeptEntryID != "custom" {
 		t.Fatalf("custom boundary = %+v, ok=%v", customPreparation, ok)
@@ -90,7 +90,7 @@ func TestPrepareCompactionNormalCustomSmallAndContinuous(t *testing.T) {
 	if _, ok := PrepareCompaction(entries[2:], config.Compaction{KeepRecentTokens: 100}); ok {
 		t.Fatal("small session should not compact")
 	}
-	continuous := append(append([]Entry(nil), entries...), Entry{Type: TypeCompaction, ID: "compact", Summary: "摘要", FirstKeptEntryID: "u2"})
+	continuous := append(append([]Entry(nil), entries...), Entry{Type: TypeCompaction, ID: "compact", Summary: "Summary", FirstKeptEntryID: "u2"})
 	if _, ok := PrepareCompaction(continuous, config.Compaction{KeepRecentTokens: 1}); ok {
 		t.Fatal("consecutive compaction should be rejected")
 	}
@@ -98,27 +98,27 @@ func TestPrepareCompactionNormalCustomSmallAndContinuous(t *testing.T) {
 
 func TestPrepareCompactionRepeatedUsageAndFiles(t *testing.T) {
 	readCall := llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "read", Function: llm.FunctionCall{Name: "read_file", Arguments: `{"path":"b.go"}`}}, {ID: "edit", Function: llm.FunctionCall{Name: "edit_file", Arguments: `{"path":"a.go"}`}}}}
-	used := llm.Assistant("已处理")
+	used := llm.Assistant("Processed")
 	used.InputTokens, used.OutputTokens, used.FinishReason = 100, 20, "stop"
 	entries := []Entry{
-		messageEntry("u-old", llm.User("最旧")),
-		messageEntry("a-old", llm.Assistant("旧答")),
-		messageEntry("u-kept", llm.User("上次保留但现在淘汰")),
+		messageEntry("u-old", llm.User("Oldest")),
+		messageEntry("a-old", llm.Assistant("Old answer")),
+		messageEntry("u-kept", llm.User("Previously retained but now evicted")),
 		messageEntry("a-kept", readCall),
-		{Type: TypeCompaction, ID: "compact-1", Summary: "旧摘要", FirstKeptEntryID: "u-kept", Details: map[string]any{"readFiles": []string{"old.go"}, "modifiedFiles": []string{"z.go"}}},
-		messageEntry("u-new", llm.User("新问题")),
+		{Type: TypeCompaction, ID: "compact-1", Summary: "Previous summary", FirstKeptEntryID: "u-kept", Details: map[string]any{"readFiles": []string{"old.go"}, "modifiedFiles": []string{"z.go"}}},
+		messageEntry("u-new", llm.User("New question")),
 		messageEntry("a-new", used),
-		messageEntry("u-trailing", llm.User(strings.Repeat("尾", 40))),
+		messageEntry("u-trailing", llm.User(strings.Repeat("z", 40))),
 	}
 	preparation, ok := PrepareCompaction(entries, config.Compaction{KeepRecentTokens: 12})
 	if !ok {
 		t.Fatal("expected repeated compaction preparation")
 	}
-	if preparation.PreviousSummary != "旧摘要" {
+	if preparation.PreviousSummary != "Previous summary" {
 		t.Fatalf("previous summary = %q", preparation.PreviousSummary)
 	}
 	serialized := SerializeConversation(preparation.MessagesToSummarize)
-	if !strings.Contains(serialized, "上次保留但现在淘汰") {
+	if !strings.Contains(serialized, "Previously retained but now evicted") {
 		t.Fatalf("previously kept messages were not re-summarized: %s", serialized)
 	}
 	if preparation.TokensBefore != 130 {
@@ -130,14 +130,14 @@ func TestPrepareCompactionRepeatedUsageAndFiles(t *testing.T) {
 }
 
 func TestEstimateAndSerializeCompactionContent(t *testing.T) {
-	image := llm.UserParts([]llm.ContentPart{llm.TextPart("文字"), llm.ImagePart("data:image/png;base64,x", "image/png", "x.png")})
+	image := llm.UserParts([]llm.ContentPart{llm.TextPart("Text"), llm.ImagePart("data:image/png;base64,x", "image/png", "x.png")})
 	if tokens := EstimateTokens(image); tokens < 1200 {
 		t.Fatalf("image tokens = %d", tokens)
 	}
-	assistant := llm.Message{Role: llm.RoleAssistant, Content: "正文", ReasoningContent: "推理", ToolCalls: []llm.ToolCall{{Function: llm.FunctionCall{Name: "edit_file", Arguments: `{"path":"main.go"}`}}}}
-	toolText := strings.Repeat("界", 2005)
+	assistant := llm.Message{Role: llm.RoleAssistant, Content: "Body", ReasoningContent: "Reasoning", ToolCalls: []llm.ToolCall{{Function: llm.FunctionCall{Name: "edit_file", Arguments: `{"path":"main.go"}`}}}}
+	toolText := strings.Repeat("x", 2005)
 	serialized := SerializeConversation([]llm.Message{assistant, llm.ToolMessage("call", toolText)})
-	for _, want := range []string{"[Assistant reasoning]: 推理", "[Assistant]: 正文", `edit_file({"path":"main.go"})`, "省略 5 个字符"} {
+	for _, want := range []string{"[Assistant reasoning]: Reasoning", "[Assistant]: Body", `edit_file({"path":"main.go"})`, "5 characters omitted"} {
 		if !strings.Contains(serialized, want) {
 			t.Fatalf("serialized conversation missing %q: %s", want, serialized)
 		}
@@ -187,22 +187,22 @@ func (*summaryClient) SupportsTools() bool         { return false }
 func (*summaryClient) SupportsPromptCaching() bool { return false }
 func (*summaryClient) SupportsImages() bool        { return false }
 
-func TestCompactUsesChineseStructuredPromptLimitsAndFileTags(t *testing.T) {
-	client := &summaryClient{maxOutput: 60, responses: []llm.ChatResponse{{Content: "## 目标\n完成压缩\n\n## 下一步\n1. 继续"}}}
+func TestCompactUsesEnglishStructuredPromptLimitsAndFileTags(t *testing.T) {
+	client := &summaryClient{maxOutput: 60, responses: []llm.ChatResponse{{Content: "## Objectives\nComplete compaction\n\n## Next Steps\n1. Continue"}}}
 	preparation := CompactionPreparation{
 		FirstKeptEntryID:    "keep",
-		MessagesToSummarize: []llm.Message{{Role: llm.RoleAssistant, ReasoningContent: "推理", ToolCalls: []llm.ToolCall{{Function: llm.FunctionCall{Name: "read_file", Arguments: `{"path":"a.go"}`}}}}, llm.ToolMessage("call", strings.Repeat("文", 2005))},
-		PreviousSummary:     "旧摘要",
+		MessagesToSummarize: []llm.Message{{Role: llm.RoleAssistant, ReasoningContent: "Reasoning", ToolCalls: []llm.ToolCall{{Function: llm.FunctionCall{Name: "read_file", Arguments: `{"path":"a.go"}`}}}}, llm.ToolMessage("call", strings.Repeat("x", 2005))},
+		PreviousSummary:     "Previous summary",
 		TokensBefore:        500,
 		Details:             Details{ReadFiles: []string{"a.go"}, ModifiedFiles: []string{"b.go"}},
 		Settings:            config.Compaction{ReserveTokens: 100},
 	}
-	result, err := Compact(context.Background(), client, preparation, "重点保留 API")
+	result, err := Compact(context.Background(), client, preparation, "Preserve API details")
 	if err != nil {
 		t.Fatal(err)
 	}
 	prompt := client.prompts[0]
-	for _, want := range []string{"<previous-summary>", "旧摘要", "附加聚焦要求：重点保留 API", "## 目标", "## 约束与偏好", "## 进度", "## 关键决策", "## 下一步", "## 关键上下文", "read_file", "省略 5 个字符"} {
+	for _, want := range []string{"<previous-summary>", "Previous summary", "Additional focus requirements: Preserve API details", "## Objectives", "## Constraints and Preferences", "## Progress", "## Key Decisions", "## Next Steps", "## Critical Context", "read_file", "5 characters omitted"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("summary prompt missing %q", want)
 		}
@@ -216,13 +216,13 @@ func TestCompactUsesChineseStructuredPromptLimitsAndFileTags(t *testing.T) {
 }
 
 func TestCompactSplitTurnAndEmptyResponse(t *testing.T) {
-	client := &summaryClient{maxOutput: 1000, responses: []llm.ChatResponse{{Content: "历史摘要"}, {Content: "回合前缀摘要"}}}
-	preparation := CompactionPreparation{FirstKeptEntryID: "keep", MessagesToSummarize: []llm.Message{llm.User("历史")}, TurnPrefixMessages: []llm.Message{llm.User("超长回合")}, IsSplitTurn: true, Settings: config.Compaction{ReserveTokens: 100}}
+	client := &summaryClient{maxOutput: 1000, responses: []llm.ChatResponse{{Content: "History summary"}, {Content: "Turn-prefix summary"}}}
+	preparation := CompactionPreparation{FirstKeptEntryID: "keep", MessagesToSummarize: []llm.Message{llm.User("History")}, TurnPrefixMessages: []llm.Message{llm.User("Oversized turn")}, IsSplitTurn: true, Settings: config.Compaction{ReserveTokens: 100}}
 	result, err := Compact(context.Background(), client, preparation, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Summary, "当前超长回合上下文") {
+	if !strings.Contains(result.Summary, "Current Oversized-Turn Context") {
 		t.Fatalf("split summary = %s", result.Summary)
 	}
 	sort.Ints(client.limits)

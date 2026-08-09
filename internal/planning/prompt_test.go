@@ -8,17 +8,17 @@ import (
 func TestPlanModePromptAsksForConciseFinalResponse(t *testing.T) {
 	prompt := Prompt("")
 	for _, want := range []string{
-		"最终回复只输出一句简短状态",
-		"计划创建完成，请审阅",
-		"计划已更新，请审阅",
-		"不要重复、摘要、改写或节选 markdown 计划正文",
-		"完整计划会由系统根据 plan event 单独展示",
+		"make the final response a single brief status sentence",
+		"The plan is ready for review",
+		"The plan has been updated and is ready for review",
+		"Do not reproduce, summarize, paraphrase, or excerpt the Markdown plan",
+		"The system presents the complete plan separately from the plan event",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}
 	}
-	if strings.Contains(prompt, "展示当前计划的关键内容") {
+	if strings.Contains(prompt, "summarize the current plan's key points") {
 		t.Fatalf("prompt should not ask model to summarize plan:\n%s", prompt)
 	}
 }

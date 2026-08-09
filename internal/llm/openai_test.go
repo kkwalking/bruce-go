@@ -35,9 +35,9 @@ func TestParseChatStreamParsesDeepSeekSSEChunks(t *testing.T) {
 	var content strings.Builder
 	resp, err := ParseChatStream(strings.NewReader(`data: {"choices":[{"delta":{"role":"assistant","content":""}}]}
 
-data: {"choices":[{"delta":{"content":"你好"}}]}
+data: {"choices":[{"delta":{"content":"café"}}]}
 
-data: {"choices":[{"delta":{"content":"！"}}]}
+data: {"choices":[{"delta":{"content":"!"}}]}
 
 data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}
 
@@ -47,7 +47,7 @@ data: [DONE]
 	if err != nil {
 		t.Fatal(err)
 	}
-	if content.String() != "你好！" || resp.Content != "你好！" {
+	if content.String() != "café!" || resp.Content != "café!" {
 		t.Fatalf("content delta=%q response=%q", content.String(), resp.Content)
 	}
 	if resp.InputTokens != 5 || resp.OutputTokens != 2 {

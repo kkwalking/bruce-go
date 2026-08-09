@@ -22,14 +22,14 @@ type bubblewrapRunner struct {
 func newPlatformRunner(workspace string) Runner {
 	path, err := exec.LookPath("bwrap")
 	if err != nil {
-		return bubblewrapRunner{reason: "未找到 bwrap，请通过系统包管理器安装 bubblewrap"}
+		return bubblewrapRunner{reason: "bwrap was not found; install bubblewrap with the system package manager"}
 	}
 	path, err = canonicalAbsolute(path)
 	if err != nil {
 		return bubblewrapRunner{reason: err.Error()}
 	}
 	if pathContains(workspace, path) {
-		return bubblewrapRunner{reason: "拒绝使用 workspace 内的 bwrap"}
+		return bubblewrapRunner{reason: "refusing to use bwrap from inside the workspace"}
 	}
 	if err := validateSystemBubblewrap(path); err != nil {
 		return bubblewrapRunner{reason: err.Error()}
@@ -40,22 +40,22 @@ func newPlatformRunner(workspace string) Runner {
 func validateSystemBubblewrap(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return fmt.Errorf("检查 bwrap: %w", err)
+		return fmt.Errorf("inspect bwrap: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return errors.New("bwrap 不是普通文件")
+		return errors.New("bwrap is not a regular file")
 	}
 	for current := path; ; current = filepath.Dir(current) {
 		info, err = os.Stat(current)
 		if err != nil {
-			return fmt.Errorf("检查 bwrap 路径 %s: %w", current, err)
+			return fmt.Errorf("inspect bwrap path %s: %w", current, err)
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if !ok || stat.Uid != 0 {
-			return fmt.Errorf("bwrap 路径不是 root 所有: %s", current)
+			return fmt.Errorf("bwrap path is not owned by root: %s", current)
 		}
 		if info.Mode().Perm()&0o022 != 0 {
-			return fmt.Errorf("bwrap 路径可被非 root 用户写入: %s", current)
+			return fmt.Errorf("bwrap path is writable by a non-root user: %s", current)
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
@@ -101,7 +101,7 @@ func (r bubblewrapRunner) Run(ctx context.Context, spec CommandSpec, policy Poli
 	}
 	result, err := runProcess(ctx, r.path, args, spec)
 	if err != nil {
-		return result, fmt.Errorf("Bubblewrap 启动失败: %w", err)
+		return result, fmt.Errorf("failed to start Bubblewrap: %w", err)
 	}
 	return result, nil
 }
@@ -111,7 +111,7 @@ func (r bubblewrapRunner) PrepareProcess(spec ProcessSpec, policy Policy) (Prepa
 		return PreparedProcess{}, fmt.Errorf("%w: %s", ErrUnavailable, r.reason)
 	}
 	if strings.TrimSpace(spec.Program) == "" {
-		return PreparedProcess{}, fmt.Errorf("%w: program 不能为空", ErrPolicy)
+		return PreparedProcess{}, fmt.Errorf("%w: program must not be empty", ErrPolicy)
 	}
 	args, err := buildBubblewrapProcessArgs(spec, policy)
 	if err != nil {
@@ -174,7 +174,7 @@ func buildBubblewrapProcessArgs(spec ProcessSpec, policy Policy) ([]string, erro
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("检查敏感路径 %s: %w", canonical, err)
+			return nil, fmt.Errorf("inspect sensitive path %s: %w", canonical, err)
 		}
 		if info.IsDir() {
 			args = append(args, "--tmpfs", canonical)

@@ -39,7 +39,7 @@ func TestModelRunsSlashCommandOnEnter(t *testing.T) {
 	updated, _ = next.Update(cmd())
 	next = updated.(*Model)
 	view := next.View()
-	if !strings.Contains(view, "Bruce Go 可用命令") || !strings.Contains(view, "/status") {
+	if !strings.Contains(view, "Available Bruce Go commands") || !strings.Contains(view, "/status") {
 		t.Fatalf("view = %s", view)
 	}
 }
@@ -47,7 +47,7 @@ func TestModelRunsSlashCommandOnEnter(t *testing.T) {
 func TestPlanAgentCommandDoesNotAppendResultOutput(t *testing.T) {
 	model := NewModel(context.Background(), testRuntime(t))
 	model.messages = nil
-	command := cli.Command{Name: "plan", Args: []string{"实现新能力"}}
+	command := cli.Command{Name: "plan", Args: []string{"Implement a new capability"}}
 	result := cli.Result{Handled: true, Output: "# Full Plan\n\n- Step"}
 	suppress := commandOutputAlreadyRendered(command, result)
 	if !suppress {
@@ -63,34 +63,34 @@ func TestPlainPlanCommandStillAppendsResultOutput(t *testing.T) {
 	model := NewModel(context.Background(), testRuntime(t))
 	model.messages = nil
 	command := cli.Command{Name: "plan"}
-	result := cli.Result{Handled: true, Output: "已切换到 Plan 模式"}
+	result := cli.Result{Handled: true, Output: "Switched to Plan mode"}
 	suppress := commandOutputAlreadyRendered(command, result)
 	if suppress {
 		t.Fatal("plain /plan should still render its command output")
 	}
 	model.handleCommandFinished(commandFinishedMsg{command: true, result: result, suppressOutput: suppress})
-	assertMessageContains(t, model.messages, "已切换到 Plan 模式")
+	assertMessageContains(t, model.messages, "Switched to Plan mode")
 }
 
 func TestPlanEventRecordedRendersPresentedPlanContent(t *testing.T) {
 	model := NewModel(context.Background(), testRuntime(t))
 	model.messages = nil
 	runID := "run-plan"
-	model.handleRuntimeEvent(event.NewMessageCompleted(runID, llm.Assistant("计划创建完成，请审阅。"), false))
+	model.handleRuntimeEvent(event.NewMessageCompleted(runID, llm.Assistant("The plan is ready for review."), false))
 	model.handleRuntimeEvent(event.NewPlanEventRecorded(runID, bruntime.PlanEvent{
 		ID:       "plan_1",
 		Action:   bruntime.PlanActionPresented,
 		Revision: 2,
-		Content:  "# Plan\n\n| 文件 | 说明 |\n|------|------|\n| a.go | 实现 |",
+		Content:  "# Plan\n\n| File | Description |\n|------|-------------|\n| a.go | Implement |",
 	}))
 
 	if len(model.messages) != 2 {
 		t.Fatalf("messages = %+v", model.messages)
 	}
-	if model.messages[0].kind != messageAssistant || !strings.Contains(model.messages[0].text, "计划创建完成") {
+	if model.messages[0].kind != messageAssistant || !strings.Contains(model.messages[0].text, "plan is ready") {
 		t.Fatalf("assistant message should remain ordinary output: %+v", model.messages)
 	}
-	if model.messages[1].kind != messagePlan || !strings.Contains(model.messages[1].text, "# Plan") || !strings.Contains(model.messages[1].text, "| a.go | 实现 |") {
+	if model.messages[1].kind != messagePlan || !strings.Contains(model.messages[1].text, "# Plan") || !strings.Contains(model.messages[1].text, "| a.go | Implement |") {
 		t.Fatalf("plan message missing full content: %+v", model.messages)
 	}
 }
@@ -99,22 +99,22 @@ func TestSessionReplayRendersPresentedPlanEntriesInOrder(t *testing.T) {
 	model := NewModel(context.Background(), testRuntime(t))
 	model.messages = nil
 	model.replaySessionEntries([]session.Entry{
-		{Type: session.TypeMessage, Message: messagePtr(llm.User("请创建计划"))},
+		{Type: session.TypeMessage, Message: messagePtr(llm.User("Create a plan"))},
 		{Type: session.TypePlanEvent, Plan: &bruntime.PlanEvent{ID: "plan_1", Action: bruntime.PlanActionCreated, Revision: 1, Content: "# Draft"}},
 		{Type: session.TypePlanEvent, Plan: &bruntime.PlanEvent{ID: "plan_1", Action: bruntime.PlanActionPresented, Revision: 1, Content: "# Final Plan\n\n- Step"}},
-		{Type: session.TypeMessage, Message: messagePtr(llm.Assistant("计划创建完成，请审阅。"))},
+		{Type: session.TypeMessage, Message: messagePtr(llm.Assistant("The plan is ready for review."))},
 	}, nil)
 
 	if len(model.messages) != 3 {
 		t.Fatalf("messages = %+v", model.messages)
 	}
-	if model.messages[0].kind != messageUser || !strings.Contains(model.messages[0].text, "请创建计划") {
+	if model.messages[0].kind != messageUser || !strings.Contains(model.messages[0].text, "Create a plan") {
 		t.Fatalf("user message order broken: %+v", model.messages)
 	}
 	if model.messages[1].kind != messagePlan || !strings.Contains(model.messages[1].text, "# Final Plan") || strings.Contains(model.messages[1].text, "# Draft") {
 		t.Fatalf("plan replay message = %+v", model.messages[1])
 	}
-	if model.messages[2].kind != messageAssistant || !strings.Contains(model.messages[2].text, "计划创建完成") {
+	if model.messages[2].kind != messageAssistant || !strings.Contains(model.messages[2].text, "plan is ready") {
 		t.Fatalf("assistant message order broken: %+v", model.messages)
 	}
 }
@@ -195,7 +195,7 @@ func TestLayoutExpandsInputRowsUpward(t *testing.T) {
 
 func TestLongInputWrapsAndShrinkRestoresSingleRow(t *testing.T) {
 	model := NewModel(context.Background(), testRuntime(t))
-	model.replaceInput(strings.Repeat("当前的内容", 3))
+	model.replaceInput(strings.Repeat("🧩content", 3))
 
 	expanded := model.layoutFor(20, 24)
 	if expanded.inputRows <= 1 {
@@ -205,7 +205,7 @@ func TestLongInputWrapsAndShrinkRestoresSingleRow(t *testing.T) {
 		t.Fatalf("expanded layout = %+v", expanded)
 	}
 
-	model.replaceInput("短")
+	model.replaceInput("x")
 	shrunk := model.layoutFor(20, 24)
 	if shrunk.inputRows != 1 || shrunk.messageRows != 19 || shrunk.inputTop != 20 {
 		t.Fatalf("shrunk layout = %+v", shrunk)
@@ -233,7 +233,7 @@ func TestWrappedInputCursorMovesToWrappedLine(t *testing.T) {
 
 func TestWrappedInputWideRunesStayWithinWidth(t *testing.T) {
 	model := NewModel(context.Background(), testRuntime(t))
-	model.replaceInput("当前内容当前内容")
+	model.replaceInput("🧩🧩🧩🧩")
 
 	lines := model.wrappedInputLines(5)
 	if len(lines) < 2 {
@@ -285,10 +285,10 @@ func TestStreamingAssistantDeltasProduceSingleFinalMessage(t *testing.T) {
 	model := NewModel(context.Background(), testRuntime(t))
 	model.messages = nil
 	model.beginStreamingAssistantMessage()
-	model.appendStreamingAssistantDelta("你")
-	model.appendStreamingAssistantDelta("好")
-	model.finishStreamingAssistantMessage("你好")
-	if len(model.messages) != 1 || model.messages[0].text != "你好" {
+	model.appendStreamingAssistantDelta("Hel")
+	model.appendStreamingAssistantDelta("lo")
+	model.finishStreamingAssistantMessage("Hello")
+	if len(model.messages) != 1 || model.messages[0].text != "Hello" {
 		t.Fatalf("messages = %+v", model.messages)
 	}
 }
@@ -297,7 +297,7 @@ func TestBlankStreamingAssistantIsRemovedAroundToolActivity(t *testing.T) {
 	model := NewModel(context.Background(), testRuntime(t))
 	model.messages = nil
 	model.beginStreamingAssistantMessage()
-	model.appendActivity("工具调用: write_file (处理中)")
+	model.appendActivity("Tool call: write_file (in progress)")
 	model.finishStreamingAssistantMessage("")
 	if len(model.messages) != 1 || !strings.Contains(model.messages[0].text, "write_file") {
 		t.Fatalf("messages = %+v", model.messages)
@@ -307,12 +307,11 @@ func TestBlankStreamingAssistantIsRemovedAroundToolActivity(t *testing.T) {
 func TestStreamingReasoningDeltasProduceSingleFinalMessage(t *testing.T) {
 	model := NewModel(context.Background(), testRuntime(t))
 	model.messages = nil
-	model.appendStreamingReasoningDelta("先")
-	model.appendStreamingReasoningDelta("想")
-	model.appendStreamingReasoningDelta("一")
-	model.appendStreamingReasoningDelta("下")
-	model.finishStreamingReasoningMessage("先想一下")
-	if len(model.messages) != 1 || model.messages[0].kind != messageReasoning || model.messages[0].text != "先想一下" {
+	model.appendStreamingReasoningDelta("Think")
+	model.appendStreamingReasoningDelta(" this")
+	model.appendStreamingReasoningDelta(" through")
+	model.finishStreamingReasoningMessage("Think this through")
+	if len(model.messages) != 1 || model.messages[0].kind != messageReasoning || model.messages[0].text != "Think this through" {
 		t.Fatalf("messages = %+v", model.messages)
 	}
 }
@@ -331,20 +330,20 @@ func TestReasoningDeltaViaRuntimeEventCreatesReasoningMessage(t *testing.T) {
 	model := NewModel(context.Background(), testRuntime(t))
 	model.messages = nil
 	runID := "run-r1"
-	model.handleRuntimeEvent(event.NewMessageDelta(runID, llm.RoleAssistant, "reasoning", "思考步骤1"))
-	model.handleRuntimeEvent(event.NewMessageDelta(runID, llm.RoleAssistant, "reasoning", "思考步骤2"))
+	model.handleRuntimeEvent(event.NewMessageDelta(runID, llm.RoleAssistant, "reasoning", "Reasoning step 1"))
+	model.handleRuntimeEvent(event.NewMessageDelta(runID, llm.RoleAssistant, "reasoning", "Reasoning step 2"))
 	model.handleRuntimeEvent(event.NewMessageCompleted(runID, llm.Message{
 		Role:             llm.RoleAssistant,
-		ReasoningContent: "思考步骤1思考步骤2",
-		Content:          "最终答案",
+		ReasoningContent: "Reasoning step 1Reasoning step 2",
+		Content:          "Final answer",
 	}, false))
 	hasReasoning := false
 	hasAnswer := false
 	for _, msg := range model.messages {
-		if msg.kind == messageReasoning && strings.Contains(msg.text, "思考步骤") {
+		if msg.kind == messageReasoning && strings.Contains(msg.text, "Reasoning step") {
 			hasReasoning = true
 		}
-		if msg.kind == messageAssistant && strings.Contains(msg.text, "最终答案") {
+		if msg.kind == messageAssistant && strings.Contains(msg.text, "Final answer") {
 			hasAnswer = true
 		}
 	}
@@ -401,12 +400,12 @@ func TestApprovalCancellationClearsMatchingDialogOnly(t *testing.T) {
 
 func TestToolCompletionStatusLabels(t *testing.T) {
 	tests := map[tool.ToolCallStatus]string{
-		tool.ToolCallSuccess:     "完成",
-		tool.ToolCallFailed:      "失败",
-		tool.ToolCallTimeout:     "超时",
-		tool.ToolCallInterrupted: "已取消",
-		tool.ToolCallRejected:    "已拒绝",
-		tool.ToolCallSkipped:     "已跳过",
+		tool.ToolCallSuccess:     "completed",
+		tool.ToolCallFailed:      "failed",
+		tool.ToolCallTimeout:     "timed out",
+		tool.ToolCallInterrupted: "canceled",
+		tool.ToolCallRejected:    "rejected",
+		tool.ToolCallSkipped:     "skipped",
 	}
 	for status, want := range tests {
 		if got := toolCompletionStatus(status); got != want {
@@ -561,7 +560,7 @@ func TestRuntimeEventsUpdateSingleToolActivityLine(t *testing.T) {
 	for _, message := range model.messages {
 		if strings.Contains(message.text, "write_file") {
 			count++
-			if !strings.Contains(message.text, "write_file[a.txt]") || !strings.Contains(message.text, "完成") {
+			if !strings.Contains(message.text, "write_file[a.txt]") || !strings.Contains(message.text, "completed") {
 				t.Fatalf("message = %s", message.text)
 			}
 		}
@@ -580,37 +579,37 @@ func TestToolActivityTextDisplaysBuiltinArguments(t *testing.T) {
 		{
 			name: "read path",
 			call: llm.ToolCall{Function: llm.FunctionCall{Name: "read_file", Arguments: `{"path":"pom.xml"}`}},
-			want: "工具调用: read_file[pom.xml] (完成)",
+			want: "Tool call: read_file[pom.xml] (completed)",
 		},
 		{
 			name: "write path",
 			call: llm.ToolCall{Function: llm.FunctionCall{Name: "write_file", Arguments: `{"path":"internal/tui/tui.go","content":"..."}`}},
-			want: "工具调用: write_file[internal/tui/tui.go] (完成)",
+			want: "Tool call: write_file[internal/tui/tui.go] (completed)",
 		},
 		{
 			name: "edit path",
 			call: llm.ToolCall{Function: llm.FunctionCall{Name: "edit_file", Arguments: `{"path":"README.md","old_text":"a","new_text":"b"}`}},
-			want: "工具调用: edit_file[README.md] (完成)",
+			want: "Tool call: edit_file[README.md] (completed)",
 		},
 		{
 			name: "execute command",
 			call: llm.ToolCall{Function: llm.FunctionCall{Name: "execute_command", Arguments: `{"command":"find src -name \"*.java\" | sort | head -100"}`}},
-			want: `工具调用: execute_command[find src -name "*.java" | sort | head -100] (完成)`,
+			want: `Tool call: execute_command[find src -name "*.java" | sort | head -100] (completed)`,
 		},
 		{
 			name: "mcp unchanged",
 			call: llm.ToolCall{Function: llm.FunctionCall{Name: "mcp__filesystem__read_file", Arguments: `{"path":"pom.xml"}`}},
-			want: "工具调用: mcp__filesystem__read_file (完成)",
+			want: "Tool call: mcp__filesystem__read_file (completed)",
 		},
 		{
 			name: "skill unchanged",
 			call: llm.ToolCall{Function: llm.FunctionCall{Name: "load_skill", Arguments: `{"name":"review"}`}},
-			want: "工具调用: load_skill (完成)",
+			want: "Tool call: load_skill (completed)",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := toolActivityText(tt.call, "完成"); got != tt.want {
+			if got := toolActivityText(tt.call, "completed"); got != tt.want {
 				t.Fatalf("toolActivityText() = %q, want %q", got, tt.want)
 			}
 		})
@@ -623,22 +622,22 @@ func TestRunActivityTracksReasoningContentAndCompletion(t *testing.T) {
 	runID := "run-1"
 
 	model.handleRuntimeEvent(event.NewRunStarted(runID, model.runtime.Mode, "hello"))
-	if !strings.Contains(model.agentStatusText, "思考中") {
-		t.Fatalf("agentStatusText = %q, want 思考中", model.agentStatusText)
+	if !strings.Contains(model.agentStatusText, "Thinking") {
+		t.Fatalf("agentStatusText = %q, want Thinking", model.agentStatusText)
 	}
 
-	model.handleRuntimeEvent(event.NewMessageDelta(runID, llm.RoleAssistant, "reasoning", "先想"))
-	if !strings.Contains(model.agentStatusText, "推理中") {
-		t.Fatalf("agentStatusText = %q, want 推理中", model.agentStatusText)
+	model.handleRuntimeEvent(event.NewMessageDelta(runID, llm.RoleAssistant, "reasoning", "Think first"))
+	if !strings.Contains(model.agentStatusText, "Reasoning") {
+		t.Fatalf("agentStatusText = %q, want Reasoning", model.agentStatusText)
 	}
 
-	model.handleRuntimeEvent(event.NewMessageDelta(runID, llm.RoleAssistant, "content", "答案"))
-	if !strings.Contains(model.agentStatusText, "生成回答") {
-		t.Fatalf("agentStatusText = %q, want 生成回答", model.agentStatusText)
+	model.handleRuntimeEvent(event.NewMessageDelta(runID, llm.RoleAssistant, "content", "Answer"))
+	if !strings.Contains(model.agentStatusText, "Generating response") {
+		t.Fatalf("agentStatusText = %q, want Generating response", model.agentStatusText)
 	}
-	assertMessageContains(t, model.messages, "答案")
+	assertMessageContains(t, model.messages, "Answer")
 
-	model.handleRuntimeEvent(event.NewRunCompleted(runID, "答案"))
+	model.handleRuntimeEvent(event.NewRunCompleted(runID, "Answer"))
 	if model.agentStatusText != "" {
 		t.Fatalf("agentStatusText = %q, want empty after completed", model.agentStatusText)
 	}
@@ -647,15 +646,15 @@ func TestRunActivityTracksReasoningContentAndCompletion(t *testing.T) {
 	model2 := NewModel(context.Background(), testRuntime(t))
 	model2.messages = nil
 	reasoningRunID := "run-2"
-	model2.handleRuntimeEvent(event.NewMessageDelta(reasoningRunID, llm.RoleAssistant, "reasoning", "思考中"))
+	model2.handleRuntimeEvent(event.NewMessageDelta(reasoningRunID, llm.RoleAssistant, "reasoning", "Thinking"))
 	model2.handleRuntimeEvent(event.NewMessageCompleted(reasoningRunID, llm.Message{
 		Role:             llm.RoleAssistant,
-		ReasoningContent: "思考中",
-		Content:          "答案",
+		ReasoningContent: "Thinking",
+		Content:          "Answer",
 	}, false))
 	hasReasoning := false
 	for _, msg := range model2.messages {
-		if msg.kind == messageReasoning && strings.Contains(msg.text, "思考中") {
+		if msg.kind == messageReasoning && strings.Contains(msg.text, "Thinking") {
 			hasReasoning = true
 		}
 	}

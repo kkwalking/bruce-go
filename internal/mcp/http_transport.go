@@ -60,7 +60,7 @@ func (t *HTTPTransport) Notify(ctx context.Context, method string, params any) e
 
 func (t *HTTPTransport) post(ctx context.Context, message any) (*http.Response, error) {
 	if strings.TrimSpace(t.url) == "" {
-		return nil, errors.New("MCP HTTP URL 不能为空")
+		return nil, errors.New("MCP HTTP URL must not be empty")
 	}
 	reqBody, err := json.Marshal(message)
 	if err != nil {

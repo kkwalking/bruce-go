@@ -19,7 +19,7 @@ func TestPlanToolsOperateOnlyOnActivePlan(t *testing.T) {
 	RegisterPlanTools(registry, store, func() runtime.PlanState { return active })
 
 	out := registry.Execute(context.Background(), "replace_plan", map[string]string{"content": "# Plan", "summary": "create"})
-	if !strings.Contains(out, "计划已创建") {
+	if !strings.Contains(out, "Plan created") {
 		t.Fatalf("replace_plan output = %s", out)
 	}
 	if len(recorder.events) != 1 {
@@ -35,7 +35,7 @@ func TestPlanToolsOperateOnlyOnActivePlan(t *testing.T) {
 	}
 
 	out = registry.Execute(context.Background(), "edit_plan", map[string]string{"old_text": "# Plan", "new_text": "# Better Plan", "summary": "edit"})
-	if !strings.Contains(out, "计划已编辑") {
+	if !strings.Contains(out, "Plan edited") {
 		t.Fatalf("edit_plan output = %s", out)
 	}
 	if len(recorder.events) != 2 || recorder.events[1].Action != runtime.PlanActionUpdated {
@@ -63,7 +63,7 @@ func TestPlanToolRegistryBlocksWorkspaceWritesAndMutatingCommands(t *testing.T) 
 		t.Fatalf("read-only command output = %s", out)
 	}
 	out = registry.Execute(context.Background(), "execute_command", map[string]string{"command": "touch x.txt"})
-	if !strings.Contains(out, "plan mode 安全策略拒绝") {
+	if !strings.Contains(out, "plan-mode security policy") {
 		t.Fatalf("mutating command output = %s", out)
 	}
 	if _, err := os.Stat(filepath.Join(workspace, "x.txt")); !os.IsNotExist(err) {

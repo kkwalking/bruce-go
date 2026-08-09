@@ -116,7 +116,7 @@ func (c ConcurrencyConfig) Truncate(text string) string {
 	if len(text) <= c.MaxOutputChars {
 		return text
 	}
-	return text[:c.MaxOutputChars] + "\n... 输出过长，已截断 ..."
+	return text[:c.MaxOutputChars] + "\n... Output exceeded the limit and was truncated ..."
 }
 
 type Status struct {
@@ -152,17 +152,17 @@ func (s Status) DisplayString() string {
 		tools = append(tools, name)
 	}
 	status := strings.TrimSpace(
-		"当前模式: " + string(s.Mode) + "\n" +
-			"当前模型: " + empty(s.Model, "unknown") + " [" + empty(s.Provider, "unknown") + "]\n" +
-			"工作目录: " + s.WorkspaceRoot + "\n" +
-			"RAG: 关闭\n" +
-			"RAG 索引: 未建立\n" +
+		"Current mode: " + string(s.Mode) + "\n" +
+			"Current model: " + empty(s.Model, "unknown") + " [" + empty(s.Provider, "unknown") + "]\n" +
+			"Working directory: " + s.WorkspaceRoot + "\n" +
+			"RAG: disabled\n" +
+			"RAG index: not built\n" +
 			"Web: " + onOff(s.WebEnabled) + " (provider=" + empty(s.WebSearchProvider, "unknown") + ")\n" +
-			"MCP: " + empty(s.MCPSummary, "未配置") + "\n" +
+			"MCP: " + empty(s.MCPSummary, "not configured") + "\n" +
 			"HITL: " + onOff(s.HITLEnabled) + "\n" +
 			"Sandbox: " + empty(s.SandboxMode, "unknown") + " (backend=" + empty(s.SandboxBackend, "unknown") + ", network=" + onOff(s.SandboxNetwork) + ", available=" + onOff(s.SandboxAvailable) + ")\n" +
 			"Parallel: " + onOff(s.ParallelEnabled) + "\n" +
-			"Skills: " + itoa(s.SkillCount) + " 个\n" +
+			"Skills: " + itoa(s.SkillCount) + "\n" +
 			"Tools: " + strings.Join(tools, ", "),
 	)
 	if !s.SandboxAvailable && strings.TrimSpace(s.SandboxReason) != "" {
@@ -176,9 +176,9 @@ func (s Status) DisplayString() string {
 
 func onOff(v bool) string {
 	if v {
-		return "开启"
+		return "enabled"
 	}
-	return "关闭"
+	return "disabled"
 }
 
 func empty(v, fallback string) string {

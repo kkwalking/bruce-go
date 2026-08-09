@@ -14,7 +14,7 @@ func newPlatformRunner(string) Runner { return unsupportedRunner{} }
 func (unsupportedRunner) Name() string { return "unsupported" }
 
 func (unsupportedRunner) Probe(context.Context) Capabilities {
-	return Capabilities{Backend: "unsupported", Reason: "当前平台暂不支持原生 sandbox: " + runtime.GOOS}
+	return Capabilities{Backend: "unsupported", Reason: "native sandboxing is not currently supported on this platform: " + runtime.GOOS}
 }
 
 func (unsupportedRunner) Run(context.Context, CommandSpec, Policy) (RunResult, error) {

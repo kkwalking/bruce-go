@@ -34,7 +34,7 @@ func TestParserBuildsAndValidatesDAG(t *testing.T) {
 func TestParserRejectsMissingDependency(t *testing.T) {
 	raw := `{"tasks":[{"id":"task_a","description":"a","type":"ANALYSIS","dependencies":["task_missing"]}]}`
 	_, err := Parser{}.Parse(raw, "fallback")
-	if err == nil || !strings.Contains(err.Error(), "依赖不存在") {
+	if err == nil || !strings.Contains(err.Error(), "dependency does not exist") {
 		t.Fatalf("expected missing dependency error, got %v", err)
 	}
 }

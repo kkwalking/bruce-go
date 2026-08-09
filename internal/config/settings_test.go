@@ -127,7 +127,7 @@ func TestCompactionRatioValidationAndThreshold(t *testing.T) {
 
 	invalidWindow := DefaultSettings().Compaction
 	invalidWindow.ReserveTokens = 80000
-	if _, err := invalidWindow.Threshold(100000); err == nil || !strings.Contains(err.Error(), "必须大于 reserveTokens") {
+	if _, err := invalidWindow.Threshold(100000); err == nil || !strings.Contains(err.Error(), "must be greater than reserveTokens") {
 		t.Fatalf("invalid usable window error = %v", err)
 	}
 }
@@ -199,17 +199,17 @@ func TestLoaderValidatesMCPToolAccess(t *testing.T) {
 		{
 			name: "wildcard",
 			data: `{"mcp":{"servers":{"demo":{"type":"stdio","toolAccess":{"read_*":"read-only"}}}}}`,
-			want: "不支持通配符",
+			want: "does not support wildcard",
 		},
 		{
 			name: "trim collision",
 			data: `{"mcp":{"servers":{"demo":{"type":"stdio","toolAccess":{"read":"read-only"," read ":"read-only"}}}}}`,
-			want: "重复",
+			want: "duplicate",
 		},
 		{
 			name: "http workspace write",
 			data: `{"mcp":{"servers":{"remote":{"type":"streamable-http","toolAccess":{"write":"workspace-write"}}}}}`,
-			want: "HTTP MCP 无法强制 workspace",
+			want: "HTTP MCP cannot enforce workspace",
 		},
 	}
 	for _, tc := range cases {

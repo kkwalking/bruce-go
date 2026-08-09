@@ -18,12 +18,12 @@ func main() {
 		noMCP    bool
 		showVer  bool
 	)
-	flag.StringVar(&settings, "settings", "", "setting.json 路径，默认 ~/.bruce/setting.json")
-	flag.BoolVar(&noMCP, "no-mcp", false, "启动时不自动连接 MCP server")
-	flag.BoolVar(&showVer, "version", false, "显示版本")
+	flag.StringVar(&settings, "settings", "", "path to setting.json (default: ~/.bruce/setting.json)")
+	flag.BoolVar(&noMCP, "no-mcp", false, "do not connect to MCP servers at startup")
+	flag.BoolVar(&showVer, "version", false, "show version")
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Bruce Go Coding Agent %s\n\n", version.Current)
-		fmt.Fprintln(flag.CommandLine.Output(), "用法:")
+		fmt.Fprintln(flag.CommandLine.Output(), "Usage:")
 		fmt.Fprintln(flag.CommandLine.Output(), "  bruce [--settings path] [--no-mcp]")
 		fmt.Fprintln(flag.CommandLine.Output())
 		fmt.Fprintln(flag.CommandLine.Output(), cli.Help())
@@ -34,7 +34,7 @@ func main() {
 		return
 	}
 	if flag.NArg() > 0 {
-		fmt.Fprintln(os.Stderr, "未知参数:", flag.Arg(0))
+		fmt.Fprintln(os.Stderr, "Unknown argument:", flag.Arg(0))
 		os.Exit(2)
 	}
 

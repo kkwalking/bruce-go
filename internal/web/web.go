@@ -87,7 +87,7 @@ func (f Fetcher) Fetch(ctx context.Context, rawURL string) (Page, error) {
 		return Page{}, err
 	}
 	if int64(len(data)) > maxBytes {
-		return Page{}, errors.New("web fetch 响应过大")
+		return Page{}, errors.New("web fetch response is too large")
 	}
 	title, text, err := ExtractHTML(bytes.NewReader(data), f.MaxText)
 	if err != nil {
@@ -127,7 +127,7 @@ func ExtractHTML(r io.Reader, maxText int) (title, text string, err error) {
 		maxText = defaultMaxText
 	}
 	if len(text) > maxText {
-		text = text[:maxText] + "\n... 页面内容过长，已截断 ..."
+		text = text[:maxText] + "\n... Page content exceeded the limit and was truncated ..."
 	}
 	return title, text, nil
 }
@@ -144,11 +144,11 @@ func DefaultNetworkPolicy() NetworkPolicy {
 func (p NetworkPolicy) Check(raw string) (string, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
-		return "", errors.New("URL 不能为空")
+		return "", errors.New("URL must not be empty")
 	}
 	u, err := url.Parse(value)
 	if err != nil || u.Scheme == "" || u.Host == "" {
-		return "", errors.New("URL 必须包含 scheme 和 host")
+		return "", errors.New("URL must include a scheme and host")
 	}
 	allowed := p.AllowedSchemes
 	if len(allowed) == 0 {
@@ -162,7 +162,7 @@ func (p NetworkPolicy) Check(raw string) (string, error) {
 		}
 	}
 	if !ok {
-		return "", errors.New("不允许的 URL scheme: " + u.Scheme)
+		return "", errors.New("URL scheme is not allowed: " + u.Scheme)
 	}
 	if !p.AllowPrivateNetworks {
 		host := u.Hostname()
@@ -174,11 +174,11 @@ func (p NetworkPolicy) Check(raw string) (string, error) {
 		}
 		for _, ip := range ips {
 			if isPrivateIP(ip) {
-				return "", errors.New("默认不允许访问本地或内网地址")
+				return "", errors.New("access to local and private-network addresses is denied by default")
 			}
 		}
 		if strings.EqualFold(host, "localhost") {
-			return "", errors.New("默认不允许访问 localhost")
+			return "", errors.New("access to localhost is denied by default")
 		}
 	}
 	return u.String(), nil
@@ -223,10 +223,10 @@ func (m *Manager) Status() string {
 
 func (m *Manager) Search(ctx context.Context, query string, maxResults int) ([]Result, error) {
 	if m == nil || !m.Enabled {
-		return nil, errors.New("WebSearch 已关闭")
+		return nil, errors.New("WebSearch is disabled")
 	}
 	if m.Searcher == nil {
-		return nil, errors.New("未配置 WebSearch provider")
+		return nil, errors.New("no WebSearch provider is configured")
 	}
 	if maxResults <= 0 {
 		maxResults = defaultMaxResults
@@ -236,7 +236,7 @@ func (m *Manager) Search(ctx context.Context, query string, maxResults int) ([]R
 
 func (m *Manager) Fetch(ctx context.Context, rawURL string) (Page, error) {
 	if m == nil || !m.Enabled {
-		return Page{}, errors.New("WebFetch 已关闭")
+		return Page{}, errors.New("WebFetch is disabled")
 	}
 	return m.Fetcher.Fetch(ctx, rawURL)
 }
@@ -244,8 +244,8 @@ func (m *Manager) Fetch(ctx context.Context, rawURL string) (Page, error) {
 func RegisterTools(registry *tool.Registry, manager *Manager) {
 	registry.Register(tool.Tool{
 		Name:        "web_search",
-		Description: "联网搜索并返回标题、URL 和摘要",
-		Parameters:  rawSchema("query", "搜索关键词", "max_results", "最大结果数"),
+		Description: "Search the web and return titles, URLs, and summaries",
+		Parameters:  rawSchema("query", "Search query", "max_results", "Maximum number of results"),
 		Exec: func(ctx context.Context, args map[string]string) (string, error) {
 			results, err := manager.Search(ctx, args["query"], parsePositive(args["max_results"], defaultMaxResults))
 			if err != nil {
@@ -258,8 +258,8 @@ func RegisterTools(registry *tool.Registry, manager *Manager) {
 	})
 	registry.Register(tool.Tool{
 		Name:        "web_fetch",
-		Description: "抓取 URL 的网页正文",
-		Parameters:  rawSchema("url", "要抓取的 http/https URL"),
+		Description: "Fetch the main text content of a web page",
+		Parameters:  rawSchema("url", "HTTP or HTTPS URL to fetch"),
 		Exec: func(ctx context.Context, args map[string]string) (string, error) {
 			page, err := manager.Fetch(ctx, args["url"])
 			if err != nil {
@@ -331,7 +331,7 @@ func NewSearcher(settings config.WebSearchSettings, client *http.Client) Searche
 
 func (s ZhipuSearcher) Search(ctx context.Context, query string, maxResults int) ([]Result, error) {
 	if strings.TrimSpace(s.APIKey) == "" {
-		return nil, errors.New("缺少 zhipu webSearch.apiKey")
+		return nil, errors.New("missing zhipu webSearch.apiKey")
 	}
 	body, _ := json.Marshal(map[string]any{
 		"search_query":  query,
@@ -354,7 +354,7 @@ func (s ZhipuSearcher) Search(ctx context.Context, query string, maxResults int)
 
 func (s SerpAPISearcher) Search(ctx context.Context, query string, maxResults int) ([]Result, error) {
 	if strings.TrimSpace(s.APIKey) == "" {
-		return nil, errors.New("缺少 serpapi.apiKey")
+		return nil, errors.New("missing serpapi.apiKey")
 	}
 	u, _ := url.Parse("https://serpapi.com/search.json")
 	q := u.Query()
@@ -375,7 +375,7 @@ func (s SerpAPISearcher) Search(ctx context.Context, query string, maxResults in
 
 func (s SearxngSearcher) Search(ctx context.Context, query string, maxResults int) ([]Result, error) {
 	if strings.TrimSpace(s.URL) == "" {
-		return nil, errors.New("缺少 searxng.url")
+		return nil, errors.New("missing searxng.url")
 	}
 	base, err := url.Parse(s.URL)
 	if err != nil {
@@ -490,13 +490,13 @@ func firstString(m map[string]any, keys ...string) string {
 
 func formatResults(results []Result) string {
 	if len(results) == 0 {
-		return "没有搜索结果"
+		return "No search results."
 	}
 	var b strings.Builder
 	for i, result := range results {
-		fmt.Fprintf(&b, "%d. %s\nURL: %s\n摘要: %s\n", i+1, result.Title, result.URL, result.Snippet)
+		fmt.Fprintf(&b, "%d. %s\nURL: %s\nSummary: %s\n", i+1, result.Title, result.URL, result.Snippet)
 		if result.Content != "" && result.Content != result.Snippet {
-			b.WriteString("内容: " + result.Content + "\n")
+			b.WriteString("Content: " + result.Content + "\n")
 		}
 		if i != len(results)-1 {
 			b.WriteString("\n")
