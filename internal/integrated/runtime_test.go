@@ -631,6 +631,38 @@ func TestHandleModelReasoningSubcommand(t *testing.T) {
 	}
 }
 
+func TestStatusReportsReasoningEffort(t *testing.T) {
+	homeDir := t.TempDir()
+	settingsPath := filepath.Join(homeDir, "setting.json")
+	settings := config.DefaultSettings()
+	settings.LLM.DefaultProvider = "deepseek"
+	settings.LLM.DefaultModel = "deepseek-v4-flash"
+	settings.LLM.ReasoningEffort = "high"
+	settings.LLM.Providers["deepseek"] = config.ProviderSetting{APIKey: "test-key"}
+	if err := config.NewLoader(settingsPath).Save(settings); err != nil {
+		t.Fatal(err)
+	}
+	rt, err := New(context.Background(), Options{
+		Workspace:    t.TempDir(),
+		HomeDir:      homeDir,
+		SettingsPath: settingsPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupRuntime(t, rt)
+
+	if got := rt.Status().ReasoningEffort; got != "high" {
+		t.Fatalf("reasoning effort = %q, want high", got)
+	}
+	if err := rt.SetReasoningEffort("low"); err != nil {
+		t.Fatal(err)
+	}
+	if got := rt.Status().ReasoningEffort; got != "low" {
+		t.Fatalf("reasoning effort after update = %q, want low", got)
+	}
+}
+
 type recordingChatClient struct {
 	responses []llm.ChatResponse
 	calls     [][]llm.Message

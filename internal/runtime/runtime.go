@@ -123,6 +123,7 @@ type Status struct {
 	Mode              AgentMode
 	Model             string
 	Provider          string
+	ReasoningEffort   string
 	WorkspaceRoot     string
 	RAGEnabled        bool
 	WebEnabled        bool

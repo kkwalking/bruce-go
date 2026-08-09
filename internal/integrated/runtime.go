@@ -394,6 +394,7 @@ func (r *Runtime) Status() runtime.Status {
 		Mode:              r.Mode,
 		Model:             r.Client.ModelName(),
 		Provider:          r.Client.ProviderName(),
+		ReasoningEffort:   r.ReasoningEffort(),
 		WorkspaceRoot:     r.Workspace,
 		RAGEnabled:        false,
 		WebEnabled:        r.Web != nil && r.Web.Enabled,

@@ -1119,8 +1119,12 @@ func (m *Model) drawStatus(canvas []string, columns, row int) {
 }
 
 func statusDetails(status bruntime.Status, homeDir string, elapsedMillis int64) string {
+	model := empty(status.Model, "auto")
+	if effort := strings.TrimSpace(status.ReasoningEffort); effort != "" {
+		model += " (" + effort + ")"
+	}
 	details := fmt.Sprintf(" bruce · %s · mode %s · %s",
-		empty(status.Model, "auto"),
+		model,
 		strings.ToLower(string(status.Mode)),
 		compactPath(status.WorkspaceRoot, homeDir),
 	)

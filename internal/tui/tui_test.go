@@ -137,14 +137,16 @@ func TestLayoutKeepsInputAndStatusDockedAtBottom(t *testing.T) {
 
 func TestStatusDetailsShowsCompactSandboxWithoutMCP(t *testing.T) {
 	details := statusDetails(bruntime.Status{
-		Mode:           bruntime.ModeReact,
-		Model:          "test-model",
-		WorkspaceRoot:  "/home/test/code/bruce-cli",
-		SandboxBackend: "seatbelt",
-		SandboxMode:    "full-access",
-		SandboxNetwork: true,
+		Mode:            bruntime.ModeReact,
+		Model:           "test-model",
+		ReasoningEffort: "high",
+		WorkspaceRoot:   "/home/test/code/bruce-cli",
+		SandboxBackend:  "seatbelt",
+		SandboxMode:     "full-access",
+		SandboxNetwork:  true,
 	}, "/home/test", 12)
 	for _, expected := range []string{
+		"test-model (high)",
 		"~/code/bruce-cli",
 		"sandbox full-access",
 		"12ms",
@@ -157,6 +159,13 @@ func TestStatusDetailsShowsCompactSandboxWithoutMCP(t *testing.T) {
 		if strings.Contains(details, unexpected) {
 			t.Fatalf("status details unexpectedly contains %q: %s", unexpected, details)
 		}
+	}
+}
+
+func TestStatusDetailsOmitsEmptyReasoningEffort(t *testing.T) {
+	details := statusDetails(bruntime.Status{Model: "test-model"}, "", 0)
+	if !strings.Contains(details, "bruce · test-model · mode") {
+		t.Fatalf("status details changed model formatting without reasoning effort: %s", details)
 	}
 }
 
