@@ -20,7 +20,16 @@ import (
 	bruntime "bruce-go/internal/runtime"
 	"bruce-go/internal/session"
 	"bruce-go/internal/tool"
+	"bruce-go/internal/version"
 )
+
+func TestWelcomeLinesUseCurrentVersion(t *testing.T) {
+	welcome := strings.Join(welcomeLines(nil), "\n")
+	want := " Bruce Coding Agent " + version.Current + " "
+	if !strings.Contains(welcome, want) {
+		t.Fatalf("welcome = %q, want title to contain %q", welcome, want)
+	}
+}
 
 func TestModelRunsSlashCommandOnEnter(t *testing.T) {
 	rt, err := integrated.New(context.Background(), integrated.Options{Workspace: t.TempDir(), HomeDir: t.TempDir(), Client: &agent.FakeClient{}})
