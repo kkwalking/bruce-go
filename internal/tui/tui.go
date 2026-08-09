@@ -21,6 +21,7 @@ import (
 	bruntime "bruce-go/internal/runtime"
 	"bruce-go/internal/session"
 	"bruce-go/internal/tool"
+	"bruce-go/internal/version"
 )
 
 const (
@@ -1345,7 +1346,7 @@ func welcomeLines(rt *integrated.Runtime) []string {
 	// title is ASCII-only so runewidth.StringWidth matches terminal cell width;
 	// box-drawing runes like ─ are mis-measured by runewidth (counted as 2,
 	// rendered as 1) in EastAsianWidth locales, which would skew the border math.
-	title := " Bruce Coding Agent "
+	title := " Bruce Coding Agent " + version.Current + " "
 	rows := []string{
 		"  Welcome back!",
 		"  model: " + model,
