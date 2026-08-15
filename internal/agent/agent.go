@@ -36,10 +36,17 @@ type Agent struct {
 }
 
 func New(client llm.ChatClient, registry *tool.Registry, additional string, config runtime.ConcurrencyConfig, events *event.Bus) *Agent {
+	return NewWithSystemPrompt(client, registry, buildPrompt(registry, additional), config, events)
+}
+
+// NewWithSystemPrompt creates an agent whose system prompt is exactly
+// systemPrompt. Unlike New it adds no base prompt, tool guidance, or
+// additional context, which is required by the minimal agent mode.
+func NewWithSystemPrompt(client llm.ChatClient, registry *tool.Registry, systemPrompt string, config runtime.ConcurrencyConfig, events *event.Bus) *Agent {
 	a := &Agent{
 		Client:        client,
 		Tools:         registry,
-		SystemPrompt:  buildPrompt(registry, additional),
+		SystemPrompt:  systemPrompt,
 		MaxIterations: 40,
 		Events:        events,
 	}

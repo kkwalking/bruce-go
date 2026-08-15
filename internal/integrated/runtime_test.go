@@ -15,6 +15,7 @@ import (
 	"bruce-go/internal/event"
 	"bruce-go/internal/llm"
 	"bruce-go/internal/mcp"
+	"bruce-go/internal/minimal"
 	bruntime "bruce-go/internal/runtime"
 	"bruce-go/internal/sandbox"
 	"bruce-go/internal/session"
@@ -128,6 +129,110 @@ func TestRuntimeAgentPromptsIncludeCanonicalWorkspace(t *testing.T) {
 		if link != rt.Workspace && strings.Contains(prompt, "Current working directory: "+link) {
 			t.Errorf("%s system prompt contains uncanonical workspace %q", name, link)
 		}
+	}
+	if rt.minimal.SystemPrompt != minimal.SystemPrompt {
+		t.Fatalf("minimal system prompt = %q, want exact %q", rt.minimal.SystemPrompt, minimal.SystemPrompt)
+	}
+}
+
+func TestMinimalModeExactPromptToolSubsetAndNoTaskContext(t *testing.T) {
+	const marker = "MINIMAL_MUST_NOT_SEE_THIS_AGENTS_INSTRUCTION"
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "AGENTS.md"), []byte(marker), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	client := &recordingChatClient{responses: []llm.ChatResponse{
+		{Content: "react answer"},
+		{Content: "minimal answer"},
+	}}
+	rt, err := New(context.Background(), Options{Workspace: workspace, HomeDir: t.TempDir(), Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupRuntime(t, rt)
+
+	if got := rt.minimal.SystemPrompt; got != minimal.SystemPrompt {
+		t.Fatalf("minimal system prompt = %q, want %q", got, minimal.SystemPrompt)
+	}
+	var toolNames []string
+	for _, definition := range rt.minimal.Tools.Definitions() {
+		toolNames = append(toolNames, definition.Name)
+	}
+	if strings.Join(toolNames, ",") != "edit_file,execute_command,read_file,write_file" {
+		t.Fatalf("minimal tool definitions = %v", toolNames)
+	}
+
+	regular := rt.Handle(context.Background(), "regular task")
+	if regular.Err != nil || regular.Output != "react answer" {
+		t.Fatalf("react task result=%+v", regular)
+	}
+	if len(client.calls) != 1 || !messagesContainText(client.calls[0], marker) {
+		t.Fatalf("react call should include AGENTS.md context, calls=%d", len(client.calls))
+	}
+	reactSessionID := rt.Session.Context(rt.Mode).SessionID
+
+	switched := rt.Handle(context.Background(), "/minimal")
+	if switched.Err != nil || rt.Mode != bruntime.ModeMinimal {
+		t.Fatalf("minimal switch = %+v mode=%s", switched, rt.Mode)
+	}
+	if !strings.Contains(switched.Output, "fresh session") {
+		t.Fatalf("minimal switch output = %q", switched.Output)
+	}
+	minimalContext := rt.Session.Context(rt.Mode)
+	if minimalContext.Mode != bruntime.ModeMinimal {
+		t.Fatalf("session mode = %q, want %q", minimalContext.Mode, bruntime.ModeMinimal)
+	}
+	if minimalContext.SessionID == reactSessionID {
+		t.Fatalf("minimal switch should start a fresh session, got %q", minimalContext.SessionID)
+	}
+	if minimalContext.MessageCount != 0 {
+		t.Fatalf("minimal session message count = %d, want 0", minimalContext.MessageCount)
+	}
+	already := rt.Handle(context.Background(), "/minimal")
+	if already.Err != nil || !strings.Contains(already.Output, "Already in Minimal mode") {
+		t.Fatalf("repeated minimal switch = %+v", already)
+	}
+	if got := rt.Session.Context(rt.Mode).SessionID; got != minimalContext.SessionID {
+		t.Fatalf("repeated /minimal changed session: %q -> %q", minimalContext.SessionID, got)
+	}
+
+	rejectedSkill := rt.Handle(context.Background(), "$demo do the thing")
+	if rejectedSkill.Err == nil || !strings.Contains(rejectedSkill.Err.Error(), "not available in Minimal mode") {
+		t.Fatalf("minimal skill invocation = %+v", rejectedSkill)
+	}
+
+	minimalTask := rt.Handle(context.Background(), "minimal task")
+	if minimalTask.Err != nil || minimalTask.Output != "minimal answer" {
+		t.Fatalf("minimal task result=%+v", minimalTask)
+	}
+	if len(client.calls) != 2 {
+		t.Fatalf("minimal call count = %d", len(client.calls))
+	}
+	if len(client.calls[1]) == 0 || client.calls[1][0].Content != minimal.SystemPrompt {
+		t.Fatalf("minimal first message = %+v, want exact system prompt", client.calls[1])
+	}
+	if len(client.calls[1]) != 2 {
+		t.Fatalf("minimal history should contain only the system prompt and current task, got %d messages", len(client.calls[1]))
+	}
+	if messagesContainText(client.calls[1], marker) || messagesContainText(client.calls[1], "regular task") || messagesContainText(client.calls[1], "react answer") {
+		t.Fatalf("minimal call must not include full-mode history or context: %+v", client.calls[1])
+	}
+
+	status := rt.Status()
+	var statusTools []string
+	for _, name := range status.ToolNames {
+		if name == "load_skill" || name == "read_skill_resource" || strings.HasPrefix(name, "mcp__") || name == "web_search" || name == "web_fetch" {
+			continue
+		}
+		statusTools = append(statusTools, name)
+	}
+	if strings.Join(statusTools, ",") != "edit_file,execute_command,read_file,write_file" {
+		t.Fatalf("minimal status tools = %v", statusTools)
+	}
+
+	switchedBack := rt.Handle(context.Background(), "/react")
+	if switchedBack.Err != nil || rt.Mode != bruntime.ModeReact {
+		t.Fatalf("react switch back = %+v mode=%s", switchedBack, rt.Mode)
 	}
 }
 

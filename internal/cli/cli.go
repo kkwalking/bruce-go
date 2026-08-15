@@ -56,6 +56,7 @@ var statusOptions = []CommandOption{
 
 var Commands = []CommandInfo{
 	{Name: "react", Usage: "/react", Description: "Switch to ReAct mode"},
+	{Name: "minimal", Usage: "/minimal", Description: "Switch to Minimal mode with a fresh session: fixed prompt and basic shell and file tools"},
 	{
 		Name: "plan", Usage: "/plan [task|approve|reject|cancel|continue]", Description: "Enter plan mode, revise a plan, or review a plan",
 		Complete: "/plan ",

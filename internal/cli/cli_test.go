@@ -60,7 +60,7 @@ func TestParseNormalizesCommandNames(t *testing.T) {
 
 func TestHelpContainsNonRAGCommandsOnly(t *testing.T) {
 	help := Help()
-	for _, want := range []string{"/react", "/plan", "/model", "/web", "/mcp", "/skill", "/status", "/compact", "@image:", "@clipboard"} {
+	for _, want := range []string{"/react", "/minimal", "/plan", "/model", "/web", "/mcp", "/skill", "/status", "/compact", "@image:", "@clipboard"} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("help missing %q:\n%s", want, help)
 		}
