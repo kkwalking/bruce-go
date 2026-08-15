@@ -34,6 +34,30 @@ func TestParseSlashAndExitAliases(t *testing.T) {
 	}
 }
 
+func TestParseNormalizesCommandNames(t *testing.T) {
+	tests := []struct {
+		input string
+		name  string
+		args  []string
+	}{
+		{input: "/HELP", name: "help"},
+		{input: "  /Plan approve", name: "plan", args: []string{"approve"}},
+		{input: "EXIT", name: "exit"},
+	}
+	for _, tt := range tests {
+		cmd, ok := Parse(tt.input)
+		if !ok {
+			t.Fatalf("Parse(%q) should be a command", tt.input)
+		}
+		if cmd.Name != tt.name {
+			t.Fatalf("Parse(%q) name=%q, want %q", tt.input, cmd.Name, tt.name)
+		}
+		if strings.Join(cmd.Args, ",") != strings.Join(tt.args, ",") {
+			t.Fatalf("Parse(%q) args=%v, want %v", tt.input, cmd.Args, tt.args)
+		}
+	}
+}
+
 func TestHelpContainsNonRAGCommandsOnly(t *testing.T) {
 	help := Help()
 	for _, want := range []string{"/react", "/plan", "/model", "/web", "/mcp", "/skill", "/status", "/compact", "@image:", "@clipboard"} {

@@ -684,7 +684,7 @@ func TestRunActivityTracksReasoningContentAndCompletion(t *testing.T) {
 func TestCompletesTopLevelSlashCommandsWithoutRAG(t *testing.T) {
 	rt := testRuntime(t)
 	values := completionValues(completionsFor("/", 1, rt))
-	for _, want := range []string{"/help", "/status", "/session", "/model"} {
+	for _, want := range []string{"/help", "/status", "/session", "/model "} {
 		if !contains(values, want) {
 			t.Fatalf("completion missing %q: %v", want, values)
 		}
@@ -696,6 +696,106 @@ func TestCompletesTopLevelSlashCommandsWithoutRAG(t *testing.T) {
 	}
 }
 
+func TestEveryRegisteredSlashCommandCompletesWithTab(t *testing.T) {
+	rt := testRuntime(t)
+	for _, command := range cli.Commands {
+		input := "/" + command.Name
+		cursor := len([]rune(input))
+		expected := command.CompletionValue()
+		item := completionItemByValue(t, completionsFor(input, cursor, rt), expected)
+		got, gotCursor := applyCompletion(input, cursor, item)
+		if got != expected {
+			t.Fatalf("Tab completion for %q = %q, want %q", input, got, expected)
+		}
+		if gotCursor != len([]rune(expected)) {
+			t.Fatalf("cursor after completing %q = %d, want %d", input, gotCursor, len([]rune(expected)))
+		}
+	}
+}
+
+func TestSlashCompletionDoesNotSuggestUnregisteredCommands(t *testing.T) {
+	rt := testRuntime(t)
+	for _, input := range []string{"/concurrency", "/concurrency "} {
+		if items := completionsFor(input, len([]rune(input)), rt); len(items) != 0 {
+			t.Fatalf("completions for %q = %v, want none", input, completionValues(items))
+		}
+	}
+}
+
+func TestSlashCompletionMatchesParseWithLeadingWhitespace(t *testing.T) {
+	rt := testRuntime(t)
+	input := "  /sand"
+	cursor := len([]rune(input))
+
+	item := completionItemByValue(t, completionsFor(input, cursor, rt), "/sandbox ")
+	got, gotCursor := applyCompletion(input, cursor, item)
+	if got != "  /sandbox " {
+		t.Fatalf("Tab completion with leading whitespace = %q", got)
+	}
+	if gotCursor != len([]rune("  /sandbox ")) {
+		t.Fatalf("cursor after leading-whitespace completion = %d", gotCursor)
+	}
+	firstLevel := completionValues(completionsFor(got, gotCursor, rt))
+	for _, want := range []string{"status", "mode ", "network "} {
+		if !contains(firstLevel, want) {
+			t.Fatalf("sandbox completion missing %q: %v", want, firstLevel)
+		}
+	}
+}
+
+func TestEverySlashOptionLevelAppliesWithTab(t *testing.T) {
+	rt := testRuntime(t)
+	for _, command := range cli.Commands {
+		if len(command.Options) == 0 {
+			continue
+		}
+		input := command.CompletionValue()
+		cursor := len([]rune(input))
+		items := completionsFor(input, cursor, rt)
+		for _, option := range command.Options {
+			item := completionItemByValue(t, items, option.Value)
+			got, gotCursor := applyCompletion(input, cursor, item)
+			want := input + option.Value
+			if got != want {
+				t.Fatalf("Tab completion for %s %q = %q, want %q", command.Name, option.Value, got, want)
+			}
+			if gotCursor != len([]rune(want)) {
+				t.Fatalf("cursor after completing %s %q = %d, want %d", command.Name, option.Value, gotCursor, len([]rune(want)))
+			}
+		}
+	}
+}
+
+func TestModelCommandUsesTheSameTabFlow(t *testing.T) {
+	rt := testSwitchableRuntime(t)
+
+	input := "/model"
+	cursor := len([]rune(input))
+	item := completionItemByValue(t, completionsFor(input, cursor, rt), "/model ")
+	input, cursor = applyCompletion(input, cursor, item)
+	if input != "/model " {
+		t.Fatalf("first Tab for /model = %q, want /model ", input)
+	}
+
+	models := completionsFor(input, cursor, rt)
+	modelItem := completionItemByValue(t, models, "acme/alpha")
+	input, cursor = applyCompletion(input, cursor, modelItem)
+	if input != "/model acme/alpha" {
+		t.Fatalf("second Tab for model selection = %q", input)
+	}
+	if cursor != len([]rune(input)) {
+		t.Fatalf("cursor after model completion = %d, want %d", cursor, len([]rune(input)))
+	}
+
+	// The Enter-driven model selector popup must remain available.
+	model := NewModel(context.Background(), rt)
+	model.replaceInput("/model")
+	model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !model.modelSelectorOpen || model.inputText() != "/model " {
+		t.Fatalf("Enter should open the model selector, got input=%q open=%v", model.inputText(), model.modelSelectorOpen)
+	}
+}
+
 func TestCompletesPlanSubcommands(t *testing.T) {
 	rt := testRuntime(t)
 	values := completionValues(completionsFor("/plan ", len("/plan "), rt))
@@ -703,6 +803,10 @@ func TestCompletesPlanSubcommands(t *testing.T) {
 		if !contains(values, want) {
 			t.Fatalf("plan completion missing %q: %v", want, values)
 		}
+	}
+	prefixed := completionValues(completionsFor("/plan a", len("/plan a"), rt))
+	if len(prefixed) != 1 || prefixed[0] != "approve" {
+		t.Fatalf("plan prefix completions = %v", prefixed)
 	}
 }
 
@@ -756,6 +860,9 @@ func TestHighlightsCoreInputPatterns(t *testing.T) {
 		if !styles[want] {
 			t.Fatalf("style %v missing in spans %+v", want, spans)
 		}
+	}
+	if leading := highlightInput("  /status"); len(leading) == 0 || leading[0].Style != styleCommand {
+		t.Fatalf("leading-whitespace slash command should be styled as command: %+v", leading)
 	}
 }
 
@@ -824,6 +931,61 @@ func testRuntime(t *testing.T) *integrated.Runtime {
 	return rt
 }
 
+type fakeSwitchableClient struct {
+	*agent.FakeClient
+	options []llm.ModelOption
+	current llm.ModelOption
+	effort  string
+}
+
+func (f *fakeSwitchableClient) Options() []llm.ModelOption {
+	return append([]llm.ModelOption(nil), f.options...)
+}
+
+func (f *fakeSwitchableClient) Current() llm.ModelOption { return f.current }
+
+func (f *fakeSwitchableClient) Switch(selector string) (llm.ModelOption, error) {
+	selector = strings.TrimSpace(selector)
+	for _, option := range f.options {
+		if strings.EqualFold(option.Selector(), selector) || strings.EqualFold(option.Model, selector) {
+			return option, nil
+		}
+	}
+	return llm.ModelOption{}, errors.New("unknown model: " + selector)
+}
+
+func (f *fakeSwitchableClient) ReasoningEffort() string { return f.effort }
+
+func (f *fakeSwitchableClient) SetReasoningEffort(level string) error {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "off", "low", "medium", "high", "max":
+		f.effort = strings.ToLower(strings.TrimSpace(level))
+		return nil
+	default:
+		return errors.New("invalid reasoning effort: " + level)
+	}
+}
+
+func testSwitchableRuntime(t *testing.T) *integrated.Runtime {
+	t.Helper()
+	options := []llm.ModelOption{
+		{Provider: "acme", Model: "alpha"},
+		{Provider: "acme", Model: "beta"},
+	}
+	client := &fakeSwitchableClient{
+		FakeClient: &agent.FakeClient{},
+		options:    options,
+		current:    options[0],
+		effort:     "medium",
+	}
+	rt, err := integrated.New(context.Background(), integrated.Options{Workspace: t.TempDir(), HomeDir: t.TempDir(), Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rt.Close() })
+	return rt
+}
+
 func toolResult(call llm.ToolCall, status tool.ToolCallStatus) tool.ToolCallResult {
 	return tool.ToolCallResult{ToolCall: call, Status: status}
 }
@@ -857,6 +1019,12 @@ func TestCompletesModelReasoningSubcommand(t *testing.T) {
 	allModelValues := completionValues(completeModel("/model ", rt))
 	if contains(allModelValues, "reasoning") {
 		t.Fatalf("unexpected reasoning item in model list: %v", allModelValues)
+	}
+
+	// /model reasoning (without trailing space) stays hierarchical and must
+	// not offer levels that would overwrite the reasoning token on Tab.
+	if values := completionValues(completeModel("/model reasoning", rt)); len(values) != 0 {
+		t.Fatalf("unexpected reasoning levels without trailing space: %v", values)
 	}
 
 	// /model reasoning hi → filtered to "high"

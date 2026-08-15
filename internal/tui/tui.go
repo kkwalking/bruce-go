@@ -604,9 +604,6 @@ func (m *Model) deleteAtCursor() {
 
 func (m *Model) completions() []CompletionItem {
 	value := m.inputText()
-	if !m.modelSelectorOpen && isExactModelCommand(value) {
-		return nil
-	}
 	items := completionsFor(value, m.cursor, m.runtime)
 	if m.selectedCompletion >= len(items) {
 		m.selectedCompletion = max(0, len(items)-1)

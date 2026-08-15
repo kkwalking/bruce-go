@@ -39,7 +39,7 @@ func completionsFor(input string, cursor int, rt *integrated.Runtime) []Completi
 	if strings.HasPrefix(word, "$") {
 		return completeExplicitSkill(word, rt)
 	}
-	if strings.HasPrefix(prefixText, "/") {
+	if leadingSlashStart(prefixText) >= 0 {
 		return completeSlash(prefixText, word, rt)
 	}
 	return candidates
@@ -59,157 +59,250 @@ func applyCompletion(input string, cursor int, item CompletionItem) (string, int
 		return value, len([]rune(value))
 	}
 	start := wordStartRunes(runes, cursor)
-	if strings.HasPrefix(input, "/") && !strings.Contains(prefix, " ") {
-		start = 0
+	if slashStart := leadingSlashStart(prefix); slashStart >= 0 {
+		prefixFromSlash := []rune(prefix)[slashStart:]
+		if !containsSpace(prefixFromSlash) {
+			// Replace the whole first slash token (preserving any leading
+			// whitespace accepted by cli.Parse).
+			start = slashStart
+		}
 	}
 	next := string(runes[:start]) + item.Value + string(runes[cursor:])
 	return next, len([]rune(string(runes[:start]) + item.Value))
 }
 
+type slashCompletionContext struct {
+	command       cli.CommandInfo
+	known         bool
+	typingCommand bool
+	commandPrefix string
+	args          []string
+	prefix        string
+	endsWithSpace bool
+}
+
+func parseSlashCompletion(input, word string) (slashCompletionContext, bool) {
+	start := leadingSlashStart(input)
+	if start < 0 {
+		return slashCompletionContext{}, false
+	}
+	payload := string([]rune(input)[start+1:])
+	fields := strings.Fields(payload)
+	endsWithSpace := len(payload) > 0 && isSpace(lastRune(payload))
+
+	// Only the first token exists so far (for example "/", "/sa", or
+	// "/sandbox"): complete the command name itself.
+	if len(fields) == 0 || (len(fields) == 1 && !endsWithSpace) {
+		return slashCompletionContext{typingCommand: true, commandPrefix: word}, true
+	}
+
+	command, known := cli.FindCommand(fields[0])
+	ctx := slashCompletionContext{
+		command:       command,
+		known:         known,
+		commandPrefix: word,
+		prefix:        word,
+		endsWithSpace: endsWithSpace,
+	}
+	if len(fields) > 1 {
+		ctx.args = fields[1:]
+	}
+	if endsWithSpace {
+		ctx.prefix = ""
+	}
+	return ctx, true
+}
+
 func completeSlash(input, word string, rt *integrated.Runtime) []CompletionItem {
-	if strings.EqualFold(input, "/model") || startsWithFold(input, "/model ") {
+	ctx, ok := parseSlashCompletion(input, word)
+	if !ok {
+		return nil
+	}
+	if ctx.typingCommand {
+		return completeTopLevelCommands(ctx.commandPrefix)
+	}
+	if !ctx.known {
+		return nil
+	}
+	if strings.EqualFold(ctx.command.Name, "model") {
 		return completeModel(input, rt)
 	}
-	if !strings.Contains(input, " ") && !strings.HasSuffix(input, " ") {
-		var out []CompletionItem
-		for _, command := range cli.Commands {
-			value := topLevelCommandValue(command)
-			if matches(value, input) {
-				out = append(out, completion(value, command.Description, "Bruce command"))
-			}
-		}
-		return out
-	}
-	payload := strings.TrimPrefix(input, "/")
-	parts := strings.Fields(payload)
-	command := ""
-	if len(parts) > 0 {
-		command = strings.ToLower(parts[0])
-	}
-	prefix := word
-	if strings.HasSuffix(input, " ") {
-		prefix = ""
-	}
-	switch command {
-	case "plan":
-		if len(parts) <= 1 || (len(parts) == 2 && !strings.HasSuffix(input, " ")) {
-			return matchingOptions(prefix, "Plan", []CompletionItem{
-				completion("approve", "Approve the current plan and begin execution", "Plan"),
-				completion("continue ", "Continue planning with feedback", "Plan"),
-				completion("reject ", "Reject the current plan", "Plan"),
-				completion("cancel", "Cancel the current plan", "Plan"),
-			})
-		}
-	case "hitl", "parallel", "concurrency":
-		return matchingOptions(prefix, "Status", []CompletionItem{
-			completion("on", "Enable", "Status"),
-			completion("off", "Disable", "Status"),
-			completion("status", "View status", "Status"),
-		})
-	case "web":
-		if len(parts) <= 1 || (len(parts) == 2 && !strings.HasSuffix(input, " ")) {
-			return matchingOptions(prefix, "Web", []CompletionItem{
-				completion("on", "Enable Web tools", "Web"),
-				completion("off", "Disable Web tools", "Web"),
-				completion("status", "View status", "Web"),
-				completion("search ", "Search the web", "Web"),
-				completion("fetch ", "Fetch web-page content", "Web"),
-			})
-		}
-	case "mcp":
-		return completeMCP(parts, prefix, strings.HasSuffix(input, " "), rt)
-	case "skill":
-		return completeSkill(parts, prefix, strings.HasSuffix(input, " "), rt)
-	case "sandbox":
-		return completeSandbox(parts, prefix, strings.HasSuffix(input, " "))
-	}
-	return nil
+	return completeCommandOptions(ctx.command.Options, ctx.args, ctx.prefix, ctx.endsWithSpace, rt)
 }
 
+// topLevelCommandValue is kept as a small compatibility wrapper around the
+// command metadata.
 func topLevelCommandValue(command cli.CommandInfo) string {
-	value := "/" + command.Name
-	switch command.Name {
-	case "web", "mcp", "skill", "hitl", "parallel", "sandbox", "resume", "tree", "compact", "plan":
-		return value + " "
-	default:
-		return value
-	}
+	return command.CompletionValue()
 }
 
-func completeSandbox(parts []string, prefix string, inputEndsWithSpace bool) []CompletionItem {
-	if len(parts) <= 1 || (len(parts) == 2 && !inputEndsWithSpace) {
-		return matchingOptions(prefix, "Sandbox", []CompletionItem{
-			completion("status", "View sandbox status", "Sandbox"),
-			completion("mode ", "Change filesystem permission mode", "Sandbox"),
-			completion("network ", "Change command network access", "Sandbox"),
+func completeTopLevelCommands(prefix string) []CompletionItem {
+	var out []CompletionItem
+	for _, command := range cli.Commands {
+		value := command.CompletionValue()
+		if matches(value, prefix) {
+			out = append(out, completion(value, command.Description, "Bruce command"))
+		}
+	}
+	return out
+}
+
+func completeCommandOptions(options []cli.CommandOption, args []string, prefix string, endsWithSpace bool, rt *integrated.Runtime) []CompletionItem {
+	if len(options) == 0 {
+		return nil
+	}
+	if len(args) == 0 {
+		return staticOptionCompletions(options, prefix)
+	}
+	if len(args) == 1 && !endsWithSpace {
+		return staticOptionCompletions(options, prefix)
+	}
+	current := findCommandOption(options, args[0])
+	if current == nil {
+		return nil
+	}
+	if len(args) == 1 {
+		return completeOptionArgument(*current, nil, false, rt)
+	}
+	return completeOptionArgument(*current, args[1:], endsWithSpace, rt)
+}
+
+func completeOptionArgument(option cli.CommandOption, remaining []string, endsWithSpace bool, rt *integrated.Runtime) []CompletionItem {
+	if option.Kind != cli.CompletionStatic {
+		if len(remaining) == 0 {
+			return dynamicOptionCompletions(option.Kind, "", rt)
+		}
+		if len(remaining) == 1 && !endsWithSpace {
+			return dynamicOptionCompletions(option.Kind, remaining[0], rt)
+		}
+		return nil
+	}
+	if len(option.Options) == 0 {
+		return nil
+	}
+	if len(remaining) == 0 {
+		return staticOptionCompletions(option.Options, "")
+	}
+	if len(remaining) == 1 && !endsWithSpace {
+		return staticOptionCompletions(option.Options, remaining[0])
+	}
+	return nil
+}
+
+func staticOptionCompletions(options []cli.CommandOption, prefix string) []CompletionItem {
+	var out []CompletionItem
+	for _, option := range options {
+		if !matches(option.Value, prefix) {
+			continue
+		}
+		out = append(out, CompletionItem{
+			Value:       option.Value,
+			Display:     option.Value,
+			Description: option.Description,
+			Group:       option.Group,
+			Complete:    true,
 		})
 	}
-	switch strings.ToLower(parts[1]) {
-	case "mode":
-		if len(parts) == 2 || (len(parts) == 3 && !inputEndsWithSpace) {
-			return matchingOptions(prefix, "Sandbox mode", []CompletionItem{
-				completion("read-only", "Read-only workspace", "Sandbox mode"),
-				completion("workspace-write", "Allow writes only within the workspace", "Sandbox mode"),
-				completion("full-access", "Disable native shell sandboxing", "Sandbox mode"),
-			})
-		}
-	case "network":
-		if len(parts) == 2 || (len(parts) == 3 && !inputEndsWithSpace) {
-			return matchingOptions(prefix, "Sandbox network", []CompletionItem{
-				completion("on", "Allow commands to access the network", "Sandbox network"),
-				completion("off", "Prevent commands from accessing the network", "Sandbox network"),
-			})
+	return out
+}
+
+func findCommandOption(options []cli.CommandOption, token string) *cli.CommandOption {
+	for i := range options {
+		if strings.EqualFold(strings.TrimSpace(options[i].Value), token) {
+			return &options[i]
 		}
 	}
 	return nil
+}
+
+func dynamicOptionCompletions(kind cli.CompletionKind, prefix string, rt *integrated.Runtime) []CompletionItem {
+	switch kind {
+	case cli.CompletionMCPServer:
+		return completeMCPServers(prefix, rt)
+	case cli.CompletionSkillName:
+		return completeSkillNames(prefix, rt, false)
+	default:
+		return nil
+	}
+}
+
+// completeSandbox delegates to the declarative sandbox option tree.
+func completeSandbox(parts []string, prefix string, inputEndsWithSpace bool) []CompletionItem {
+	command, ok := cli.FindCommand("sandbox")
+	if !ok {
+		return nil
+	}
+	args := []string(nil)
+	if len(parts) > 1 {
+		args = parts[1:]
+	}
+	return completeCommandOptions(command.Options, args, prefix, inputEndsWithSpace, nil)
+}
+
+// completeMCP delegates to the declarative MCP option tree.
+func completeMCP(parts []string, prefix string, inputEndsWithSpace bool, rt *integrated.Runtime) []CompletionItem {
+	command, ok := cli.FindCommand("mcp")
+	if !ok {
+		return nil
+	}
+	args := []string(nil)
+	if len(parts) > 1 {
+		args = parts[1:]
+	}
+	return completeCommandOptions(command.Options, args, prefix, inputEndsWithSpace, rt)
+}
+
+// completeSkill delegates to the declarative Skill option tree.
+func completeSkill(parts []string, prefix string, inputEndsWithSpace bool, rt *integrated.Runtime) []CompletionItem {
+	command, ok := cli.FindCommand("skill")
+	if !ok {
+		return nil
+	}
+	args := []string(nil)
+	if len(parts) > 1 {
+		args = parts[1:]
+	}
+	return completeCommandOptions(command.Options, args, prefix, inputEndsWithSpace, rt)
+}
+
+// matchingOptions keeps the previous helper available for callers that already
+// have a prebuilt CompletionItem slice.
+func matchingOptions(prefix, group string, options []CompletionItem) []CompletionItem {
+	var out []CompletionItem
+	for _, option := range options {
+		option.Group = group
+		if matches(option.Value, prefix) {
+			out = append(out, option)
+		}
+	}
+	return out
 }
 
 func completeModel(input string, rt *integrated.Runtime) []CompletionItem {
-	// Extract the part after "/model "
+	commandText := slashCommandText(input)
 	rest := ""
-	if startsWithFold(input, "/model ") && len(input) > len("/model ") {
-		rest = strings.TrimSpace(input[len("/model "):])
+	if startsWithFold(commandText, "/model ") {
+		rest = strings.TrimSpace(commandText[len("/model "):])
 	}
 	parts := strings.Fields(rest)
+	endsWithSpace := len(commandText) > 0 && isSpace(lastRune(commandText))
 
-	// If first word is "reasoning", show reasoning level completions
+	// The reasoning subcommand has its own five-level completion list. Keep
+	// it hierarchical like other slash options: levels appear only after
+	// "reasoning" is a completed token followed by whitespace.
 	if len(parts) > 0 && strings.EqualFold(parts[0], "reasoning") {
-		// Check what comes after "reasoning"
-		levelPrefix := ""
-		if len(parts) > 1 {
-			levelPrefix = parts[1]
+		if len(parts) == 1 && endsWithSpace {
+			return completeReasoningLevels("", rt.ReasoningEffort())
 		}
-		// If input ends with space after "reasoning", prefix should be empty
-		if strings.HasSuffix(input, " ") && len(parts) == 1 {
-			levelPrefix = ""
+		if len(parts) == 2 && !endsWithSpace {
+			return completeReasoningLevels(parts[1], rt.ReasoningEffort())
 		}
-		current := rt.ReasoningEffort()
-		levels := []string{"off", "low", "medium", "high", "max"}
-		var out []CompletionItem
-		for _, level := range levels {
-			if !matches(level, levelPrefix) {
-				continue
-			}
-			desc := ""
-			if strings.EqualFold(level, current) {
-				desc = "Current"
-			}
-			out = append(out, CompletionItem{
-				Value:       level,
-				Display:     level,
-				Description: desc,
-				Group:       "Reasoning",
-				Complete:    true,
-			})
-		}
-		return out
+		return nil
 	}
 
-	// Model list
 	currentModel := rt.CurrentModel()
 	prefix := rest
 	var out []CompletionItem
-
 	for _, option := range rt.ModelOptions() {
 		selector := option.Selector()
 		if !matches(option.Model, prefix) && !matches(selector, prefix) {
@@ -230,20 +323,29 @@ func completeModel(input string, rt *integrated.Runtime) []CompletionItem {
 	return out
 }
 
-func completeMCP(parts []string, prefix string, inputEndsWithSpace bool, rt *integrated.Runtime) []CompletionItem {
-	if len(parts) <= 1 || (len(parts) == 2 && !inputEndsWithSpace) {
-		return matchingOptions(prefix, "MCP", []CompletionItem{
-			completion("status", "View status", "MCP"),
-			completion("restart ", "Restart a server", "MCP"),
-			completion("logs ", "View logs", "MCP"),
-			completion("disable ", "Disable a server", "MCP"),
-			completion("enable ", "Enable a server", "MCP"),
+func completeReasoningLevels(prefix, current string) []CompletionItem {
+	levels := []string{"off", "low", "medium", "high", "max"}
+	var out []CompletionItem
+	for _, level := range levels {
+		if !matches(level, prefix) {
+			continue
+		}
+		description := ""
+		if strings.EqualFold(level, current) {
+			description = "Current"
+		}
+		out = append(out, CompletionItem{
+			Value:       level,
+			Display:     level,
+			Description: description,
+			Group:       "Reasoning",
+			Complete:    true,
 		})
 	}
-	sub := strings.ToLower(parts[1])
-	if sub != "restart" && sub != "logs" && sub != "disable" && sub != "enable" {
-		return nil
-	}
+	return out
+}
+
+func completeMCPServers(prefix string, rt *integrated.Runtime) []CompletionItem {
 	var out []CompletionItem
 	for _, name := range rt.MCPServerNames() {
 		if matches(name, prefix) {
@@ -251,20 +353,6 @@ func completeMCP(parts []string, prefix string, inputEndsWithSpace bool, rt *int
 		}
 	}
 	return out
-}
-
-func completeSkill(parts []string, prefix string, inputEndsWithSpace bool, rt *integrated.Runtime) []CompletionItem {
-	if len(parts) <= 1 || (len(parts) == 2 && !inputEndsWithSpace) {
-		return matchingOptions(prefix, "Skill", []CompletionItem{
-			completion("list", "List Skills", "Skill"),
-			completion("show ", "Inspect a Skill", "Skill"),
-			completion("reload", "Rescan Skills", "Skill"),
-		})
-	}
-	if strings.EqualFold(parts[1], "show") {
-		return completeSkillNames(prefix, rt, false)
-	}
-	return nil
 }
 
 func completeExplicitSkill(word string, rt *integrated.Runtime) []CompletionItem {
@@ -338,17 +426,6 @@ func completeImagePath(word string) []CompletionItem {
 	return out
 }
 
-func matchingOptions(prefix, group string, options []CompletionItem) []CompletionItem {
-	var out []CompletionItem
-	for _, option := range options {
-		option.Group = group
-		if matches(option.Value, prefix) {
-			out = append(out, option)
-		}
-	}
-	return out
-}
-
 func currentWord(input string) string {
 	runes := []rune(input)
 	start := wordStartRunes(runes, len(runes))
@@ -361,6 +438,45 @@ func wordStartRunes(input []rune, cursor int) int {
 		start--
 	}
 	return start
+}
+
+func leadingSlashStart(input string) int {
+	runes := []rune(input)
+	for i, r := range runes {
+		if isSpace(r) {
+			continue
+		}
+		if r == '/' {
+			return i
+		}
+		return -1
+	}
+	return -1
+}
+
+func slashCommandText(input string) string {
+	start := leadingSlashStart(input)
+	if start < 0 {
+		return input
+	}
+	return string([]rune(input)[start:])
+}
+
+func containsSpace(runes []rune) bool {
+	for _, r := range runes {
+		if isSpace(r) {
+			return true
+		}
+	}
+	return false
+}
+
+func lastRune(value string) rune {
+	if value == "" {
+		return 0
+	}
+	runes := []rune(value)
+	return runes[len(runes)-1]
 }
 
 func isSpace(r rune) bool {
