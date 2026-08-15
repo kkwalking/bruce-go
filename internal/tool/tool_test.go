@@ -49,6 +49,26 @@ func TestRegistryBuiltinsAndHITL(t *testing.T) {
 	}
 }
 
+func TestRegistrySubsetKeepsSharedExecutionSettings(t *testing.T) {
+	dir := t.TempDir()
+	registry := NewRegistry(dir).WithHITL(approval.NewAutoHandler(true, approval.Reject("no writes")))
+	subset := registry.Subset("read_file", "write_file")
+
+	names := subset.ToolNames()
+	if strings.Join(names, ",") != "read_file,write_file" {
+		t.Fatalf("subset tool names = %v", names)
+	}
+	if _, ok := subset.Lookup("edit_file"); ok {
+		t.Fatal("subset unexpectedly contains edit_file")
+	}
+	if out := subset.Execute(context.Background(), "write_file", map[string]string{"path": "a.txt", "content": "blocked"}); !strings.Contains(out, "[HITL] Operation was rejected") {
+		t.Fatalf("subset write did not reuse HITL: %q", out)
+	}
+	if out := subset.Execute(context.Background(), "edit_file", map[string]string{"path": "a.txt", "old_text": "x", "new_text": "y"}); !strings.Contains(out, "Unknown tool: edit_file") {
+		t.Fatalf("subset edit_file output = %q", out)
+	}
+}
+
 func TestHITLModifiedArgumentsAreRevalidated(t *testing.T) {
 	dir := t.TempDir()
 	modifiedWrite := approval.Result{Decision: approval.Modified, Arguments: `{"path":".git/config","content":"malicious"}`}

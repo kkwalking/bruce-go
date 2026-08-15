@@ -19,6 +19,7 @@ import (
 	"bruce-go/internal/instructions"
 	"bruce-go/internal/llm"
 	"bruce-go/internal/mcp"
+	"bruce-go/internal/minimal"
 	"bruce-go/internal/planning"
 	"bruce-go/internal/render"
 	"bruce-go/internal/runtime"
@@ -60,6 +61,7 @@ type Runtime struct {
 
 	react      *agent.Agent
 	planning   *agent.Agent
+	minimal    *agent.Agent
 	planStore  *planning.Store
 	startMu    sync.Mutex
 	mcpStarted bool
@@ -257,6 +259,11 @@ func (r *Runtime) runTask(ctx context.Context, input string, allowPendingPlanInp
 		r.emit(event.NewRunFailed(runID, err.Error()))
 		return "", err
 	}
+	if r.Mode == runtime.ModeMinimal && len(invocation.Names) > 0 {
+		err := errors.New("explicit Skill invocation ($skill) is not available in Minimal mode; switch to /react first")
+		r.emit(event.NewRunFailed(runID, err.Error()))
+		return "", err
+	}
 	task := invocation.Task
 	if task == "" {
 		task = strings.TrimSpace(input)
@@ -278,13 +285,17 @@ func (r *Runtime) runTask(ctx context.Context, input string, allowPendingPlanInp
 			return "", err
 		}
 	}
-	taskContext := r.taskContext()
+	taskContext := ""
+	if r.Mode != runtime.ModeMinimal {
+		taskContext = r.taskContext()
+	}
 	prepared, err := llm.ParseImageReferences(ctx, task, r.Workspace, nil)
 	if err != nil {
 		r.emit(event.NewRunFailed(runID, err.Error()))
 		return "", err
 	}
-	if r.Mode == runtime.ModePlan {
+	switch r.Mode {
+	case runtime.ModePlan:
 		out, err := r.runAgentWithCompaction(ctx, r.planning, prepared, r.taskContextWithPlan(taskContext), runID)
 		if err != nil {
 			r.emit(event.NewRunFailed(runID, err.Error()))
@@ -297,14 +308,23 @@ func (r *Runtime) runTask(ctx context.Context, input string, allowPendingPlanInp
 		}
 		r.emit(event.NewRunCompleted(runID, display))
 		return display, nil
+	case runtime.ModeMinimal:
+		out, err := r.runAgentWithCompaction(ctx, r.minimal, prepared, "", runID)
+		if err != nil {
+			r.emit(event.NewRunFailed(runID, err.Error()))
+			return "", err
+		}
+		r.emit(event.NewRunCompleted(runID, out))
+		return out, nil
+	default:
+		out, err := r.runAgentWithCompaction(ctx, r.react, prepared, r.taskContextWithPlan(taskContext), runID)
+		if err != nil {
+			r.emit(event.NewRunFailed(runID, err.Error()))
+			return "", err
+		}
+		r.emit(event.NewRunCompleted(runID, out))
+		return out, nil
 	}
-	out, err := r.runAgentWithCompaction(ctx, r.react, prepared, r.taskContextWithPlan(taskContext), runID)
-	if err != nil {
-		r.emit(event.NewRunFailed(runID, err.Error()))
-		return "", err
-	}
-	r.emit(event.NewRunCompleted(runID, out))
-	return out, nil
 }
 
 func (r *Runtime) HandleCommand(ctx context.Context, command cli.Command) cli.Result {
@@ -318,6 +338,8 @@ func (r *Runtime) HandleCommand(ctx context.Context, command cli.Command) cli.Re
 	case "react":
 		result.Err = r.setMode(runtime.ModeReact)
 		result.Output = "Switched to ReAct mode."
+	case "minimal":
+		result.Output, result.Err = r.handleMinimal()
 	case "plan":
 		result.Output, result.Err = r.handlePlan(ctx, command.Args, command.Raw)
 	case "model":
@@ -386,6 +408,9 @@ func (r *Runtime) HandleCommand(ctx context.Context, command cli.Command) cli.Re
 
 func (r *Runtime) Status() runtime.Status {
 	toolNames := r.Tools.ToolNames()
+	if r.Mode == runtime.ModeMinimal {
+		toolNames = minimal.ToolNames()
+	}
 	sort.Strings(toolNames)
 	mcpStatuses := r.MCP.Status()
 	mcpSummary := render.MCP(mcpStatuses)
@@ -686,6 +711,22 @@ func (r *Runtime) setMode(mode runtime.AgentMode) error {
 	return nil
 }
 
+// handleMinimal switches into the minimal agent preset with a fresh session,
+// so no full-mode history or task context leaks into the minimal context.
+func (r *Runtime) handleMinimal() (string, error) {
+	if r.Mode == runtime.ModeMinimal {
+		return "Already in Minimal mode.", nil
+	}
+	previous := r.Mode
+	r.Mode = runtime.ModeMinimal
+	if err := r.newSession(); err != nil {
+		r.Mode = previous
+		return "", err
+	}
+	r.emit(event.NewSessionChanged("minimal", r.Session.Context(r.Mode)))
+	return "Switched to Minimal mode and started a fresh session.", nil
+}
+
 func (r *Runtime) newSession() error {
 	if err := r.Session.CreateNew(r.Mode); err != nil {
 		return err
@@ -900,6 +941,7 @@ func (r *Runtime) rebuildAgents() {
 		return r.currentPlanState()
 	})
 	r.planning = agent.New(r.Client, planRegistry, planning.Prompt(additional), r.Concurrent, r.Events)
+	r.minimal = agent.NewWithSystemPrompt(r.Client, minimal.NewToolRegistry(r.Tools), minimal.SystemPrompt, r.Concurrent, r.Events)
 	beforeChat := func(messages []llm.Message) error {
 		needed, tokens, threshold, err := r.compactionThresholdFor(messages)
 		if err != nil {
@@ -912,6 +954,7 @@ func (r *Runtime) rebuildAgents() {
 	}
 	r.react.BeforeChat = beforeChat
 	r.planning.BeforeChat = beforeChat
+	r.minimal.BeforeChat = beforeChat
 }
 
 func (r *Runtime) ModelOptions() []llm.ModelOption {

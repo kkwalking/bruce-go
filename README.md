@@ -116,6 +116,7 @@ sudo pacman -S bubblewrap
 可用命令：
 
 - `/react`
+- `/minimal`
 - `/plan [task|approve|reject|cancel|continue]`
 - `/model [provider/model]`
 - `/web on|off|status|search <query>|fetch <url>`
@@ -138,6 +139,8 @@ sudo pacman -S bubblewrap
 - `/exit`
 
 不提供 `/rag`、`/index`、`/graph` 等 RAG 入口。
+
+`/minimal` 切换到借鉴 DeepSeek Harness 极简 preset 的精简模式：切换时会**新建一个空会话**，不携带切换前的完整模式历史；系统提示词固定为 `You are a helpful software engineer assistant.`，不注入 AGENTS 指令、Skill 目录或工作目录等额外上下文，模型只能使用 `execute_command`、`read_file`、`write_file`、`edit_file` 四个基础工具。极简模式下显式 `$skill` 调用会被拒绝，`/react` 可切回完整模式。`/status` 仍展示进程级 MCP、Skill、沙箱等运行时信息，但其中的工具列表只包含极简模式的四个工具。
 
 `/plan` 是只读 planning workflow：Planning Agent 可以读取和搜索项目、维护 `~/.bruce/plans/` 下的 markdown 计划，并把计划生命周期写入 session JSONL。只有执行 `/plan approve` 批准计划后，Bruce 才会切回 ReAct 并按批准计划执行；具体文件修改和命令仍受 HITL 设置约束。
 

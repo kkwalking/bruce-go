@@ -152,6 +152,28 @@ func (r *Registry) Lookup(name string) (Tool, bool) {
 	return t, ok
 }
 
+// Subset returns a registry containing only the named tools. The copy shares
+// the parent's workspace root, HITL handler, sandbox manager, and concurrency
+// configuration so restricted agents keep the same execution policies.
+func (r *Registry) Subset(names ...string) *Registry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	subset := &Registry{
+		workspaceRoot: r.workspaceRoot,
+		tools:         map[string]Tool{},
+		hitl:          r.hitl,
+		commandGuard:  r.commandGuard,
+		config:        r.config,
+		sandbox:       r.sandbox,
+	}
+	for _, name := range names {
+		if candidate, ok := r.tools[name]; ok {
+			subset.tools[name] = candidate
+		}
+	}
+	return subset
+}
+
 func (r *Registry) concurrencyConfig() runtime.ConcurrencyConfig {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

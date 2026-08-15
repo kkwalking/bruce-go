@@ -8,8 +8,9 @@ import (
 type AgentMode string
 
 const (
-	ModeReact AgentMode = "REACT"
-	ModePlan  AgentMode = "PLAN"
+	ModeReact   AgentMode = "REACT"
+	ModePlan    AgentMode = "PLAN"
+	ModeMinimal AgentMode = "MINIMAL"
 )
 
 type PlanAction string
