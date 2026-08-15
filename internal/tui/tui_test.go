@@ -1010,7 +1010,7 @@ type fakeSwitchableClient struct {
 }
 
 func (f *fakeSwitchableClient) Options() []llm.ModelOption {
-	return append([]llm.ModelOption(nil), f.options...)
+	return llm.OrderedModelOptions(f.options, f.current)
 }
 
 func (f *fakeSwitchableClient) Current() llm.ModelOption { return f.current }
@@ -1084,6 +1084,13 @@ func TestCompletesModelReasoningSubcommand(t *testing.T) {
 	values2 := completionValues(completeModel("/model rea", rt))
 	if !contains(values2, "reasoning ") {
 		t.Fatalf("reasoning prefix completion missing: %v", values2)
+	}
+
+	// The same guidance is available even when the user already typed a
+	// trailing space after a partial reasoning token.
+	values2Trailing := completionValues(completeModel("/model rea ", rt))
+	if !contains(values2Trailing, "reasoning ") {
+		t.Fatalf("reasoning prefix completion missing with trailing space: %v", values2Trailing)
 	}
 
 	// /model (empty first-argument prefix) still lists models only.

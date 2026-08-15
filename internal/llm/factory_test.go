@@ -70,9 +70,10 @@ func TestSwitchableClientOrdersOptionsWithCurrentFirst(t *testing.T) {
 	if got := options[0].Selector(); got != "glm/glm-5.2" {
 		t.Fatalf("first option = %q, want current model glm/glm-5.2", got)
 	}
-	for i := 2; i < len(options); i++ {
-		prev := options[i-1].Selector()
-		curr := options[i].Selector()
+	rest := options[1:]
+	for i := 1; i < len(rest); i++ {
+		prev := rest[i-1].Selector()
+		curr := rest[i].Selector()
 		if prev > curr {
 			t.Fatalf("remaining options are not sorted: %q before %q", prev, curr)
 		}

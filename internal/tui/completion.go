@@ -249,7 +249,7 @@ func completeModel(input string, rt *integrated.Runtime) []CompletionItem {
 			continue
 		}
 		description := ""
-		if option.Provider == currentModel.Provider && option.Model == currentModel.Model {
+		if strings.EqualFold(option.Provider, currentModel.Provider) && strings.EqualFold(option.Model, currentModel.Model) {
 			description = "Current model"
 		}
 		out = append(out, CompletionItem{

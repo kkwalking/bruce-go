@@ -528,7 +528,7 @@ func (r *Runtime) handleModel(args []string) (string, error) {
 		b.WriteString("Current model: " + current.Selector() + "\nAvailable models:\n")
 		for _, opt := range r.switchable.Options() {
 			prefix := "  "
-			if opt.Provider == current.Provider && opt.Model == current.Model {
+			if strings.EqualFold(opt.Provider, current.Provider) && strings.EqualFold(opt.Model, current.Model) {
 				prefix = "* "
 			}
 			b.WriteString(prefix + opt.Selector() + "\n")
@@ -918,7 +918,7 @@ func (r *Runtime) ModelOptions() []llm.ModelOption {
 	if r.switchable == nil {
 		return nil
 	}
-	return llm.OrderedModelOptions(r.switchable.Options(), r.switchable.Current())
+	return r.switchable.Options()
 }
 
 func (r *Runtime) CurrentModel() llm.ModelOption {
