@@ -166,10 +166,12 @@ func (c *SwitchableClient) SupportsImages() bool {
 	return c.client.SupportsImages()
 }
 
+// Options returns the model list sorted deterministically with the current
+// model first. This is the single place where ordering is applied.
 func (c *SwitchableClient) Options() []ModelOption {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return append([]ModelOption(nil), c.options...)
+	return OrderedModelOptions(c.options, c.current)
 }
 
 func (c *SwitchableClient) Current() ModelOption {

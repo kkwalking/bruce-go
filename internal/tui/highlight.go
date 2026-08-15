@@ -19,7 +19,7 @@ type styledSpan struct {
 }
 
 var (
-	slashCommandPattern = regexp.MustCompile(`^/\S*`)
+	slashCommandPattern = regexp.MustCompile(`^[ \t]*/\S*`)
 	imagePattern        = regexp.MustCompile(`@(image|img):(<[^>]*>|\S*)|@clipboard(?:\b|$)`)
 	atReferencePattern  = regexp.MustCompile(`@[[:alnum:]_./:~${}<>-]+`)
 	dangerPattern       = regexp.MustCompile(`(?i)\b(sudo|mkfs|shutdown|reboot|halt|poweroff)\b|\brm\s+-[a-z]*r[a-z]*f[a-z]*\s+(/|~|\$home)|\bcurl\b[^|\n]*\|\s*(sh|bash|zsh|fish|ksh)\b|\bwget\b[^|\n]*\|\s*(sh|bash|zsh|fish|ksh)\b|\bdd\b[^\n]*\bof=/dev/`)

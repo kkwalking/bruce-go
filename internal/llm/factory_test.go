@@ -45,6 +45,49 @@ func TestSwitchableClientListsAndSwitchesModels(t *testing.T) {
 	}
 }
 
+func TestSwitchableClientOrdersOptionsWithCurrentFirst(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "setting.json")
+	settings := config.DefaultSettings()
+	settings.LLM.DefaultProvider = "glm"
+	settings.LLM.DefaultModel = "glm-5.2"
+	settings.LLM.Providers["deepseek"] = config.ProviderSetting{APIKey: "deepseek-key"}
+	settings.LLM.Providers["glm"] = config.ProviderSetting{APIKey: "glm-key"}
+	settings.LLM.Providers["openai_compatiable"] = config.ProviderSetting{
+		APIKey:  "local-key",
+		BaseURL: "http://localhost:9000/v1",
+		Models:  []string{"local-b", "local-a"},
+	}
+	loader := config.NewLoader(path)
+	if err := loader.Save(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	client, err := NewSwitchable(settings, loader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := client.Options()
+	if got := options[0].Selector(); got != "glm/glm-5.2" {
+		t.Fatalf("first option = %q, want current model glm/glm-5.2", got)
+	}
+	rest := options[1:]
+	for i := 1; i < len(rest); i++ {
+		prev := rest[i-1].Selector()
+		curr := rest[i].Selector()
+		if prev > curr {
+			t.Fatalf("remaining options are not sorted: %q before %q", prev, curr)
+		}
+	}
+
+	if _, err := client.Switch("deepseek/deepseek-v4-pro"); err != nil {
+		t.Fatal(err)
+	}
+	options = client.Options()
+	if got := options[0].Selector(); got != "deepseek/deepseek-v4-pro" {
+		t.Fatalf("first option after switch = %q, want deepseek/deepseek-v4-pro", got)
+	}
+}
+
 func TestSwitchableClientRejectsInvalidCompactionWindow(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "setting.json")
 	settings := config.DefaultSettings()
