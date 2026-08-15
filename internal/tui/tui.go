@@ -46,11 +46,16 @@ const (
 type tuiMessage struct {
 	kind messageKind
 	text string
+
+	markdownCache      []renderLine
+	markdownCacheText  string
+	markdownCacheWidth int
 }
 
 type renderLine struct {
-	kind messageKind
-	text string
+	kind  messageKind
+	text  string
+	spans []markdownSpan
 }
 
 type inputRenderCell struct {
@@ -1020,10 +1025,14 @@ func (m *Model) drawMessages(canvas []string, columns, messageRows int) {
 }
 
 func renderMessageLine(line renderLine, columns int) string {
-	text := fit(line.text, columns)
 	if line.kind == messagePlan {
+		text := fit(line.text, columns)
 		return styleForMessage(line.kind).Render(padRight(text, columns))
 	}
+	if line.spans != nil {
+		return renderMarkdownSpans(line.spans)
+	}
+	text := fit(line.text, columns)
 	return styleForMessage(line.kind).Render(text)
 }
 
@@ -1277,10 +1286,15 @@ func inputRuneStyles(input string, length int) []inputStyle {
 
 func (m *Model) wrappedMessageLines(columns int) []renderLine {
 	var out []renderLine
-	for _, message := range m.messages {
-		for _, raw := range strings.Split(message.text, "\n") {
-			for _, line := range wrap(raw, columns) {
-				out = append(out, renderLine{kind: message.kind, text: line})
+	for i := range m.messages {
+		message := &m.messages[i]
+		if message.kind == messageAssistant {
+			out = append(out, message.markdownLines(columns)...)
+		} else {
+			for _, raw := range strings.Split(message.text, "\n") {
+				for _, line := range wrap(raw, columns) {
+					out = append(out, renderLine{kind: message.kind, text: line})
+				}
 			}
 		}
 		out = append(out, renderLine{kind: messageAssistant, text: ""})
@@ -1289,6 +1303,19 @@ func (m *Model) wrappedMessageLines(columns int) []renderLine {
 		out = out[:len(out)-1]
 	}
 	return out
+}
+
+func (message *tuiMessage) markdownLines(columns int) []renderLine {
+	if message.kind != messageAssistant {
+		return nil
+	}
+	if message.markdownCache != nil && message.markdownCacheWidth == columns && message.markdownCacheText == message.text {
+		return message.markdownCache
+	}
+	message.markdownCache = renderMarkdown(message.text, columns)
+	message.markdownCacheText = message.text
+	message.markdownCacheWidth = columns
+	return message.markdownCache
 }
 
 func (m *Model) visibleMessageLines(columns, messageRows, scrollOffset int) []renderLine {
