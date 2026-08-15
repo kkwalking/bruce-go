@@ -54,10 +54,6 @@ func applyCompletion(input string, cursor int, item CompletionItem) (string, int
 		cursor = len(runes)
 	}
 	prefix := string(runes[:cursor])
-	if strings.EqualFold(prefix, "/model") && item.Group == "Model" {
-		value := "/model " + item.Value + string(runes[cursor:])
-		return value, len([]rune(value))
-	}
 	start := wordStartRunes(runes, cursor)
 	if slashStart := leadingSlashStart(prefix); slashStart >= 0 {
 		prefixFromSlash := []rune(prefix)[slashStart:]
@@ -75,7 +71,6 @@ type slashCompletionContext struct {
 	command       cli.CommandInfo
 	known         bool
 	typingCommand bool
-	commandPrefix string
 	args          []string
 	prefix        string
 	endsWithSpace bool
@@ -93,14 +88,13 @@ func parseSlashCompletion(input, word string) (slashCompletionContext, bool) {
 	// Only the first token exists so far (for example "/", "/sa", or
 	// "/sandbox"): complete the command name itself.
 	if len(fields) == 0 || (len(fields) == 1 && !endsWithSpace) {
-		return slashCompletionContext{typingCommand: true, commandPrefix: word}, true
+		return slashCompletionContext{typingCommand: true}, true
 	}
 
 	command, known := cli.FindCommand(fields[0])
 	ctx := slashCompletionContext{
 		command:       command,
 		known:         known,
-		commandPrefix: word,
 		prefix:        word,
 		endsWithSpace: endsWithSpace,
 	}
@@ -119,7 +113,7 @@ func completeSlash(input, word string, rt *integrated.Runtime) []CompletionItem 
 		return nil
 	}
 	if ctx.typingCommand {
-		return completeTopLevelCommands(ctx.commandPrefix)
+		return completeTopLevelCommands(word)
 	}
 	if !ctx.known {
 		return nil
@@ -128,12 +122,6 @@ func completeSlash(input, word string, rt *integrated.Runtime) []CompletionItem 
 		return completeModel(input, rt)
 	}
 	return completeCommandOptions(ctx.command.Options, ctx.args, ctx.prefix, ctx.endsWithSpace, rt)
-}
-
-// topLevelCommandValue is kept as a small compatibility wrapper around the
-// command metadata.
-func topLevelCommandValue(command cli.CommandInfo) string {
-	return command.CompletionValue()
 }
 
 func completeTopLevelCommands(prefix string) []CompletionItem {
@@ -226,58 +214,6 @@ func dynamicOptionCompletions(kind cli.CompletionKind, prefix string, rt *integr
 	}
 }
 
-// completeSandbox delegates to the declarative sandbox option tree.
-func completeSandbox(parts []string, prefix string, inputEndsWithSpace bool) []CompletionItem {
-	command, ok := cli.FindCommand("sandbox")
-	if !ok {
-		return nil
-	}
-	args := []string(nil)
-	if len(parts) > 1 {
-		args = parts[1:]
-	}
-	return completeCommandOptions(command.Options, args, prefix, inputEndsWithSpace, nil)
-}
-
-// completeMCP delegates to the declarative MCP option tree.
-func completeMCP(parts []string, prefix string, inputEndsWithSpace bool, rt *integrated.Runtime) []CompletionItem {
-	command, ok := cli.FindCommand("mcp")
-	if !ok {
-		return nil
-	}
-	args := []string(nil)
-	if len(parts) > 1 {
-		args = parts[1:]
-	}
-	return completeCommandOptions(command.Options, args, prefix, inputEndsWithSpace, rt)
-}
-
-// completeSkill delegates to the declarative Skill option tree.
-func completeSkill(parts []string, prefix string, inputEndsWithSpace bool, rt *integrated.Runtime) []CompletionItem {
-	command, ok := cli.FindCommand("skill")
-	if !ok {
-		return nil
-	}
-	args := []string(nil)
-	if len(parts) > 1 {
-		args = parts[1:]
-	}
-	return completeCommandOptions(command.Options, args, prefix, inputEndsWithSpace, rt)
-}
-
-// matchingOptions keeps the previous helper available for callers that already
-// have a prebuilt CompletionItem slice.
-func matchingOptions(prefix, group string, options []CompletionItem) []CompletionItem {
-	var out []CompletionItem
-	for _, option := range options {
-		option.Group = group
-		if matches(option.Value, prefix) {
-			out = append(out, option)
-		}
-	}
-	return out
-}
-
 func completeModel(input string, rt *integrated.Runtime) []CompletionItem {
 	commandText := slashCommandText(input)
 	rest := ""
@@ -287,13 +223,17 @@ func completeModel(input string, rt *integrated.Runtime) []CompletionItem {
 	parts := strings.Fields(rest)
 	endsWithSpace := len(commandText) > 0 && isSpace(lastRune(commandText))
 
-	// The reasoning subcommand has its own five-level completion list. Keep
-	// it hierarchical like other slash options: levels appear only after
-	// "reasoning" is a completed token followed by whitespace.
-	if len(parts) > 0 && strings.EqualFold(parts[0], "reasoning") {
-		if len(parts) == 1 && endsWithSpace {
+	// The reasoning subcommand has its own five-level completion list. Like
+	// other argument-taking options, typing its prefix (for example
+	// "/model rea") first completes "reasoning " and the levels appear only
+	// after the following space.
+	if len(parts) == 1 && strings.EqualFold(parts[0], "reasoning") {
+		if endsWithSpace {
 			return completeReasoningLevels("", rt.ReasoningEffort())
 		}
+		return []CompletionItem{reasoningCommandCompletion()}
+	}
+	if len(parts) > 1 && strings.EqualFold(parts[0], "reasoning") {
 		if len(parts) == 2 && !endsWithSpace {
 			return completeReasoningLevels(parts[1], rt.ReasoningEffort())
 		}
@@ -320,7 +260,20 @@ func completeModel(input string, rt *integrated.Runtime) []CompletionItem {
 			Complete:    true,
 		})
 	}
+	if prefix != "" && matches("reasoning", prefix) {
+		out = append(out, reasoningCommandCompletion())
+	}
 	return out
+}
+
+func reasoningCommandCompletion() CompletionItem {
+	return CompletionItem{
+		Value:       "reasoning ",
+		Display:     "reasoning ",
+		Description: "Adjust reasoning effort",
+		Group:       "Reasoning command",
+		Complete:    true,
+	}
 }
 
 func completeReasoningLevels(prefix, current string) []CompletionItem {

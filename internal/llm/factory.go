@@ -67,6 +67,10 @@ func NewSwitchable(settings config.Settings, loader config.Loader) (*SwitchableC
 	if len(options) == 0 {
 		return nil, errors.New("error: setting.json contains no usable LLM provider")
 	}
+	// Provider settings are stored in a map, so their iteration order is
+	// random. Sort once here and keep the current model at the front whenever
+	// Options() is consumed by the UI.
+	options = OrderedModelOptions(options, ModelOption{})
 	initial := initialModel(settings.LLM, options, defaults)
 	c := &SwitchableClient{
 		settings:      &settings,
@@ -169,7 +173,7 @@ func (c *SwitchableClient) SupportsImages() bool {
 func (c *SwitchableClient) Options() []ModelOption {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return append([]ModelOption(nil), c.options...)
+	return OrderedModelOptions(c.options, c.current)
 }
 
 func (c *SwitchableClient) Current() ModelOption {

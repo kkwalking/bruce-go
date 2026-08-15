@@ -621,6 +621,13 @@ func (m *Model) applyCompletion() {
 	m.input = []rune(next)
 	m.cursor = cursor
 	m.selectedCompletion = 0
+	if item.Group == "Model" && !m.modelSelectorOpen {
+		// Selecting a concrete model through Tab should preserve the original
+		// popup behavior: ←/→ now adjusts the pending reasoning effort and
+		// Enter confirms it together with the model.
+		m.modelSelectorOpen = true
+		m.syncPendingReasoningEffort()
+	}
 }
 
 func (m *Model) handleModelSelectorEnter() (bool, tea.Cmd) {
@@ -641,11 +648,7 @@ func (m *Model) handleModelSelectorEnter() (bool, tea.Cmd) {
 func (m *Model) openModelSelector() {
 	m.replaceInput("/model ")
 	m.modelSelectorOpen = true
-	if m.runtime != nil {
-		m.pendingReasoningEffort = m.runtime.ReasoningEffort()
-	} else {
-		m.pendingReasoningEffort = ""
-	}
+	m.syncPendingReasoningEffort()
 	items := filterCompletionGroup(m.completions(), "Model")
 	m.selectedCompletion = 0
 	for i, item := range items {
@@ -653,6 +656,14 @@ func (m *Model) openModelSelector() {
 			m.selectedCompletion = i
 			return
 		}
+	}
+}
+
+func (m *Model) syncPendingReasoningEffort() {
+	if m.runtime != nil {
+		m.pendingReasoningEffort = m.runtime.ReasoningEffort()
+	} else {
+		m.pendingReasoningEffort = ""
 	}
 }
 

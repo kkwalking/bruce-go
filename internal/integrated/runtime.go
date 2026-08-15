@@ -918,7 +918,7 @@ func (r *Runtime) ModelOptions() []llm.ModelOption {
 	if r.switchable == nil {
 		return nil
 	}
-	return r.switchable.Options()
+	return llm.OrderedModelOptions(r.switchable.Options(), r.switchable.Current())
 }
 
 func (r *Runtime) CurrentModel() llm.ModelOption {

@@ -3,6 +3,8 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"sort"
+	"strings"
 )
 
 const (
@@ -178,4 +180,35 @@ func (m ModelOption) Selector() string {
 		return m.Model
 	}
 	return m.Provider + "/" + m.Model
+}
+
+// OrderedModelOptions returns options sorted deterministically by provider and
+// model, with current moved to the front.
+func OrderedModelOptions(options []ModelOption, current ModelOption) []ModelOption {
+	ordered := append([]ModelOption(nil), options...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].Provider != ordered[j].Provider {
+			return ordered[i].Provider < ordered[j].Provider
+		}
+		return ordered[i].Model < ordered[j].Model
+	})
+	if !modelOptionEquals(current, ModelOption{}) {
+		out := make([]ModelOption, 0, len(ordered))
+		for _, option := range ordered {
+			if modelOptionEquals(option, current) {
+				out = append(out, option)
+			}
+		}
+		for _, option := range ordered {
+			if !modelOptionEquals(option, current) {
+				out = append(out, option)
+			}
+		}
+		ordered = out
+	}
+	return ordered
+}
+
+func modelOptionEquals(a, b ModelOption) bool {
+	return strings.EqualFold(a.Provider, b.Provider) && strings.EqualFold(a.Model, b.Model)
 }
