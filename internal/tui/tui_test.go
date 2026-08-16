@@ -373,6 +373,185 @@ func TestReasoningDeltaViaRuntimeEventCreatesReasoningMessage(t *testing.T) {
 	}
 }
 
+func TestCollapsedReasoningRendersOneLinePerBlock(t *testing.T) {
+	model := NewModel(context.Background(), testRuntime(t))
+	model.messages = nil
+	model.width = 40
+	model.appendMessage(messageReasoning, "first thinking content")
+	model.appendMessage(messageAssistant, "first answer")
+	model.appendMessage(messageReasoning, strings.Repeat("older reasoning ", 8)+"newest thinking tail")
+	model.appendMessage(messageAssistant, "second answer")
+
+	lines := model.wrappedMessageLines(40)
+	var reasoningLines []renderLine
+	for _, line := range lines {
+		if line.kind == messageReasoning {
+			reasoningLines = append(reasoningLines, line)
+		}
+	}
+	if len(reasoningLines) != 2 {
+		t.Fatalf("collapsed reasoning lines = %d, want one per block: %+v", len(reasoningLines), reasoningLines)
+	}
+	first, second := reasoningLines[0], reasoningLines[1]
+	if !first.reasoningToggle || first.reasoningIndex != 0 {
+		t.Fatalf("first collapsed line = %+v", first)
+	}
+	if !second.reasoningToggle || second.reasoningIndex != 2 {
+		t.Fatalf("second collapsed line = %+v", second)
+	}
+	if !strings.HasPrefix(first.text, reasoningCollapsedPrefix) || !strings.HasSuffix(first.text, "first thinking content") {
+		t.Fatalf("first collapsed line = %q", first.text)
+	}
+	if !strings.HasPrefix(second.text, reasoningCollapsedPrefix) || !strings.HasSuffix(second.text, "newest thinking tail") {
+		t.Fatalf("second collapsed line = %q", second.text)
+	}
+}
+
+func TestCollapsedReasoningTailFollowsStreamingDeltas(t *testing.T) {
+	model := NewModel(context.Background(), testRuntime(t))
+	model.messages = nil
+	model.width = 27
+
+	model.appendStreamingReasoningDelta("start thinking long ")
+	collapsed := onlyReasoningLine(t, model.wrappedMessageLines(27))
+	if !strings.HasSuffix(collapsed.text, "long") || !strings.Contains(collapsed.text, "…") {
+		t.Fatalf("collapsed line should tail the latest content = %q", collapsed.text)
+	}
+
+	model.appendStreamingReasoningDelta("then the newest delta")
+	collapsed = onlyReasoningLine(t, model.wrappedMessageLines(27))
+	if !strings.HasSuffix(collapsed.text, "newest delta") {
+		t.Fatalf("collapsed line should scroll to newest delta: %q", collapsed.text)
+	}
+}
+
+func TestExpandedReasoningRendersFullBlock(t *testing.T) {
+	model := NewModel(context.Background(), testRuntime(t))
+	model.messages = nil
+	model.width = 80
+	model.appendMessage(messageReasoning, "first thinking content")
+	model.appendMessage(messageAssistant, "first answer")
+	model.appendMessage(messageReasoning, "second thinking content")
+	model.appendMessage(messageAssistant, "second answer")
+	model.messages[0].reasoningExpanded = true
+
+	lines := model.wrappedMessageLines(80)
+	hasHeader := false
+	hasFirst := false
+	hasSecondCollapsed := false
+	for _, line := range lines {
+		if line.kind != messageReasoning {
+			continue
+		}
+		if !line.reasoningToggle {
+			t.Fatalf("reasoning line should be clickable: %+v", line)
+		}
+		hasHeader = hasHeader || strings.HasPrefix(line.text, reasoningExpandedPrefix)
+		hasFirst = hasFirst || strings.Contains(line.text, "first thinking content")
+		hasSecondCollapsed = hasSecondCollapsed || strings.HasPrefix(line.text, reasoningCollapsedPrefix)
+	}
+	if !hasHeader || !hasFirst {
+		t.Fatalf("expanded block incomplete: header=%v first=%v lines=%+v", hasHeader, hasFirst, lines)
+	}
+	if !hasSecondCollapsed {
+		t.Fatalf("second block should stay collapsed: %+v", lines)
+	}
+}
+
+func TestClickingReasoningLineTogglesOnlyItsBlock(t *testing.T) {
+	model := NewModel(context.Background(), testRuntime(t))
+	model.messages = nil
+	model.width = 80
+	model.height = 24
+	model.appendMessage(messageReasoning, "first thinking content")
+	model.appendMessage(messageAssistant, "first answer")
+	model.appendMessage(messageReasoning, "second thinking content")
+	model.appendMessage(messageAssistant, "second answer")
+
+	model.handleMouse(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 0, Y: 0})
+	if !model.messages[0].reasoningExpanded || model.messages[2].reasoningExpanded {
+		t.Fatal("click on first block should expand only the first block")
+	}
+
+	lines := model.wrappedMessageLines(80)
+	y := reasoningLineIndex(t, lines, 2)
+	model.toggleReasoningAt(0, y)
+	if !model.messages[0].reasoningExpanded || !model.messages[2].reasoningExpanded {
+		t.Fatal("click on second block should expand it while first stays expanded")
+	}
+
+	lines = model.wrappedMessageLines(80)
+	y = reasoningLineIndex(t, lines, 0)
+	model.toggleReasoningAt(0, y)
+	if model.messages[0].reasoningExpanded || !model.messages[2].reasoningExpanded {
+		t.Fatal("click on first expanded block should collapse only the first block")
+	}
+}
+
+func TestStreamingReasoningPreservesPerBlockExpandedState(t *testing.T) {
+	model := NewModel(context.Background(), testRuntime(t))
+	model.messages = nil
+	model.appendStreamingReasoningDelta("thinking")
+	model.messages[0].reasoningExpanded = true
+	model.appendStreamingReasoningDelta(" more")
+	if !model.messages[0].reasoningExpanded {
+		t.Fatal("streaming delta should not reset per-block expanded state")
+	}
+	model.finishStreamingReasoningMessage("thinking more")
+	if !model.messages[0].reasoningExpanded {
+		t.Fatal("finishing streaming should preserve per-block expanded state")
+	}
+}
+
+func TestClickingNonReasoningLineDoesNotToggle(t *testing.T) {
+	model := NewModel(context.Background(), testRuntime(t))
+	model.messages = nil
+	model.width = 80
+	model.height = 24
+	model.appendMessage(messageAssistant, "answer")
+	model.appendMessage(messageReasoning, "hidden thinking content")
+
+	// Reasoning is after the assistant line, so row 0 belongs to the answer
+	// and must not toggle.
+	model.handleMouse(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 0, Y: 0})
+	if model.messages[1].reasoningExpanded {
+		t.Fatal("click on assistant line should not expand reasoning")
+	}
+}
+
+func TestTailColumnsKeepsNewestTailWithinWidth(t *testing.T) {
+	if got := tailColumns("", 3); got != "" {
+		t.Fatalf("empty tail = %q", got)
+	}
+	if got := tailColumns("0123456789", 20); got != "0123456789" {
+		t.Fatalf("short tail = %q", got)
+	}
+	got := tailColumns("0123456789", 5)
+	if !strings.HasPrefix(got, "…") || !strings.HasSuffix(got, "9") || strings.Contains(got, "0") {
+		t.Fatalf("truncated tail = %q, want ellipsis plus newest runes", got)
+	}
+	if lipgloss.Width(got) > 5 {
+		t.Fatalf("truncated tail width = %d, want <= 5", lipgloss.Width(got))
+	}
+}
+
+func TestNewReasoningBlocksStartCollapsedAndExistingStateSurvivesRunStart(t *testing.T) {
+	model := NewModel(context.Background(), testRuntime(t))
+	model.messages = nil
+	model.appendMessage(messageReasoning, "old thinking")
+	model.messages[0].reasoningExpanded = true
+
+	model.handleRuntimeEvent(event.NewRunStarted("run-reset", model.runtime.Mode, "hello"))
+	if !model.messages[0].reasoningExpanded {
+		t.Fatal("run start should not collapse an independently expanded block")
+	}
+
+	model.appendMessage(messageReasoning, "new thinking")
+	if model.messages[1].reasoningExpanded {
+		t.Fatal("new reasoning block should start collapsed")
+	}
+}
+
 func TestMessageWindowUsesScrollOffsetAndClamps(t *testing.T) {
 	model := NewModel(context.Background(), testRuntime(t))
 	model.messages = []tuiMessage{{kind: messageAssistant, text: strings.Join([]string{
@@ -943,6 +1122,31 @@ func texts(lines []renderLine) []string {
 		out = append(out, line.text)
 	}
 	return out
+}
+
+func onlyReasoningLine(t *testing.T, lines []renderLine) renderLine {
+	t.Helper()
+	var reasoning []renderLine
+	for _, line := range lines {
+		if line.kind == messageReasoning {
+			reasoning = append(reasoning, line)
+		}
+	}
+	if len(reasoning) != 1 {
+		t.Fatalf("reasoning lines = %d, want 1: %+v", len(reasoning), lines)
+	}
+	return reasoning[0]
+}
+
+func reasoningLineIndex(t *testing.T, lines []renderLine, messageIndex int) int {
+	t.Helper()
+	for i, line := range lines {
+		if line.kind == messageReasoning && line.reasoningIndex == messageIndex {
+			return i
+		}
+	}
+	t.Fatalf("reasoning line for message %d not found: %+v", messageIndex, lines)
+	return -1
 }
 
 func cursorLineIndex(lines []inputRenderLine) int {

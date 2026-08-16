@@ -30,6 +30,9 @@ const (
 	scrollLines       = 2
 	maxCompletionRows = 6
 	inputPrompt       = "❯ "
+
+	reasoningCollapsedPrefix = "▶ thinking: "
+	reasoningExpandedPrefix  = "▼ thinking (click to collapse)"
 )
 
 type messageKind int
@@ -47,6 +50,10 @@ type tuiMessage struct {
 	kind messageKind
 	text string
 
+	// reasoningExpanded tracks the per-block expand/collapse state for
+	// messageReasoning messages. New reasoning blocks start collapsed.
+	reasoningExpanded bool
+
 	markdownCache      []renderLine
 	markdownCacheText  string
 	markdownCacheWidth int
@@ -56,6 +63,11 @@ type renderLine struct {
 	kind  messageKind
 	text  string
 	spans []markdownSpan
+
+	// reasoningToggle marks lines that can be clicked to toggle their
+	// reasoning block, and reasoningIndex points at that block in m.messages.
+	reasoningToggle bool
+	reasoningIndex  int
 }
 
 type inputRenderCell struct {
@@ -334,7 +346,63 @@ func (m *Model) handleMouse(msg tea.MouseMsg) {
 		m.scrollBy(scrollLines)
 	case tea.MouseButtonWheelDown:
 		m.scrollBy(-scrollLines)
+	case tea.MouseButtonLeft:
+		if msg.Action == tea.MouseActionPress {
+			m.toggleReasoningAt(msg.X, msg.Y)
+		}
 	}
+}
+
+func (m *Model) toggleReasoningAt(x, y int) {
+	if m.approval != nil {
+		return
+	}
+	columns := max(20, m.width)
+	rows := max(8, m.height)
+	layout := m.layoutFor(columns, rows)
+	if y < 0 || y >= layout.messageRows {
+		return
+	}
+	if m.completionPopupCovers(columns, x, y, layout.indexStatusRow) {
+		return
+	}
+	lines := m.visibleMessageLines(columns, layout.messageRows, m.scrollOffset)
+	if y >= len(lines) {
+		return
+	}
+	line := lines[y]
+	index := line.reasoningIndex
+	if !line.reasoningToggle || index < 0 || index >= len(m.messages) || m.messages[index].kind != messageReasoning {
+		return
+	}
+	m.messages[index].reasoningExpanded = !m.messages[index].reasoningExpanded
+	m.scrollOffset = m.clampScrollOffset(m.scrollOffset)
+}
+
+func (m *Model) completionPopupCovers(columns, x, y, indexStatusRow int) bool {
+	if m.runtime == nil || indexStatusRow <= 1 {
+		return false
+	}
+	items := m.completions()
+	if len(items) == 0 {
+		return false
+	}
+	modelRows := min(maxCompletionRows, len(items))
+	modelSelectorPopup := isModelSelectorPopup(m)
+	popupRows := modelRows
+	if modelSelectorPopup {
+		popupRows = modelRows + 2 // reasoning 行 + 底框
+	}
+	top := max(0, indexStatusRow-popupRows-1)
+	visible := min(modelRows, max(0, indexStatusRow-top-1))
+	if visible <= 0 {
+		return false
+	}
+	bottom := top + visible
+	if modelSelectorPopup {
+		bottom += 2 // reasoning 行 + 底框
+	}
+	return x < min(columns, 72) && y >= top && y <= bottom
 }
 
 func (m *Model) handleCommandFinished(msg commandFinishedMsg) tea.Cmd {
@@ -910,7 +978,7 @@ func (m *Model) appendStreamingReasoningDelta(delta string) {
 		m.beginStreamingReasoningMessage()
 	}
 	m.streamingReasoning += delta
-	m.messages[m.streamingReasoningIndex] = tuiMessage{kind: messageReasoning, text: m.streamingReasoning}
+	m.messages[m.streamingReasoningIndex].text = m.streamingReasoning
 }
 
 func (m *Model) finishStreamingReasoningMessage(text string) {
@@ -930,7 +998,8 @@ func (m *Model) finishStreamingReasoningMessage(text string) {
 			m.streamingAssistantIndex--
 		}
 	} else {
-		m.messages[m.streamingReasoningIndex] = tuiMessage{kind: messageReasoning, text: text}
+		expanded := m.messages[m.streamingReasoningIndex].reasoningExpanded
+		m.messages[m.streamingReasoningIndex] = tuiMessage{kind: messageReasoning, text: text, reasoningExpanded: expanded}
 	}
 	m.streamingReasoningIndex = -1
 	m.streamingReasoning = ""
@@ -1286,23 +1355,91 @@ func inputRuneStyles(input string, length int) []inputStyle {
 
 func (m *Model) wrappedMessageLines(columns int) []renderLine {
 	var out []renderLine
+	blankLine := renderLine{kind: messageAssistant, text: ""}
+
 	for i := range m.messages {
 		message := &m.messages[i]
-		if message.kind == messageAssistant {
+		switch message.kind {
+		case messageReasoning:
+			if message.reasoningExpanded {
+				out = append(out, renderLine{
+					kind:            messageReasoning,
+					text:            reasoningExpandedPrefix,
+					reasoningToggle: true,
+					reasoningIndex:  i,
+				})
+				for _, raw := range strings.Split(message.text, "\n") {
+					for _, line := range wrap(raw, columns) {
+						out = append(out, renderLine{
+							kind:            messageReasoning,
+							text:            line,
+							reasoningToggle: true,
+							reasoningIndex:  i,
+						})
+					}
+				}
+			} else {
+				out = append(out, renderLine{
+					kind:            messageReasoning,
+					text:            collapsedReasoningLine(message.text, columns),
+					reasoningToggle: true,
+					reasoningIndex:  i,
+				})
+			}
+			out = append(out, blankLine)
+			continue
+		case messageAssistant:
 			out = append(out, message.markdownLines(columns)...)
-		} else {
+		default:
 			for _, raw := range strings.Split(message.text, "\n") {
 				for _, line := range wrap(raw, columns) {
 					out = append(out, renderLine{kind: message.kind, text: line})
 				}
 			}
 		}
-		out = append(out, renderLine{kind: messageAssistant, text: ""})
+		out = append(out, blankLine)
 	}
-	if len(out) > 0 && strings.TrimSpace(out[len(out)-1].text) == "" {
+
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1].text) == "" {
 		out = out[:len(out)-1]
 	}
 	return out
+}
+
+func collapsedReasoningLine(text string, columns int) string {
+	normalized := strings.Join(strings.Fields(text), " ")
+	prefixWidth := runewidth.StringWidth(reasoningCollapsedPrefix)
+	return reasoningCollapsedPrefix + tailColumns(normalized, max(0, columns-prefixWidth))
+}
+
+// tailColumns returns the tail of value that fits into width display columns,
+// prefixed with an ellipsis when the head was truncated. It is the reverse of
+// fit: it scrolls the visible window to the newest content as deltas arrive.
+func tailColumns(value string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if runewidth.StringWidth(value) <= width {
+		return value
+	}
+	ellipsis := "…"
+	ellipsisWidth := runewidth.StringWidth(ellipsis)
+	if ellipsisWidth > width {
+		return ""
+	}
+	target := width - ellipsisWidth
+	runes := []rune(value)
+	cols := 0
+	start := len(runes)
+	for i := len(runes) - 1; i >= 0; i-- {
+		w := max(0, runewidth.RuneWidth(runes[i]))
+		if cols+w > target {
+			start = i + 1
+			break
+		}
+		cols += w
+	}
+	return ellipsis + string(runes[start:])
 }
 
 func (message *tuiMessage) markdownLines(columns int) []renderLine {
