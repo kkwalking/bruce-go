@@ -1,3 +1,25 @@
+# DeepWiki
+Freely available at [deepwiki.com](https://deepwiki.com/).
+
+Index private repos with a [Devin account](https://devin.ai/).
+
+## DeepWiki MCP Server
+The remote no-auth server provides three tools (`ask_question`, `read_wiki_structure`, and `read_wiki_contents`).
+We offer two URLs:  `https://mcp.deepwiki.com/sse` and `https://mcp.deepwiki.com/mcp`.
+
+More info here: https://docs.devin.ai/work-with-devin/deepwiki-mcp
+## README badge
+[<img src="https://devin.ai/assets/askdeepwiki.png" alt="Ask https://DeepWiki.com" height="20"/>](https://deepwiki.com)
+
+[Make a badge](https://deepwiki.com/badge-maker
+) for your README that links to your repo's DeepWiki. We auto-refresh DeepWikis if their repo has a badge.
+
+
+## More resources
+- [DeepWiki Docs](https://docs.devin.ai/work-with-devin/deepwiki)
+
+- [Devin Tutorials](https://docs.devin.ai/learn-about-devin/workflows)
+
 # Bruce Go Coding Agent
 
 Bruce Go Coding Agent 是 Bruce Coding Agent 的 Go 版本移植，保持 Java 版 README 中除 RAG 之外的用户可见功能面：ReAct、Claude Code 风格 Plan mode、HITL、并行工具调用、session/resume/tree/compact、模型切换、WebSearch/WebFetch、MCP stdio/Streamable HTTP、Skill 加载、AGENTS 指令加载、图片输入引用解析和常用 slash 命令。
