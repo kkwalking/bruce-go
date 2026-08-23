@@ -1,0 +1,300 @@
+{
+  "repo_notes": [
+    {
+      "content": "全部换成中文！！！"
+    }
+  ],
+  "pages": [
+    {
+      "title": "Overview",
+      "purpose": "High-level introduction to Bruce Go Coding Agent: what it is, its architecture, key capabilities, and how the major subsystems relate. Links to child pages for setup and project structure.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Getting Started",
+      "purpose": "How to build, configure, and run Bruce. Covers CLI flags, the setting.json configuration file structure, LLM provider setup, and the ~/.bruce directory layout.",
+      "parent": "Overview",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Project Structure and Porting Notes",
+      "purpose": "Explains the Go package layout under internal/, the design decisions made when porting from Java, what was intentionally excluded (RAG), and the dependency list.",
+      "parent": "Overview",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Core Runtime and Agent Orchestration",
+      "purpose": "Overview of how the Runtime ties together agents, sessions, tools, and events. Introduces the three agent modes and the event bus. Links to child pages for each major subsystem.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Runtime Lifecycle and Agent Modes",
+      "purpose": "Deep dive into integrated.Runtime: initialization, the Handle/RunTask flow, AgentMode switching (React, Plan, Minimal), model switching, and the Status snapshot.",
+      "parent": "Core Runtime and Agent Orchestration",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Agent ReAct Loop",
+      "purpose": "How the Agent struct implements the ReAct (Reasoning and Acting) loop: system prompt construction, history management, tool execution cycles, image pruning, skill redaction, and error handling.",
+      "parent": "Core Runtime and Agent Orchestration",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Event Bus",
+      "purpose": "Documents the internal/event package: the Bus, all Event types (RunStarted, MessageDelta, ToolCallStarted, PlanEventRecorded, SessionChanged, etc.), and how the TUI and session recorder subscribe to them.",
+      "parent": "Core Runtime and Agent Orchestration",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Plan Mode",
+      "purpose": "Explains the Plan mode workflow: Planning Agent system prompt, plan lifecycle (Created → Presented → Approved/Rejected/Canceled → Handoff), plan storage in ~/.bruce/plans/, and the planning tool registry.",
+      "parent": "Core Runtime and Agent Orchestration",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "LLM Integration",
+      "purpose": "Overview of the LLM abstraction layer: the ChatClient interface, supported providers, and how the agent communicates with language models. Links to child pages for provider details and context management.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "ChatClient Interface and Providers",
+      "purpose": "Documents the ChatClient interface, OpenAICompatibleClient, DeepSeekClient, GLMClient constructors, SSE stream processing, request serialization, reasoning tokens, and provider-specific quirks.",
+      "parent": "LLM Integration",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "SwitchableClient and Model Management",
+      "purpose": "How SwitchableClient wraps providers for runtime model switching, the resolve() lookup logic, ReasoningEffort configuration, compaction window validation, and persistence via config.Loader.",
+      "parent": "LLM Integration",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Session Management and Context Compaction",
+      "purpose": "Overview of how conversations are persisted as JSONL trees, how history is replayed, and how compaction keeps context within LLM limits. Links to child pages for session store and compaction details.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Session Store and History Tree",
+      "purpose": "Documents the session.Store: JSONL format, Entry types (message, mode_change, leaf_change, compaction, plan_event), the ActiveLeaf branching model, Resume, SelectLeaf, and AppendMessage.",
+      "parent": "Session Management and Context Compaction",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Context Compaction",
+      "purpose": "Explains the compaction pipeline: PrepareCompaction cut-point logic, LLM summarization prompts (Objectives/Progress/Key Decisions), file operation tracking, token estimation heuristics, and auto-compaction thresholds.",
+      "parent": "Session Management and Context Compaction",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Tool System",
+      "purpose": "Overview of the tool Registry, built-in tools, policy enforcement, and parallel execution. Links to child pages for built-in tools, HITL approval, and the sandbox.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Tool Registry and Built-in Tools",
+      "purpose": "Documents Registry construction, Register/Subset/Lookup, built-in tools (read_file, write_file, edit_file, execute_command), path safety (relativePath, writeTargetRelativePath, os.OpenRoot), CommandGuard denylist, and ParallelExecutor.",
+      "parent": "Tool System",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "HITL Approval System",
+      "purpose": "Documents the approval.Handler interface, AutoHandler, Request/Result types, DangerLevel/RiskDescription per tool, the TUI approval overlay, and how the Registry re-validates modified arguments.",
+      "parent": "Tool System",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Web Search and Fetch",
+      "purpose": "Documents the web package: Searcher interface, supported providers (Zhipu, SerpAPI, Searxng), Fetcher HTML extraction, NetworkPolicy, and how web tools are registered in the tool registry.",
+      "parent": "Tool System",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Sandbox and Security",
+      "purpose": "Overview of the native sandbox system: modes, platform runners, and security principles. Links to child pages for the Manager, platform-specific runners, and MCP sandboxing.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Sandbox Manager and Policy",
+      "purpose": "Documents sandbox.Manager: mode lifecycle, policy snapshot generation, backend probing, environment construction, sensitive path management, Git layout detection, and the /sandbox slash commands.",
+      "parent": "Sandbox and Security",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Platform Runners",
+      "purpose": "Explains the Runner interface and its three implementations: hostRunner (full-access), Seatbelt runner (macOS), and Bubblewrap runner (Linux). Covers process lifecycle, long-running process support, and fail-closed behavior.",
+      "parent": "Sandbox and Security",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "MCP (Model Context Protocol)",
+      "purpose": "Overview of MCP integration: how Bruce connects to external tool servers, manages their lifecycle, and enforces sandbox policies on MCP tools. Links to child pages for transport and policy.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "MCP Manager and Tool Registry",
+      "purpose": "Documents mcp.Manager: server lifecycle (enable/disable/restart), tool discovery, the mcp_ tool naming convention, refreshMCPTools sandbox filtering, and the /mcp slash commands.",
+      "parent": "MCP (Model Context Protocol)",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "MCP Transports and Sandbox Policy",
+      "purpose": "Explains stdio and Streamable HTTP transports, JSON-RPC protocol, SSE parsing, the policy.go enforcement layer, toolAccess configuration, and why HTTP MCP cannot use workspace-write.",
+      "parent": "MCP (Model Context Protocol)",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Terminal User Interface (TUI)",
+      "purpose": "Overview of the Bubble Tea-based TUI: layout zones, message rendering, and how it connects to the Runtime. Links to child pages for the main model, completion, and highlighting.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "TUI Model and Event Handling",
+      "purpose": "Documents the TUI Model state machine: message pipeline, streaming delta handling, tool activity tracking, reasoning block toggling, HITL overlay rendering, layout engine, markdown cache, and history persistence.",
+      "parent": "Terminal User Interface (TUI)",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Input Completion and Syntax Highlighting",
+      "purpose": "Documents completionsFor (slash commands, model selector, image paths, skills), applyCompletion, highlightInput (danger patterns, secret patterns, at-references), and the styledSpan pipeline.",
+      "parent": "Terminal User Interface (TUI)",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Configuration",
+      "purpose": "Documents the config package: Settings struct, Loader.Load/Save, LLM provider configuration, compaction thresholds, sandbox settings, MCP toolAccess validation, and path resolution utilities.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Settings Schema and Validation",
+      "purpose": "Covers the full setting.json schema: llm providers, modelCapabilities, webSearch providers, mcp servers, compaction, sandbox, variables. Documents validation rules for capabilities, MCP security, and path resolution.",
+      "parent": "Configuration",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Skills and AGENTS Instructions",
+      "purpose": "Documents the skill.Catalog and Loader (scan paths, SKILL.md format, source priority), the instructions package (AGENTS.md loading from git root hierarchy), and how both are injected into agent system prompts.",
+      "parent": "Configuration",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    }
+  ]
+}
