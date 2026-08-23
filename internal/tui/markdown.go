@@ -151,7 +151,7 @@ func renderMarkdown(text string, columns int) []renderLine {
 	var out []renderLine
 	for i, block := range blocks {
 		lines := renderMarkdownBlock(block, columns)
-		if i > 0 && len(lines) > 0 && !lineIsEmpty(out[len(out)-1]) && !lineIsEmpty(lines[0]) {
+		if i > 0 && len(out) > 0 && len(lines) > 0 && !lineIsEmpty(out[len(out)-1]) && !lineIsEmpty(lines[0]) {
 			out = append(out, markdownLine(nil))
 		}
 		out = append(out, lines...)
@@ -182,6 +182,7 @@ func parseMarkdownBlocks(text string) []markdownBlock {
 				i++
 			}
 			blocks = append(blocks, markdownBlock{kind: markdownCodeBlock, lines: code, language: language})
+			i-- // compensate for the outer loop's i++; keep the first post-fence line
 			continue
 		}
 		if heading, ok := parseMarkdownHeading(line); ok {
