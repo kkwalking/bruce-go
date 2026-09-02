@@ -1215,10 +1215,46 @@ func statusDetails(status bruntime.Status, homeDir string, elapsedMillis int64) 
 		compactPath(status.WorkspaceRoot, homeDir),
 	)
 	details += " · sandbox " + empty(status.SandboxMode, "unknown")
+	if ctx := formatContextUsage(status.ContextTokens, status.ContextWindow); ctx != "" {
+		details += " · ctx " + ctx
+	}
 	if elapsedMillis > 0 {
 		details += fmt.Sprintf(" · %dms", elapsedMillis)
 	}
 	return details
+}
+
+func formatContextUsage(tokens, window int) string {
+	if tokens <= 0 {
+		return ""
+	}
+	seg := formatTokens(tokens)
+	if window > 0 {
+		seg += "/" + formatTokens(window) + " (" + itoa(percent(tokens, window)) + "%)"
+	}
+	return seg
+}
+
+func percent(n, total int) int {
+	if total <= 0 {
+		return 0
+	}
+	return int(float64(n) / float64(total) * 100)
+}
+
+func formatTokens(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fK", float64(n)/1_000)
+	default:
+		return itoa(n)
+	}
+}
+
+func itoa(n int) string {
+	return fmt.Sprintf("%d", n)
 }
 
 func (m *Model) drawApproval(canvas []string, columns, rows int) {

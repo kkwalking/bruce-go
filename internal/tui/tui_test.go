@@ -135,6 +135,47 @@ func TestLayoutKeepsInputAndStatusDockedAtBottom(t *testing.T) {
 	}
 }
 
+func TestStatusDetailsShowsContextUsage(t *testing.T) {
+	details := statusDetails(bruntime.Status{
+		Model:         "test-model",
+		ContextTokens: 12800,
+		ContextWindow: 128000,
+	}, "", 0)
+	for _, expected := range []string{"12.8K/128.0K", "10%"} {
+		if !strings.Contains(details, expected) {
+			t.Fatalf("status details missing %q: %s", expected, details)
+		}
+	}
+}
+
+func TestStatusDetailsHidesContextUsageWhenEmpty(t *testing.T) {
+	details := statusDetails(bruntime.Status{Model: "test-model"}, "", 0)
+	if strings.Contains(details, "ctx") {
+		t.Fatalf("status details unexpectedly shows context usage: %s", details)
+	}
+}
+
+func TestFormatContextUsage(t *testing.T) {
+	cases := []struct {
+		tokens int
+		window int
+		want   string
+	}{
+		{0, 0, ""},
+		{0, 128000, ""},
+		{512, 0, "512"},
+		{12800, 128000, "12.8K/128.0K (10%)"},
+		{128000, 128000, "128.0K/128.0K (100%)"},
+		{1_500_000, 2_000_000, "1.5M/2.0M (75%)"},
+	}
+	for _, c := range cases {
+		got := formatContextUsage(c.tokens, c.window)
+		if got != c.want {
+			t.Fatalf("formatContextUsage(%d, %d) = %q, want %q", c.tokens, c.window, got, c.want)
+		}
+	}
+}
+
 func TestStatusDetailsShowsCompactSandboxWithoutMCP(t *testing.T) {
 	details := statusDetails(bruntime.Status{
 		Mode:            bruntime.ModeReact,

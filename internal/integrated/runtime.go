@@ -415,6 +415,7 @@ func (r *Runtime) Status() runtime.Status {
 	mcpStatuses := r.MCP.Status()
 	mcpSummary := render.MCP(mcpStatuses)
 	sandboxStatus := r.Sandbox.Status()
+	contextTokens, contextWindow := r.contextUsage()
 	return runtime.Status{
 		Mode:              r.Mode,
 		Model:             r.Client.ModelName(),
@@ -438,6 +439,8 @@ func (r *Runtime) Status() runtime.Status {
 		SkillCount:        len(r.Skills.Skills()),
 		ToolNames:         toolNames,
 		ActivePlan:        r.currentPlanState(),
+		ContextTokens:     contextTokens,
+		ContextWindow:     contextWindow,
 	}
 }
 
@@ -805,6 +808,13 @@ func (r *Runtime) compactAfterSuccessfulTurn(ctx context.Context, runID string) 
 
 func (r *Runtime) compactionThreshold() (needed bool, tokens int, threshold int, err error) {
 	return r.compactionThresholdFor(r.Session.Context(r.Mode).Messages)
+}
+
+func (r *Runtime) contextUsage() (tokens, contextWindow int) {
+	if r.Client == nil {
+		return 0, 0
+	}
+	return session.EstimateContextTokens(r.Session.Context(r.Mode).Messages).Tokens, r.Client.MaxContextWindow()
 }
 
 func (r *Runtime) compactionThresholdFor(messages []llm.Message) (needed bool, tokens int, threshold int, err error) {

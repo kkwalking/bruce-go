@@ -143,6 +143,8 @@ type Status struct {
 	SkillCount        int
 	ToolNames         []string
 	ActivePlan        PlanState
+	ContextTokens     int
+	ContextWindow     int
 }
 
 func (s Status) DisplayString() string {
