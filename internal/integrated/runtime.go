@@ -36,6 +36,8 @@ type Options struct {
 	SettingsPath string
 	Client       llm.ChatClient
 	StartMCP     bool
+	Resume       bool
+	SessionRef   string
 }
 
 type Runtime struct {
@@ -44,20 +46,21 @@ type Runtime struct {
 	Settings  config.Settings
 	Loader    config.Loader
 
-	Client     llm.ChatClient
-	switchable modelSwitcher
-	Tools      *tool.Registry
-	Web        *web.Manager
-	MCP        *mcp.Manager
-	Skills     *skill.Catalog
-	Session    *session.Store
-	Events     *event.Bus
-	HITL       approval.Handler
-	Mode       runtime.AgentMode
-	Parallel   bool
-	Concurrent runtime.ConcurrencyConfig
-	StartMCP   bool
-	Sandbox    *sandbox.Manager
+	Client        llm.ChatClient
+	switchable    modelSwitcher
+	Tools         *tool.Registry
+	Web           *web.Manager
+	MCP           *mcp.Manager
+	Skills        *skill.Catalog
+	Session       *session.Store
+	Events        *event.Bus
+	HITL          approval.Handler
+	Mode          runtime.AgentMode
+	Parallel      bool
+	Concurrent    runtime.ConcurrencyConfig
+	StartMCP      bool
+	ResumeOnStart bool
+	Sandbox       *sandbox.Manager
 
 	react      *agent.Agent
 	planning   *agent.Agent
@@ -155,33 +158,68 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	skill.RegisterTools(registry, skills)
 	mcpManager := mcp.NewManager(settings.MCP, workspace).WithSandbox(sandboxManager)
 
-	store, err := session.CreateNew(home, workspace, runtime.ModeReact)
+	store := session.NewStore(home, workspace)
+	if opts.Resume {
+		if opts.SessionRef == "" {
+			summaries, listErr := store.List(runtime.ModeReact)
+			if listErr != nil {
+				_ = sandboxManager.Close()
+				return nil, listErr
+			}
+			for _, summary := range summaries {
+				if summary.Task.Resumable() {
+					opts.SessionRef = summary.File
+					break
+				}
+			}
+			if opts.SessionRef == "" {
+				for _, summary := range summaries {
+					if summary.MessageCount > 0 {
+						opts.SessionRef = summary.File
+						break
+					}
+				}
+			}
+			if opts.SessionRef == "" {
+				_ = sandboxManager.Close()
+				return nil, errors.New("there are no resumable sessions")
+			}
+		}
+		err = store.Resume(opts.SessionRef)
+		if err == nil && store.Workspace != workspace {
+			err = errors.New("session belongs to another workspace; start Bruce from that directory")
+		}
+	} else {
+		err = store.CreateNew(runtime.ModeReact)
+	}
 	if err != nil {
 		_ = sandboxManager.Close()
 		return nil, err
 	}
 	bus := event.NewBus()
 	r := &Runtime{
-		Workspace:  workspace,
-		HomeDir:    home,
-		Settings:   settings,
-		Loader:     loader,
-		Client:     client,
-		switchable: switcher,
-		Tools:      registry,
-		Web:        webManager,
-		MCP:        mcpManager,
-		Skills:     skills,
-		Session:    store,
-		Events:     bus,
-		HITL:       hitl,
-		Mode:       runtime.ModeReact,
-		Parallel:   true,
-		Concurrent: concurrency,
-		StartMCP:   opts.StartMCP,
-		Sandbox:    sandboxManager,
+		Workspace:     workspace,
+		HomeDir:       home,
+		Settings:      settings,
+		Loader:        loader,
+		Client:        client,
+		switchable:    switcher,
+		Tools:         registry,
+		Web:           webManager,
+		MCP:           mcpManager,
+		Skills:        skills,
+		Session:       store,
+		Events:        bus,
+		HITL:          hitl,
+		Mode:          runtime.ModeReact,
+		Parallel:      true,
+		Concurrent:    concurrency,
+		StartMCP:      opts.StartMCP,
+		ResumeOnStart: opts.Resume,
+		Sandbox:       sandboxManager,
 	}
 	r.planStore = planning.NewStore(home, store)
+	r.Mode = store.Context(runtime.ModeReact).Mode
 	r.subscribeSessionRecorder()
 	r.refreshMCPTools()
 	r.rebuildAgents()
@@ -251,6 +289,11 @@ func (r *Runtime) RunTask(ctx context.Context, input string) (string, error) {
 }
 
 func (r *Runtime) runTask(ctx context.Context, input string, allowPendingPlanInput bool) (string, error) {
+	release, err := r.Session.AcquireTask()
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	r.Skills.BeginTask()
 	defer r.Skills.EndTask()
 	runID := event.NewRunID()
@@ -296,33 +339,37 @@ func (r *Runtime) runTask(ctx context.Context, input string, allowPendingPlanInp
 	}
 	switch r.Mode {
 	case runtime.ModePlan:
-		out, err := r.runAgentWithCompaction(ctx, r.planning, prepared, r.taskContextWithPlan(taskContext), runID)
+		out, err := r.runCheckpointedAgent(ctx, r.planning, prepared, r.taskContextWithPlan(taskContext), runID, invocation.Names, false)
 		if err != nil {
 			r.emit(event.NewRunFailed(runID, err.Error()))
 			return "", err
 		}
-		display, err := r.presentPlan(runID, out)
+		if r.Session.Context(r.Mode).Task.Phase != "response_saved" {
+			r.emitTaskFinished(runID, out, nil)
+			return out, nil
+		}
+		display, err := r.presentCheckpointPlan(ctx, runID, out)
 		if err != nil {
 			r.emit(event.NewRunFailed(runID, err.Error()))
 			return "", err
 		}
-		r.emit(event.NewRunCompleted(runID, display))
+		r.emitTaskFinished(runID, display, nil)
 		return display, nil
 	case runtime.ModeMinimal:
-		out, err := r.runAgentWithCompaction(ctx, r.minimal, prepared, "", runID)
+		out, err := r.runCheckpointedAgent(ctx, r.minimal, prepared, "", runID, invocation.Names, false)
 		if err != nil {
 			r.emit(event.NewRunFailed(runID, err.Error()))
 			return "", err
 		}
-		r.emit(event.NewRunCompleted(runID, out))
+		r.emitTaskFinished(runID, out, nil)
 		return out, nil
 	default:
-		out, err := r.runAgentWithCompaction(ctx, r.react, prepared, r.taskContextWithPlan(taskContext), runID)
+		out, err := r.runCheckpointedAgent(ctx, r.react, prepared, r.taskContextWithPlan(taskContext), runID, invocation.Names, false)
 		if err != nil {
 			r.emit(event.NewRunFailed(runID, err.Error()))
 			return "", err
 		}
-		r.emit(event.NewRunCompleted(runID, out))
+		r.emitTaskFinished(runID, out, nil)
 		return out, nil
 	}
 }
@@ -375,14 +422,9 @@ func (r *Runtime) HandleCommand(ctx context.Context, command cli.Command) cli.Re
 			r.emit(event.NewSessionChanged(command.Name, r.Session.Context(r.Mode)))
 		}
 	case "resume":
-		ref := strings.Join(command.Args, " ")
-		result.Err = r.Session.Resume(ref)
-		if result.Err == nil {
-			r.Mode = r.Session.Context(r.Mode).Mode
-			result.Output = "Resumed session: " + r.Session.Context(r.Mode).SessionID
-			r.rebuildAgents()
-			r.emit(event.NewSessionChanged("resume", r.Session.Context(r.Mode)))
-		}
+		result.Output, result.Err = r.resumeCommand(ctx, command.Args)
+	case "checkpoint":
+		result.Output, result.Err = r.checkpointStatus(ctx)
 	case "tree":
 		if len(command.Args) == 0 {
 			result.Output = r.Session.RenderTree(r.Mode)
@@ -738,9 +780,15 @@ func (r *Runtime) newSession() error {
 	return nil
 }
 
-func (r *Runtime) runAgentWithCompaction(ctx context.Context, currentAgent *agent.Agent, input llm.PreparedInput, taskContext, runID string) (string, error) {
+func (r *Runtime) runAgentWithCompaction(ctx context.Context, currentAgent *agent.Agent, input llm.PreparedInput, taskContext, runID string, continuing bool) (string, error) {
 	currentAgent.RestoreHistory(r.Session.Context(r.Mode).Messages)
-	out, err := currentAgent.Run(ctx, input, taskContext, runID)
+	var out string
+	var err error
+	if continuing {
+		out, err = currentAgent.Continue(ctx, taskContext, runID)
+	} else {
+		out, err = currentAgent.Run(ctx, input, taskContext, runID)
+	}
 	overflowRetries := 0
 	thresholdRetries := 0
 	for err != nil {
@@ -775,7 +823,6 @@ func (r *Runtime) runAgentWithCompaction(ctx context.Context, currentAgent *agen
 			return "", err
 		}
 	}
-	r.compactAfterSuccessfulTurn(ctx, runID)
 	return out, nil
 }
 
@@ -1015,7 +1062,7 @@ func (r *Runtime) subscribeSessionRecorder() {
 	r.Events.Subscribe(func(evt event.Event) {
 		switch e := evt.(type) {
 		case event.MessageCompleted:
-			if e.Durable {
+			if e.Durable && !e.Persisted {
 				if err := r.Session.AppendMessage(e.Message); err != nil {
 					r.emit(event.NewActivity(e.RunID, "Failed to write session: "+err.Error()))
 				}

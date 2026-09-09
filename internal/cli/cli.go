@@ -130,7 +130,10 @@ var Commands = []CommandInfo{
 	{Name: "session", Usage: "/session", Description: "View the current session"},
 	{Name: "sessions", Usage: "/sessions", Description: "List sessions for the current working directory"},
 	{Name: "new", Usage: "/new", Description: "Create a new session"},
-	{Name: "resume", Usage: "/resume <id|path>", Description: "Resume a session", Complete: "/resume "},
+	{Name: "resume", Usage: "/resume [id|path] [--continue] [--accept-changes]", Description: "Restore a session or continue its unfinished task", Complete: "/resume ", Options: []CommandOption{
+		{Value: "--continue ", Description: "Continue the unfinished task", Group: "Resume", Options: []CommandOption{{Value: "--accept-changes", Description: "Acknowledge workspace changes", Group: "Resume"}}},
+	}},
+	{Name: "checkpoint", Usage: "/checkpoint", Description: "Inspect task progress and workspace changes"},
 	{Name: "tree", Usage: "/tree [entryId]", Description: "View or select a session-tree node", Complete: "/tree "},
 	{Name: "compact", Usage: "/compact [instructions]", Description: "Compact earlier session history", Complete: "/compact "},
 	{Name: "clear", Usage: "/clear", Description: "Start a new session and clear current state"},

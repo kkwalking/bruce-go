@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 
+	"bruce-go/internal/checkpoint"
 	"bruce-go/internal/event"
 	"bruce-go/internal/llm"
 	"bruce-go/internal/runtime"
@@ -24,15 +26,18 @@ Respond in the language most appropriate for the user. Normally, use the languag
 const maxRetries = 2
 
 type Agent struct {
-	Client         llm.ChatClient
-	Tools          *tool.Registry
-	Executor       tool.ParallelExecutor
-	SystemPrompt   string
-	History        []llm.Message
-	MaxIterations  int
-	Events         *event.Bus
-	BeforeChat     func([]llm.Message) error
-	skipBeforeChat bool
+	Client            llm.ChatClient
+	Tools             *tool.Registry
+	Executor          tool.ParallelExecutor
+	SystemPrompt      string
+	History           []llm.Message
+	MaxIterations     int
+	Events            *event.Bus
+	BeforeChat        func([]llm.Message) error
+	PersistMessage    func(llm.Message) error
+	PersistToolResult func(llm.Message) error
+	Outcome           string
+	skipBeforeChat    bool
 }
 
 func New(client llm.ChatClient, registry *tool.Registry, additional string, config runtime.ConcurrencyConfig, events *event.Bus) *Agent {
@@ -81,7 +86,9 @@ func (a *Agent) Run(ctx context.Context, input llm.PreparedInput, taskContext st
 	if runID == "" {
 		runID = event.NewRunID()
 	}
-	a.appendDurable(runID, input.Message)
+	if err := a.appendDurable(runID, input.Message); err != nil {
+		return "", err
+	}
 	return a.run(ctx, taskContext, runID)
 }
 
@@ -95,6 +102,7 @@ func (a *Agent) Continue(ctx context.Context, taskContext string, runID string) 
 }
 
 func (a *Agent) run(ctx context.Context, taskContext string, runID string) (string, error) {
+	a.Outcome = checkpoint.Failed
 	if taskContext != "" {
 		a.History = append(a.History, llm.System(taskContext))
 		defer func() {
@@ -111,6 +119,7 @@ func (a *Agent) run(ctx context.Context, taskContext string, runID string) (stri
 	for i := 0; i < a.MaxIterations; i++ {
 		select {
 		case <-ctx.Done():
+			a.Outcome = checkpoint.Interrupted
 			return "The task was interrupted by the user.", nil
 		default:
 		}
@@ -126,6 +135,7 @@ func (a *Agent) run(ctx context.Context, taskContext string, runID string) (stri
 		resp, err := a.Client.Chat(ctx, a.History, a.Tools.Definitions(), streamToEvents(a.Events, runID))
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
+				a.Outcome = checkpoint.Interrupted
 				a.emit(event.NewMessageCompleted(runID, llm.Assistant(""), false))
 				return "The task was interrupted by the user.", nil
 			}
@@ -144,33 +154,57 @@ func (a *Agent) run(ctx context.Context, taskContext string, runID string) (stri
 		retryCount = 0
 		assistant := a.assistantMessage(resp)
 		if resp.HasToolCalls() {
-			a.append(assistant)
-			a.emit(event.NewMessageCompleted(runID, assistant, true))
-			results := a.Executor.Execute(ctx, resp.ToolCalls, tool.ExecutionHooks{
+			if err := a.appendDurable(runID, assistant); err != nil {
+				return "", err
+			}
+			batchCtx, cancel := context.WithCancel(ctx)
+			var persistErr error
+			var persistMu sync.Mutex
+			results := a.Executor.Execute(batchCtx, resp.ToolCalls, tool.ExecutionHooks{
 				OnStarted: func(call llm.ToolCall) {
 					a.emit(event.NewToolCallStarted(runID, call))
 				},
 				OnCompleted: func(result tool.ToolCallResult) {
+					persistMu.Lock()
+					defer persistMu.Unlock()
+					if a.PersistToolResult != nil {
+						msg := a.durableToolMessage(result.ToolCall, resultMessage(result))
+						if err := a.PersistToolResult(msg); err != nil {
+							persistErr = errors.Join(persistErr, err)
+							cancel()
+						}
+					}
 					a.emit(event.NewToolCallCompleted(runID, result))
 				},
 			})
-			for _, result := range results {
-				toolMessage := llm.ToolMessage(result.ToolCall.ID, result.Result)
-				a.append(toolMessage)
-				a.emit(event.NewMessageCompleted(runID, a.durableToolMessage(result.ToolCall, toolMessage), true))
+			cancel()
+			if persistErr != nil {
+				return "", persistErr
 			}
-			a.appendImageToolMessages(runID, results)
+			for _, result := range results {
+				toolMessage := resultMessage(result)
+				if err := a.persist(runID, a.durableToolMessage(result.ToolCall, toolMessage)); err != nil {
+					return "", err
+				}
+				a.append(toolMessage)
+			}
+			if err := a.appendImageToolMessages(runID, results); err != nil {
+				return "", err
+			}
 			continue
 		}
-		a.append(assistant)
-		a.emit(event.NewMessageCompleted(runID, assistant, true))
+		if err := a.appendDurable(runID, assistant); err != nil {
+			return "", err
+		}
 		if overflow := llm.DetectContextOverflowResponse(resp, a.Client.MaxContextWindow()); overflow.Retry {
 			return "", &llm.ContextOverflowError{Cause: errors.New("the model produced no output because its context window was exhausted")}
 		}
+		a.Outcome = checkpoint.Completed
 		return resp.Content, nil
 	}
 	stopped := "Maximum iteration limit reached."
-	a.appendDurable(runID, llm.Assistant(stopped))
+	a.Outcome = checkpoint.Limited
+	a.emit(event.NewMessageCompleted(runID, llm.Assistant(stopped), false))
 	return stopped, nil
 }
 
@@ -217,7 +251,7 @@ func (a *Agent) assistantMessage(resp llm.ChatResponse) llm.Message {
 	}
 }
 
-func (a *Agent) appendImageToolMessages(runID string, results []tool.ToolCallResult) {
+func (a *Agent) appendImageToolMessages(runID string, results []tool.ToolCallResult) error {
 	for _, result := range results {
 		if len(result.ImageParts) == 0 {
 			continue
@@ -232,9 +266,11 @@ func (a *Agent) appendImageToolMessages(runID string, results []tool.ToolCallRes
 			Content:      llm.PlainText(parts),
 			ContentParts: parts,
 		}
-		a.append(msg)
-		a.emit(event.NewMessageCompleted(runID, msg, true))
+		if err := a.appendDurable(runID, msg); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // isRetryable returns true when an error from Chat() is a transient network failure.
@@ -252,9 +288,24 @@ func (a *Agent) append(msg llm.Message) {
 	a.History = append(a.History, msg)
 }
 
-func (a *Agent) appendDurable(runID string, msg llm.Message) {
+func (a *Agent) appendDurable(runID string, msg llm.Message) error {
+	if err := a.persist(runID, msg); err != nil {
+		return err
+	}
 	a.append(msg)
-	a.emit(event.NewMessageCompleted(runID, msg, true))
+	return nil
+}
+
+func (a *Agent) persist(runID string, msg llm.Message) error {
+	evt := event.NewMessageCompleted(runID, msg, true)
+	if a.PersistMessage != nil {
+		if err := a.PersistMessage(msg); err != nil {
+			return err
+		}
+		evt.Persisted = true
+	}
+	a.emit(evt)
+	return nil
 }
 
 func (a *Agent) durableToolMessage(call llm.ToolCall, msg llm.Message) llm.Message {
@@ -262,6 +313,14 @@ func (a *Agent) durableToolMessage(call llm.ToolCall, msg llm.Message) llm.Messa
 		return llm.ToolMessage(msg.ToolCallID, "[Skill content was valid only for the original task and has been removed from history]")
 	}
 	return msg
+}
+
+func resultMessage(result tool.ToolCallResult) llm.Message {
+	content := result.Result
+	if result.Status == tool.ToolCallInterrupted || result.Status == tool.ToolCallTimeout {
+		content += "\n[Execution stopped before normal completion; partial side effects are possible. Verify the current state before retrying this operation.]"
+	}
+	return llm.ToolMessage(result.ToolCall.ID, content)
 }
 
 func (a *Agent) redactSkillToolResults() {

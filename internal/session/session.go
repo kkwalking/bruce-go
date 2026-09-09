@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"bruce-go/internal/checkpoint"
 	"bruce-go/internal/config"
 	"bruce-go/internal/llm"
 	"bruce-go/internal/runtime"
@@ -46,6 +48,7 @@ type Entry struct {
 	FirstKeptEntryID string             `json:"firstKeptEntryId,omitempty"`
 	TokensBefore     int                `json:"tokensBefore,omitempty"`
 	Plan             *runtime.PlanEvent `json:"plan,omitempty"`
+	Checkpoint       *checkpoint.Task   `json:"checkpoint,omitempty"`
 }
 
 const (
@@ -57,11 +60,13 @@ const (
 	TypeSessionInfo   = "session_info"
 	TypeCompaction    = "compaction"
 	TypePlanEvent     = "plan_event"
+	TypeCheckpoint    = "task_checkpoint"
+	TypeToolResult    = "tool_result_journal"
 )
 
 func (e Entry) BranchNode() bool {
 	switch e.Type {
-	case TypeMessage, TypeModeChange, TypeCustom, TypeCustomMessage, TypeSessionInfo, TypeCompaction, TypePlanEvent:
+	case TypeMessage, TypeModeChange, TypeCustom, TypeCustomMessage, TypeSessionInfo, TypeCompaction, TypePlanEvent, TypeCheckpoint, TypeToolResult:
 		return true
 	default:
 		return false
@@ -77,6 +82,7 @@ type Context struct {
 	Messages     []llm.Message
 	Entries      []Entry
 	ActivePlan   runtime.PlanState
+	Task         checkpoint.Task
 }
 
 type Summary struct {
@@ -88,6 +94,7 @@ type Summary struct {
 	ActiveLeafID string
 	MessageCount int
 	ActivePlan   runtime.PlanState
+	Task         checkpoint.Task
 }
 
 type Store struct {
@@ -99,6 +106,8 @@ type Store struct {
 	Header     Header
 	Entries    []Entry
 	ActiveLeaf string
+	repairTail bool
+	validBytes int64
 }
 
 func NewStore(homeDir, workspace string) *Store {
@@ -124,6 +133,7 @@ func (s *Store) CreateNew(mode runtime.AgentMode) error {
 	s.Header = Header{Type: "session", Version: CurrentVersion, ID: id, CreatedAt: now(), CWD: s.Workspace}
 	s.Entries = nil
 	s.ActiveLeaf = ""
+	s.repairTail = false
 	if err := writeJSONLineNew(s.File, s.Header); err != nil {
 		return err
 	}
@@ -137,7 +147,7 @@ func (s *Store) Context(fallback runtime.AgentMode) Context {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	path := s.activePathLocked()
-	return Context{SessionID: s.Header.ID, File: s.File, ActiveLeaf: s.ActiveLeaf, Mode: s.currentModeFromPathLocked(path, fallback), MessageCount: s.messageCountLocked(), Messages: s.buildMessagesFromPathLocked(path), Entries: replayEntriesFromPath(path), ActivePlan: planStateFromPath(path)}
+	return Context{SessionID: s.Header.ID, File: s.File, ActiveLeaf: s.ActiveLeaf, Mode: s.currentModeFromPathLocked(path, fallback), MessageCount: s.messageCountLocked(), Messages: s.buildMessagesFromPathLocked(path), Entries: replayEntriesFromPath(path), ActivePlan: planStateFromPath(path), Task: taskFromPath(path)}
 }
 
 func (s *Store) AppendMessage(message llm.Message) error {
@@ -206,7 +216,7 @@ func (s *Store) SelectLeaf(reference string) error {
 		return err
 	}
 	entry := Entry{Type: TypeLeafChange, ID: newEntryID(), ParentID: s.ActiveLeaf, Timestamp: now(), TargetID: id}
-	if err := appendJSONLine(s.File, entry); err != nil {
+	if err := s.appendEntryLocked(entry); err != nil {
 		return err
 	}
 	s.Entries = append(s.Entries, entry)
@@ -335,12 +345,14 @@ func (s *Store) openLocked(file string) error {
 		return err
 	}
 	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	if !scanner.Scan() {
-		return errors.New("session file is empty: " + file)
+	reader := bufio.NewReader(f)
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		return fmt.Errorf("incomplete session header: %w", err)
 	}
+	validBytes := int64(len(line))
 	var header Header
-	if err := json.Unmarshal(scanner.Bytes(), &header); err != nil {
+	if err := json.Unmarshal(line, &header); err != nil {
 		return err
 	}
 	if header.Type != "session" || header.Version != CurrentVersion {
@@ -348,13 +360,22 @@ func (s *Store) openLocked(file string) error {
 	}
 	var entries []Entry
 	active := ""
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+	repairTail := false
+	for {
+		line, err := reader.ReadBytes('\n')
+		if errors.Is(err, io.EOF) {
+			repairTail = len(line) > 0
+			break
+		}
+		if err != nil {
+			return err
+		}
+		validBytes += int64(len(line))
+		if strings.TrimSpace(string(line)) == "" {
 			continue
 		}
 		var entry Entry
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		if err := json.Unmarshal(line, &entry); err != nil {
 			return err
 		}
 		entries = append(entries, entry)
@@ -371,16 +392,27 @@ func (s *Store) openLocked(file string) error {
 	s.Directory = sessionDir(s.HomeDir, s.Workspace)
 	s.Entries = entries
 	s.ActiveLeaf = active
-	return scanner.Err()
+	s.repairTail, s.validBytes = repairTail, validBytes
+	return nil
 }
 
 func (s *Store) appendBranchLocked(entry Entry) error {
-	if err := appendJSONLine(s.File, entry); err != nil {
+	if err := s.appendEntryLocked(entry); err != nil {
 		return err
 	}
 	s.Entries = append(s.Entries, entry)
 	s.ActiveLeaf = entry.ID
 	return nil
+}
+
+func (s *Store) appendEntryLocked(entry Entry) error {
+	if s.repairTail {
+		if err := os.Truncate(s.File, s.validBytes); err != nil {
+			return err
+		}
+		s.repairTail = false
+	}
+	return appendJSONLine(s.File, entry)
 }
 
 func (s *Store) activePathLocked() []Entry {
@@ -489,7 +521,10 @@ func (s *Store) listLocked(fallback runtime.AgentMode) ([]Summary, error) {
 		}
 		info, _ := os.Stat(file)
 		path := reader.activePathLocked()
-		summaries = append(summaries, Summary{ID: reader.Header.ID, File: file, CreatedAt: reader.Header.CreatedAt, UpdatedAt: info.ModTime(), Mode: reader.currentModeFromPathLocked(path, fallback), ActiveLeafID: reader.ActiveLeaf, MessageCount: reader.messageCountLocked(), ActivePlan: planStateFromPath(path)})
+		if info == nil {
+			continue
+		}
+		summaries = append(summaries, Summary{ID: reader.Header.ID, File: file, CreatedAt: reader.Header.CreatedAt, UpdatedAt: info.ModTime(), Mode: reader.currentModeFromPathLocked(path, fallback), ActiveLeafID: reader.ActiveLeaf, MessageCount: reader.messageCountLocked(), ActivePlan: planStateFromPath(path), Task: taskFromPath(path)})
 	}
 	sort.Slice(summaries, func(i, j int) bool { return summaries[i].UpdatedAt.After(summaries[j].UpdatedAt) })
 	return summaries, nil
@@ -570,7 +605,16 @@ func appendJSONLine(file string, value any) error {
 		return err
 	}
 	defer f.Close()
-	return writeJSONLine(f, value)
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if err := writeJSONLine(f, value); err != nil {
+		// A failed append must not leave a partial record before a later write.
+		rollbackErr := f.Truncate(info.Size())
+		return errors.Join(err, rollbackErr, f.Sync())
+	}
+	return nil
 }
 
 func writeJSONLine(f *os.File, value any) error {
@@ -581,7 +625,7 @@ func writeJSONLine(f *os.File, value any) error {
 	if _, err := f.Write(append(data, '\n')); err != nil {
 		return err
 	}
-	return nil
+	return f.Sync()
 }
 
 func sessionDir(home, workspace string) string {

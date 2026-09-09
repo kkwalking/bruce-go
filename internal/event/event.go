@@ -141,6 +141,7 @@ type MessageCompleted struct {
 	Timestamp time.Time
 	Message   llm.Message
 	Durable   bool
+	Persisted bool // The producer already committed this message to storage.
 }
 
 func NewMessageCompleted(runID string, message llm.Message, durable bool) MessageCompleted {

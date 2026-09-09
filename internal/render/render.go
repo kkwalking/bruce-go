@@ -23,6 +23,9 @@ Messages: %d`, ctx.SessionID, ctx.File, ctx.Mode, empty(ctx.ActiveLeaf, "(none)"
 	if !ctx.ActivePlan.Empty() {
 		out += fmt.Sprintf("\nPlan: %s action=%s rev=%d path=%s", ctx.ActivePlan.ID, ctx.ActivePlan.Action, ctx.ActivePlan.Revision, ctx.ActivePlan.Path)
 	}
+	if ctx.Task.ID != "" {
+		out += fmt.Sprintf("\nTask: %s status=%s phase=%s\nObjective: %s", ctx.Task.ID, ctx.Task.Status, ctx.Task.Phase, ctx.Task.Objective)
+	}
 	return out
 }
 
@@ -35,6 +38,9 @@ func Sessions(summaries []session.Summary) string {
 		plan := ""
 		if !summary.ActivePlan.Empty() {
 			plan = fmt.Sprintf("  plan=%s/%s", summary.ActivePlan.ID, summary.ActivePlan.Action)
+		}
+		if summary.Task.ID != "" {
+			plan += fmt.Sprintf("  task=%s", summary.Task.Status)
 		}
 		fmt.Fprintf(&b, "%s  %s  mode=%s  messages=%d%s\n", summary.ID, summary.UpdatedAt.Format("2006-01-02 15:04:05"), summary.Mode, summary.MessageCount, plan)
 	}

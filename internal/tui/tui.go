@@ -158,7 +158,7 @@ func NewModel(ctx context.Context, rt *integrated.Runtime) *Model {
 		width:                   80,
 		height:                  24,
 		statusPhase:             "idle",
-		busy:                    rt != nil && rt.StartMCP,
+		busy:                    rt != nil && (rt.StartMCP || rt.ResumeOnStart),
 		streamingAssistantIndex: -1,
 		streamingReasoningIndex: -1,
 		toolActivityIndexes:     map[string]int{},
@@ -168,15 +168,29 @@ func NewModel(ctx context.Context, rt *integrated.Runtime) *Model {
 		m.statusPhase = "starting"
 	}
 	m.messages = append(m.messages, tuiMessage{kind: messageSystem, text: strings.Join(welcomeLines(rt), "\n")})
+	if rt != nil && rt.ResumeOnStart {
+		state := rt.Session.Context(rt.Mode)
+		m.replaySessionEntries(state.Entries, state.Messages)
+		m.appendSystemMessage("Restored session: " + state.SessionID)
+	}
 	m.loadHistory()
 	m.historyIndex = len(m.history)
 	return m
 }
 
 func (m *Model) Init() tea.Cmd {
+	ctx, cancel := context.WithCancel(m.ctx)
+	if m.runtime != nil && m.runtime.ResumeOnStart {
+		m.cancel = cancel
+	}
 	return func() tea.Msg {
+		defer cancel()
 		if m.runtime != nil {
-			m.runtime.Start(m.ctx)
+			m.runtime.Start(ctx)
+			if m.runtime.ResumeOnStart {
+				out, err := m.runtime.ResumeTask(ctx, false)
+				return commandFinishedMsg{command: true, result: cli.Result{Handled: true, Output: out, Err: err}, suppressOutput: m.runtime.Session.Context(m.runtime.Mode).Task.Status == "completed" && err == nil}
+			}
 		}
 		return runtimeStartedMsg{}
 	}
@@ -261,6 +275,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "ctrl+c":
 		if len(m.input) == 0 {
+			if m.cancel != nil {
+				m.cancel()
+			}
 			m.quit = true
 			return tea.Quit
 		}
@@ -269,6 +286,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	case "ctrl+d":
 		if len(m.input) == 0 {
+			if m.cancel != nil {
+				m.cancel()
+			}
 			m.quit = true
 			return tea.Quit
 		}

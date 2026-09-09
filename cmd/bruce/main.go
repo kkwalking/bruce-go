@@ -25,6 +25,7 @@ func main() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Bruce Go Coding Agent %s\n\n", version.Current)
 		fmt.Fprintln(flag.CommandLine.Output(), "Usage:")
 		fmt.Fprintln(flag.CommandLine.Output(), "  bruce [--settings path] [--no-mcp]")
+		fmt.Fprintln(flag.CommandLine.Output(), "  bruce [--settings path] [--no-mcp] resume [session-id|path]")
 		fmt.Fprintln(flag.CommandLine.Output())
 		fmt.Fprintln(flag.CommandLine.Output(), cli.Help())
 	}
@@ -33,8 +34,9 @@ func main() {
 		fmt.Println(version.Current)
 		return
 	}
-	if flag.NArg() > 0 {
-		fmt.Fprintln(os.Stderr, "Unknown argument:", flag.Arg(0))
+	resume, reference, argErr := parseCommandArgs(flag.Args())
+	if argErr != nil {
+		fmt.Fprintln(os.Stderr, argErr)
 		os.Exit(2)
 	}
 
@@ -44,7 +46,7 @@ func main() {
 		os.Exit(1)
 	}
 	ctx := context.Background()
-	rt, err := integrated.New(ctx, integrated.Options{Workspace: workspace, SettingsPath: settings, StartMCP: !noMCP})
+	rt, err := integrated.New(ctx, integrated.Options{Workspace: workspace, SettingsPath: settings, StartMCP: !noMCP, Resume: resume, SessionRef: reference})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -54,4 +56,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func parseCommandArgs(args []string) (bool, string, error) {
+	if len(args) == 0 {
+		return false, "", nil
+	}
+	if args[0] != "resume" || len(args) > 2 {
+		return false, "", fmt.Errorf("usage: bruce [options] resume [session-id|path]")
+	}
+	if len(args) == 2 {
+		return true, args[1], nil
+	}
+	return true, "", nil
 }
