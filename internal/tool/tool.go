@@ -135,6 +135,12 @@ func (r *Registry) Unregister(name string) {
 	delete(r.tools, name)
 }
 
+// ToolNames returns the registered tool names in sorted order.
+//
+// The order is part of the contract: callers render it (a status line, a
+// prompt) and tests compare it. Returning names straight out of the map made
+// it random per call, which surfaced as a flaky assertion in
+// TestRegistrySubsetKeepsSharedExecutionSettings.
 func (r *Registry) ToolNames() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -142,6 +148,7 @@ func (r *Registry) ToolNames() []string {
 	for name := range r.tools {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return names
 }
 

@@ -1,4 +1,15 @@
+# 构建产物
 /bruce
+
+# 编辑器与本机配置
 .idea/
-# Added by code-review-graph
-.code-review-graph/
+.vscode/
+.cursor/
+.skylos/
+
+# Agent 的本机配置（权限列表因人而异，不该提交）
+# 机器全局的 ~/.config/git/ignore 也忽略它，但仓库自己要能自洽。
+.claude/settings.local.json
+
+# 未跟踪的临时站点
+/ai-report-site/

@@ -37,10 +37,20 @@ RAG、Embedding、SQLite 向量库、代码索引、RAG slash 命令和 RAG 测�
 ## 构建与运行
 
 ```bash
+make hooks          # 新 clone 后跑一次，启用 .githooks/ 里的提交与推送约束
+make build          # 版本号由 git describe 派生，注入二进制
+make run
+```
+
+不依赖 Makefile 时：
+
+```bash
 go build ./...
 go run ./cmd/bruce --help
 go run ./cmd/bruce
 ```
+
+裸 `go build` 的版本号是 `dev`；`make build` 才是带版本号的构建（见 AGENTS.md「版本与发布」）。
 
 启动时默认读取 `~/.bruce/setting.json`。也可以指定配置路径：
 
@@ -208,6 +218,15 @@ AGENTS 指令读取：
 ## 测试
 
 ```bash
+make check          # 提交前跑这个：gofmt -l + go vet + go test
+make test           # 单测
+make race           # race 检测
+make sandbox-test   # 严格模式：沙箱后端不可用时失败而不是跳过
+```
+
+等价的原始命令：
+
+```bash
 go test ./...
 go test -race ./...
 go vet ./...
@@ -216,3 +235,8 @@ go vet ./...
 网络、LLM 和 MCP 能力均可通过 fake 或 `httptest` 覆盖，测试不依赖真实外部服务。
 
 沙箱集成测试默认在本机后端不可用时跳过；CI 设置 `BRUCE_REQUIRE_SANDBOX_TESTS=1`，要求 macOS Seatbelt 和 Ubuntu Bubblewrap 探测及隔离矩阵真实通过。
+
+## 开发流程
+
+分支、提交信息（必须带验收报告）、版本与发布、机器强制的约束，见 [AGENTS.md](AGENTS.md)。提交前至少跑一次 `make check`。
+

@@ -237,12 +237,42 @@ func newStdioHelperManager(workspace string, sandboxManager *sandbox.Manager, ac
 	return NewManager(config.MCPSettings{Servers: map[string]config.MCPServerSetting{
 		"helper": {
 			Type:       "stdio",
-			Command:    os.Args[0],
+			Command:    stdioHelperCommand(workspace),
 			Args:       []string{"-test.run=^TestMCPStdioHelperProcess$"},
 			Env:        env,
 			ToolAccess: access,
 		},
 	}}, workspace).WithSandbox(sandboxManager)
+}
+
+// stdioHelperCommand returns a path to this test binary that the sandbox can
+// reach.
+//
+// The test binary runs itself as the MCP server, so the sandbox has to be able
+// to exec os.Args[0]. On Linux `go test` puts that binary under /tmp, and
+// buildBubblewrapArgs mounts a fresh tmpfs over /tmp (runner_linux.go), so the
+// binary is invisible inside the sandbox: the child fails to start and the
+// initialize handshake reads EOF. macOS keeps the binary under
+// $TMPDIR/... too, but its sandbox profile does not mask /tmp, which is why
+// this only failed on CI's ubuntu-latest.
+//
+// Copying the binary into the workspace puts it under a path the sandbox binds
+// back, so the helper starts wherever the test is run from.
+func stdioHelperCommand(workspace string) string {
+	self := os.Args[0]
+	if resolved, err := filepath.EvalSymlinks(self); err == nil {
+		self = resolved
+	}
+	target := filepath.Join(workspace, "mcp-stdio-helper")
+	data, err := os.ReadFile(self)
+	if err != nil {
+		// Let the server fail with its own error rather than masking the cause.
+		return self
+	}
+	if err := os.WriteFile(target, data, 0o755); err != nil {
+		return self
+	}
+	return target
 }
 
 func stdioServerPID(t *testing.T, manager *Manager, serverName string) int {

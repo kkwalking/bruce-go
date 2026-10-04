@@ -1,0 +1,106 @@
+#!/bin/sh
+# 拒绝「直接在 main 上提交」。
+#
+# 允许的是：特性分支上开发，合并回 main 之后再推。
+# 拒绝的是：checkout main 之后直接 commit，再推上去 —— 这条路径没有分支
+# 作为评审单元，也是 AGENTS.md「分支与提交」要防的事。
+#
+# 判定方法（对每个新增的提交）：
+#   1. merge 提交跳过 —— 它本身就是一次分支合并的产物。
+#   2. 能被任何其它本地分支到达 → 来自分支，放行。
+#   3. 否则查 main 的 reflog：条目以 "commit:" 开头，说明它是在 main 上
+#      当场创建的 → 拦截。没有 reflog 条目（例如快进合并后删掉了分支、
+#      或提交来自 fetch）→ 放行，宁可漏判也不误伤正常流程。
+#
+# 这个文件被 git 跟踪（.githooks/），以便新 clone 可复现：
+#
+#     make hooks
+#
+# 确需绕过时：git push --no-verify
+
+set -eu
+
+PROTECTED="main"
+ZERO=0000000000000000000000000000000000000000
+
+# 本地推送把 refs/heads/<branch> 告知为：<local ref> <local sha> <remote ref> <remote sha>
+# 删除远端分支时 local sha 是全零。
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ "$local_sha" = "$ZERO" ] && continue          # 删除远端分支，放行
+    case "$remote_ref" in
+        "refs/heads/$PROTECTED") ;;
+        *) continue ;;                              # 非 main，放行
+    esac
+
+    # main 已是最新（例如只推 tag）。
+    if [ "$remote_sha" != "$ZERO" ] && [ "$local_sha" = "$remote_sha" ]; then
+        continue
+    fi
+
+    # 远端还没有 main：仓库初始化，放行。
+    [ "$remote_sha" = "$ZERO" ] && continue
+
+    # 本次要新增的提交。
+    new=$(git rev-list "$remote_sha..$local_sha" 2>/dev/null || true)
+    [ -z "$new" ] && continue
+
+    # 其它本地分支能到达的全部提交，一次算好。
+    others=$(git for-each-ref --format='%(refname)' refs/heads/ \
+        | grep -v "^refs/heads/$PROTECTED\$" || true)
+    reachable=""
+    if [ -n "$others" ]; then
+        # shellcheck disable=SC2086
+        reachable=$(git rev-list $others 2>/dev/null || true)
+    fi
+
+    direct=""
+    for sha in $new; do
+        # merge 提交：来自分支合并。
+        parents=$(git rev-list --parents -n1 "$sha" | wc -w)
+        [ "$parents" -gt 2 ] && continue
+
+        # 来自某个分支。
+        if [ -n "$reachable" ] && printf '%s\n' "$reachable" | grep -qx "$sha"; then
+            continue
+        fi
+
+        # 在 main 的 reflog 里是不是当场 commit 出来的。
+        subject=$(git log -1 --format='%h %s' "$sha")
+        if git reflog show "$PROTECTED" --format='%H %gs' 2>/dev/null \
+            | grep "^$sha commit:" >/dev/null; then
+            direct="$direct
+  $subject"
+        fi
+    done
+
+    if [ -n "$direct" ]; then
+        cat >&2 <<EOF
+
+✋ 拒绝直接推送到 ${PROTECTED}，因为下面这些提交是在 main 上直接创建的：
+
+$direct
+
+请改为在分支上开发：
+
+    git checkout -b feat/<name>     # 从当前 main 开分支
+    git commit ...                  # 提交留在分支上
+    git push origin HEAD            # 推分支
+    gh pr create --fill             # 开 PR（单人仓库也留一条记录）
+
+合并回 main 之后再推：
+
+    git checkout $PROTECTED
+    git merge feat/<name>
+    git push origin $PROTECTED
+
+已经提交在 main 上、只想挪到分支上：
+
+    git branch feat/<name>          # 在当前 main 上打分支
+    git reset --hard origin/$PROTECTED
+    git checkout feat/<name>
+EOF
+        exit 1
+    fi
+done
+
+exit 0

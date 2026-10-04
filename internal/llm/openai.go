@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"bruce-go/internal/config"
 )
 
 type OpenAICompatibleClient struct {
@@ -36,7 +38,7 @@ func NewOpenAICompatibleClient(provider, apiKey, model, baseURL string) *OpenAIC
 
 func NewDeepSeekClient(apiKey, model string) *OpenAICompatibleClient {
 	if strings.TrimSpace(model) == "" {
-		model = "deepseek-v4.1-flash"
+		model = config.DeepSeekDefaultModel
 	}
 	c := NewOpenAICompatibleClient("deepseek", apiKey, model, "https://api.deepseek.com")
 	transport := http.DefaultTransport.(*http.Transport).Clone()

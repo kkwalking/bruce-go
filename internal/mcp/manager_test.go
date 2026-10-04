@@ -43,6 +43,160 @@ func TestManagerEnableRegisterAndCallTool(t *testing.T) {
 	}
 }
 
+func TestStartEnabledStartsOnlyEnabledServers(t *testing.T) {
+	var mu sync.Mutex
+	started := map[string]int{}
+	settings := config.MCPSettings{Servers: map[string]config.MCPServerSetting{
+		"enabled":  {Type: "stdio", Command: "fake"},
+		"disabled": {Type: "stdio", Command: "fake", Disabled: true},
+	}}
+	manager := NewManager(settings, t.TempDir()).WithFactory(
+		func(_ context.Context, name string, _ config.MCPServerSetting, _ string) (Transport, error) {
+			mu.Lock()
+			started[name]++
+			mu.Unlock()
+			return &fakeTransport{}, nil
+		},
+	)
+
+	manager.StartEnabled(context.Background())
+
+	mu.Lock()
+	defer mu.Unlock()
+	if started["enabled"] != 1 || started["disabled"] != 0 {
+		t.Fatalf("factory starts = %+v", started)
+	}
+	statuses := manager.Status()
+	byName := map[string]ServerStatus{}
+	for _, status := range statuses {
+		byName[status.Name] = status
+	}
+	if !byName["enabled"].Ready || byName["disabled"].Ready {
+		t.Fatalf("statuses = %+v", byName)
+	}
+	if byName["disabled"].Enabled {
+		t.Fatalf("disabled server should not be enabled: %+v", byName["disabled"])
+	}
+}
+
+func TestStartEnabledSkipsDisabledEvenWhenPreviouslyEnabled(t *testing.T) {
+	settings := config.MCPSettings{Servers: map[string]config.MCPServerSetting{
+		"demo": {Type: "stdio", Command: "fake"},
+	}}
+	manager := NewManager(settings, t.TempDir()).WithFactory(
+		func(context.Context, string, config.MCPServerSetting, string) (Transport, error) {
+			return &fakeTransport{}, nil
+		},
+	)
+	if err := manager.Enable(context.Background(), "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Disable("demo"); err != nil {
+		t.Fatal(err)
+	}
+
+	manager.StartEnabled(context.Background())
+
+	status := manager.Status()[0]
+	if status.Ready || status.Enabled {
+		t.Fatalf("disabled server was restarted by StartEnabled: %+v", status)
+	}
+}
+
+func TestStartEnabledContinuesPastFailedServer(t *testing.T) {
+	startupErr := errors.New("server unavailable")
+	var started []string
+	var mu sync.Mutex
+	settings := config.MCPSettings{Servers: map[string]config.MCPServerSetting{
+		"aaa-failing": {Type: "stdio", Command: "fake"},
+		"zzz-working": {Type: "stdio", Command: "fake"},
+	}}
+	manager := NewManager(settings, t.TempDir()).WithFactory(
+		func(_ context.Context, name string, _ config.MCPServerSetting, _ string) (Transport, error) {
+			mu.Lock()
+			started = append(started, name)
+			mu.Unlock()
+			if name == "aaa-failing" {
+				return nil, startupErr
+			}
+			return &fakeTransport{}, nil
+		},
+	)
+
+	manager.StartEnabled(context.Background())
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got := strings.Join(started, ","); got != "aaa-failing,zzz-working" {
+		t.Fatalf("factory starts = %q (expected lexicographic order with no early abort)", got)
+	}
+	byName := map[string]ServerStatus{}
+	for _, status := range manager.Status() {
+		byName[status.Name] = status
+	}
+	if byName["aaa-failing"].Ready || !strings.Contains(byName["aaa-failing"].Error, startupErr.Error()) {
+		t.Fatalf("failing server status = %+v", byName["aaa-failing"])
+	}
+	if !byName["zzz-working"].Ready {
+		t.Fatalf("working server was not started after failure: %+v", byName["zzz-working"])
+	}
+}
+
+func TestStartEnabledIsIdempotent(t *testing.T) {
+	var starts int32
+	settings := config.MCPSettings{Servers: map[string]config.MCPServerSetting{
+		"demo": {Type: "stdio", Command: "fake"},
+	}}
+	manager := NewManager(settings, t.TempDir()).WithFactory(
+		func(context.Context, string, config.MCPServerSetting, string) (Transport, error) {
+			atomic.AddInt32(&starts, 1)
+			return &fakeTransport{}, nil
+		},
+	)
+
+	manager.StartEnabled(context.Background())
+	manager.StartEnabled(context.Background())
+
+	if got := atomic.LoadInt32(&starts); got != 1 {
+		t.Fatalf("factory starts = %d, want 1 (ready servers must not restart)", got)
+	}
+	if status := manager.Status()[0]; !status.Ready {
+		t.Fatalf("status = %+v", status)
+	}
+}
+
+func TestStartEnabledHonorsContextTimeout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	settings := config.MCPSettings{Servers: map[string]config.MCPServerSetting{
+		"demo": {Type: "stdio", Command: "fake"},
+	}}
+	manager := NewManager(settings, t.TempDir()).WithFactory(
+		func(ctx context.Context, _ string, _ config.MCPServerSetting, _ string) (Transport, error) {
+			return nil, ctx.Err()
+		},
+	)
+
+	manager.StartEnabled(ctx)
+
+	status := manager.Status()[0]
+	if status.Ready || !strings.Contains(status.Error, context.Canceled.Error()) {
+		t.Fatalf("canceled StartEnabled status = %+v", status)
+	}
+}
+
+func TestStartEnabledWithNoServersIsNoop(t *testing.T) {
+	settings := config.MCPSettings{Servers: map[string]config.MCPServerSetting{}}
+	manager := NewManager(settings, t.TempDir())
+	if names := manager.Names(); len(names) != 0 {
+		t.Fatalf("names = %v", names)
+	}
+	manager.StartEnabled(context.Background())
+	if got := manager.Status(); len(got) != 0 {
+		t.Fatalf("statuses = %+v", got)
+	}
+}
+
 func TestManagerEnablePropagatesInitializeError(t *testing.T) {
 	initializeErr := errors.New("unsupported protocol version")
 	transport := &handshakeTransport{initializeErr: initializeErr}
