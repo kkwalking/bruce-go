@@ -58,7 +58,11 @@ func TestPlanToolRegistryBlocksWorkspaceWritesAndMutatingCommands(t *testing.T) 
 	if _, ok := registry.Lookup("edit_file"); ok {
 		t.Fatal("edit_file should not be available in plan registry")
 	}
-	out := registry.Execute(context.Background(), "execute_command", map[string]string{"command": "rg alpha ."})
+	// cat, not rg: the command must exist on every machine that runs the
+	// suite. rg is only *suggested* to the model (tool.go's guidelines), it
+	// is not a dependency, and CI runners have no ripgrep — this test failed
+	// there with "bash: rg: command not found" (exit 127).
+	out := registry.Execute(context.Background(), "execute_command", map[string]string{"command": "cat a.txt"})
 	if !strings.Contains(out, "alpha") {
 		t.Fatalf("read-only command output = %s", out)
 	}

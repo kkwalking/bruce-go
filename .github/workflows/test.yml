@@ -35,11 +35,19 @@ jobs:
           cache: true
 
       # Linux 的沙箱集成测试要求真实的 bwrap 与 user/PID/mount namespace。
+      #
+      # ubuntu-latest 现在是 24.04，它通过 AppArmor 限制非特权 user namespace，
+      # 于是 bwrap 会以
+      #   bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted
+      # 失败，沙箱相关测试整体报 "sandbox backend unavailable"。这不是代码问题，
+      # 是 runner 的限制：放开这个 sysctl 之后 bwrap 可以正常建立沙箱。
+      # 有些内核没有这个开关，所以失败要容忍。
       - name: Install Bubblewrap
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install --yes bubblewrap curl
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
       - name: Vet
         run: go vet ./...
