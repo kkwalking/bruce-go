@@ -87,9 +87,12 @@ go vet ./...、go test ./...、go test -race ./... 全部通过。
 
 **版本号的唯一来源是 git tag，不要再手工修改源码里的版本常量。**
 
+发布一个版本 = 推一个 `v*` tag。这一步会触发 `release.yml`，自动产出
+GitHub Release 与可下载产物：
+
 ```sh
 make tag VERSION=v0.9.0     # 打一个带注释的 tag
-git push origin v0.9.0
+git push origin v0.9.0      # 触发 release.yml，产物挂到 GitHub Release
 ```
 
 `make build` 用 `git describe` 派生版本号并注入二进制：
@@ -103,6 +106,28 @@ git push origin v0.9.0
 - 重大功能 → minor 递增（`v0.9.0` → `v0.10.0`）
 - bug 修复 → patch 递增（`v0.9.0` → `v0.9.1`）
 
+### 发布产物
+
+只发两个平台，定义在 `Makefile` 的 `PLATFORMS`（加平台改这里）：
+
+| 平台 | 归档 |
+|---|---|
+| macOS（Apple Silicon） | `bruce_0.9.0_darwin_arm64.tar.gz` |
+| Linux（x86-64） | `bruce_0.9.0_linux_amd64.tar.gz` |
+
+另有 `checksums.txt`（sha256）。归档解开就是二进制本身，没有外层目录。
+产物用 `CGO_ENABLED=0` 构建，因此 linux 包静态链接、不依赖目标机 glibc。
+
+发布前可以在本地预演整个打包过程：
+
+```sh
+make release-artifacts VERSION=v0.9.0    # 产出到 dist/（已 gitignore）
+```
+
+`release.yml` 会在建 release **之前**先跑测试（含 `-race` 与沙箱严格模式）
+并自检产物（checksums、归档结构、内嵌的 GOOS/GOARCH 与版本号、linux 产物实跑
+`--version`）。任一环失败就不发布。
+
 ## 机器强制
 
 这些已不是文档约定，改坏了会在提交时或 CI 里立刻失败：
@@ -115,6 +140,7 @@ git push origin v0.9.0
 | race 检测 | `go test -race ./...`，CI |
 | 沙箱测试不许静默跳过 | CI 设 `BRUCE_REQUIRE_SANDBOX_TESTS=1` |
 | 二进制能构建且能报版本 | CI 的 `build` job |
+| 发布产物可信 | CI 的 `release` job：测试 + 产物自检不通过就不建 release |
 
 ### 常用命令
 
@@ -125,6 +151,7 @@ make test           # 单测
 make race           # race 检测
 make sandbox-test   # 把沙箱测试的 skip 升级为失败（复现 CI 严格模式）
 make build          # 带版本号构建
+make release-artifacts VERSION=v0.9.0   # 本地预演发布产物，产出到 dist/
 make tag VERSION=v0.9.0
 ```
 

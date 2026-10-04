@@ -34,6 +34,28 @@ RAG、Embedding、SQLite 向量库、代码索引、RAG slash 命令和 RAG 测�
 - 可选：`~/.bruce/setting.json` 配置 LLM、WebSearch、MCP
 - 可选：MCP server 命令或 Streamable HTTP endpoint
 
+## 安装（预编译产物）
+
+从 [GitHub Releases](https://github.com/kkwalking/bruce-go/releases) 下载对应平台的归档：
+
+| 平台 | 归档 |
+|---|---|
+| macOS（Apple Silicon） | `bruce_<版本>_darwin_arm64.tar.gz` |
+| Linux（x86-64） | `bruce_<版本>_linux_amd64.tar.gz` |
+
+```bash
+# 以 macOS arm64、v0.9.0 为例
+tar -xzf bruce_0.9.0_darwin_arm64.tar.gz
+./bruce --version
+
+# 校验下载完整性（归档旁的 checksums.txt）
+shasum -a 256 -c checksums.txt        # Linux 上用 sha256sum -c
+```
+
+Linux 产物用 `CGO_ENABLED=0` 构建，静态链接，不依赖目标机的 glibc 版本。
+macOS 产物未做代码签名，首次运行若被 Gatekeeper 拦截，用
+`xattr -d com.apple.quarantine ./bruce` 解除隔离标记。
+
 ## 构建与运行
 
 ```bash
