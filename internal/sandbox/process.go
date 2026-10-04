@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -96,6 +97,21 @@ func runProcess(ctx context.Context, program string, args []string, spec Command
 	return result, runErr
 }
 
+// closeOnceReader closes a pipe at most once, so a caller's own Close and the
+// process watcher's cleanup cannot fight over the same descriptor.
+type closeOnceReader struct {
+	r    *os.File
+	once sync.Once
+}
+
+func (c *closeOnceReader) Read(p []byte) (int, error) { return c.r.Read(p) }
+
+func (c *closeOnceReader) Close() error {
+	var err error
+	c.once.Do(func() { err = c.r.Close() })
+	return err
+}
+
 type managedProcess struct {
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
@@ -103,6 +119,12 @@ type managedProcess struct {
 	stderr  io.ReadCloser
 	done    chan struct{}
 	cleanup func()
+
+	// The parent's end of the stdout/stderr pipes. The child holds the other
+	// end, so these stay readable until the child exits. Closing them is what
+	// releases a reader parked in Read.
+	stdoutRead *os.File
+	stderrRead *os.File
 
 	watchOnce sync.Once
 	closeOnce sync.Once
@@ -129,46 +151,60 @@ func startManagedProcess(ctx context.Context, prepared PreparedProcess, cleanup 
 	cmd.Dir = prepared.Directory
 	cmd.Env = prepared.Environment
 	configureProcess(cmd)
+
+	// Cleanup for anything already created if a later step fails.
+	var opened []io.Closer
+	fail := func(err error) (*managedProcess, error) {
+		for _, c := range opened {
+			_ = c.Close()
+		}
+		if cleanup != nil {
+			cleanup()
+		}
+		return nil, err
+	}
+
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		if cleanup != nil {
-			cleanup()
-		}
-		return nil, err
+		return fail(err)
 	}
-	stdout, err := cmd.StdoutPipe()
+	opened = append(opened, stdin)
+
+	// StdoutPipe/StderrPipe are deliberately not used: Cmd.Wait closes those
+	// pipes once the child exits, and the watcher below is armed as soon as
+	// StartProcess returns, so a Wait could close a pipe while the caller was
+	// still reading it — "read |0: file already closed". Owning the pipes with
+	// os.Pipe keeps Cmd.Wait out of their lifetime entirely.
+	stdoutRead, stdoutWrite, err := os.Pipe()
 	if err != nil {
-		_ = stdin.Close()
-		if cleanup != nil {
-			cleanup()
-		}
-		return nil, err
+		return fail(err)
 	}
-	stderr, err := cmd.StderrPipe()
+	opened = append(opened, stdoutRead, stdoutWrite)
+	cmd.Stdout = stdoutWrite
+
+	stderrRead, stderrWrite, err := os.Pipe()
 	if err != nil {
-		_ = stdin.Close()
-		_ = stdout.Close()
-		if cleanup != nil {
-			cleanup()
-		}
-		return nil, err
+		return fail(err)
 	}
+	opened = append(opened, stderrRead, stderrWrite)
+	cmd.Stderr = stderrWrite
+
 	if err := cmd.Start(); err != nil {
-		_ = stdin.Close()
-		_ = stdout.Close()
-		_ = stderr.Close()
-		if cleanup != nil {
-			cleanup()
-		}
-		return nil, fmt.Errorf("start long-running sandbox process: %w", err)
+		return fail(fmt.Errorf("start long-running sandbox process: %w", err))
 	}
+	// The child holds its own copies now; the parent's write ends must be
+	// closed or no reader would ever see EOF.
+	_ = stdoutWrite.Close()
+	_ = stderrWrite.Close()
 	return &managedProcess{
-		cmd:     cmd,
-		stdin:   stdin,
-		stdout:  stdout,
-		stderr:  stderr,
-		done:    make(chan struct{}),
-		cleanup: cleanup,
+		cmd:        cmd,
+		stdin:      stdin,
+		stdout:     &closeOnceReader{r: stdoutRead},
+		stderr:     &closeOnceReader{r: stderrRead},
+		stdoutRead: stdoutRead,
+		stderrRead: stderrRead,
+		done:       make(chan struct{}),
+		cleanup:    cleanup,
 	}, nil
 }
 
@@ -179,6 +215,16 @@ func (p *managedProcess) startWatcher() {
 			p.mu.Lock()
 			p.waitErr = err
 			p.mu.Unlock()
+			// Wait does not touch the pipes any more (they are ours, not
+			// StdoutPipe's), so release them here once the child is gone: a
+			// reader parked in Read sees EOF, and the descriptors do not leak.
+			// closeOnceReader makes this safe against the caller's own Close.
+			if p.stdout != nil {
+				_ = p.stdout.Close()
+			}
+			if p.stderr != nil {
+				_ = p.stderr.Close()
+			}
 			if p.cleanup != nil {
 				p.cleanup()
 			}
