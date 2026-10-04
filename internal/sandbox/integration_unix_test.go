@@ -57,22 +57,11 @@ func TestSandboxWorkspaceWriteRejectsOutsideWrite(t *testing.T) {
 func TestSandboxTimeoutKillsDescendants(t *testing.T) {
 	workspace := t.TempDir()
 	manager := newAvailableTestManager(t, workspace)
-	result, err := manager.Run(context.Background(), "sleep 60 & echo $! > child.pid; wait", 200*time.Millisecond, 4000, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	result := runMarkedDescendant(t, manager, "child.pid", 200*time.Millisecond)
 	if !result.TimedOut {
 		t.Fatalf("command should time out: %+v", result)
 	}
-	data, err := os.ReadFile(filepath.Join(workspace, "child.pid"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertProcessGone(t, pid)
+	assertMarkedDescendantsGone(t)
 }
 
 func TestSandboxCancellationKillsDescendants(t *testing.T) {
@@ -83,22 +72,15 @@ func TestSandboxCancellationKillsDescendants(t *testing.T) {
 		time.Sleep(150 * time.Millisecond)
 		cancel()
 	}()
-	result, err := manager.Run(ctx, "sleep 60 & echo $! > canceled-child.pid; wait", 10*time.Second, 4000, nil)
+	command := "exec -a " + descendantMarker + " sleep 60 & echo $! > canceled-child.pid; wait"
+	result, err := manager.Run(ctx, command, 10*time.Second, 4000, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !result.Canceled || result.TimedOut {
 		t.Fatalf("command should be canceled: %+v", result)
 	}
-	data, err := os.ReadFile(filepath.Join(workspace, "canceled-child.pid"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertProcessGone(t, pid)
+	assertMarkedDescendantsGone(t)
 }
 
 func TestSandboxHandlesQuotedUnicodeWorkspace(t *testing.T) {
@@ -216,19 +198,76 @@ func posixShellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
-func assertProcessGone(t *testing.T, pid int) {
+// descendantMarker is put in a descendant's argv[0] so the host can find it
+// after the process is gone, without knowing its sandbox-internal pid.
+const descendantMarker = "bruce-descendant-probe"
+
+// runMarkedDescendant runs a shell that starts a long-lived child carrying
+// descendantMarker in its argv[0], records the child's sandbox pid, and then
+// waits to be killed. Callers assert the marked child is gone afterwards.
+//
+// bubblewrap runs with --unshare-pid, so the pid the command reports ($!) is
+// the pid *inside* the sandbox: the host sees the same process under a
+// different number. Signalling the sandbox pid on the host therefore proves
+// nothing — with no host process at that number kill(2) returns ESRCH and the
+// old check passed for the wrong reason, and when an unrelated host process
+// held the number it returned EPERM, which the old code reported as
+// "check descendant process 3: operation not permitted" on CI's ubuntu-latest.
+// Finding the descendant by its argv[0] works in both backends.
+func runMarkedDescendant(t *testing.T, manager *Manager, pidFile string, timeout time.Duration) RunResult {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	// exec -a sets argv[0]; bash runs it so the marker survives into the child.
+	command := "exec -a " + descendantMarker + " sleep 60 & echo $! > " + pidFile + "; wait"
+	result, err := manager.Run(context.Background(), command, timeout, 4000, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+// markedDescendants returns the pids of processes still carrying
+// descendantMarker in their argv[0], as the host sees them.
+func markedDescendants(t *testing.T) []int {
+	t.Helper()
+	out, err := exec.Command("pgrep", "-f", descendantMarker).Output()
+	if err != nil {
+		// pgrep exits 1 when nothing matches, which is the expected case.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return nil
+		}
+		if errors.Is(err, exec.ErrNotFound) {
+			t.Skip("pgrep is not available to look for the descendant")
+		}
+		t.Fatalf("pgrep: %v", err)
+	}
+	var pids []int
+	for _, field := range strings.Fields(string(out)) {
+		pid, convErr := strconv.Atoi(field)
+		if convErr != nil {
+			continue
+		}
+		pids = append(pids, pid)
+	}
+	return pids
+}
+
+// assertMarkedDescendantsGone waits for every process carrying
+// descendantMarker to disappear, killing any that outlive the deadline so one
+// failure cannot leak a stray `sleep` into later tests.
+func assertMarkedDescendantsGone(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
 	for {
-		err := syscall.Kill(pid, 0)
-		if errors.Is(err, syscall.ESRCH) {
+		pids := markedDescendants(t)
+		if len(pids) == 0 {
 			return
 		}
-		if err != nil {
-			t.Fatalf("check descendant process %d: %v", pid, err)
-		}
 		if time.Now().After(deadline) {
-			t.Fatalf("descendant process %d still exists", pid)
+			for _, pid := range pids {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+			t.Fatalf("descendant %v survived the sandbox teardown", pids)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
