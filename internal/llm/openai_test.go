@@ -160,3 +160,150 @@ func TestOpenAICompatibleClientReturnsTypedAPIError(t *testing.T) {
 		t.Fatalf("error = %#v", err)
 	}
 }
+
+func TestKimiRequestUsesOpenAICompatibleEndpointAndTokenField(t *testing.T) {
+	c := NewKimiClient("kimi-key", "")
+	if c.APIURL != "https://api.moonshot.cn/v1/chat/completions" {
+		t.Fatalf("APIURL = %q", c.APIURL)
+	}
+	if c.Model != "kimi-k3" {
+		t.Fatalf("default model = %q, want kimi-k3", c.Model)
+	}
+	body, err := c.requestBody(nil, nil, false, StreamOptions{MaxTokens: 4096})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	// Moonshot deprecates max_tokens, so the current field must be present too.
+	if payload["max_completion_tokens"] != float64(4096) {
+		t.Fatalf("max_completion_tokens = %#v", payload["max_completion_tokens"])
+	}
+}
+
+// kimi-k3 accepts reasoning_effort; the K2.x models reject it, so sending it
+// there would turn every request into a 400.
+func TestKimiReasoningEffortOnlySentToK3(t *testing.T) {
+	cases := []struct {
+		model string
+		want  bool
+	}{
+		{model: "kimi-k3", want: true},
+		{model: "kimi-k2.7-code", want: false},
+		{model: "kimi-k2.7-code-highspeed", want: false},
+		{model: "kimi-k2.6", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			c := NewKimiClient("key", tc.model)
+			c.SetReasoningEffort("high")
+			body, err := c.requestBody(nil, nil, false, StreamOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Fatal(err)
+			}
+			_, present := payload["reasoning_effort"]
+			if present != tc.want {
+				t.Fatalf("reasoning_effort present = %v, want %v (payload %v)", present, tc.want, payload)
+			}
+			if _, ok := payload["thinking"]; ok {
+				t.Fatal("kimi must not receive the deepseek thinking field")
+			}
+		})
+	}
+}
+
+// Non-Kimi providers must keep sending reasoning_effort unchanged.
+func TestNonKimiProvidersStillSendReasoningEffort(t *testing.T) {
+	for _, provider := range []string{"glm", "deepseek"} {
+		c := NewOpenAICompatibleClient(provider, "key", "some-model", "https://example.com/v1")
+		c.SetReasoningEffort("high")
+		body, err := c.requestBody(nil, nil, false, StreamOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["reasoning_effort"] != "high" {
+			t.Fatalf("%s reasoning_effort = %#v, want high", provider, payload["reasoning_effort"])
+		}
+	}
+}
+
+func TestKimiBuiltInModelCapabilities(t *testing.T) {
+	cases := []struct {
+		model           string
+		contextWindow   int
+		maxOutputTokens int
+	}{
+		{model: "kimi-k3", contextWindow: 1048576, maxOutputTokens: 131072},
+		{model: "kimi-k2.7-code", contextWindow: 262144, maxOutputTokens: 32768},
+		{model: "kimi-k2.7-code-highspeed", contextWindow: 262144, maxOutputTokens: 32768},
+		{model: "kimi-k2.6", contextWindow: 262144, maxOutputTokens: 32768},
+	}
+	for _, tc := range cases {
+		c := NewKimiClient("key", tc.model)
+		if got := c.MaxContextWindow(); got != tc.contextWindow {
+			t.Fatalf("%s context window = %d, want %d", tc.model, got, tc.contextWindow)
+		}
+		if got := c.MaxOutputTokens(); got != tc.maxOutputTokens {
+			t.Fatalf("%s max output = %d, want %d", tc.model, got, tc.maxOutputTokens)
+		}
+	}
+}
+
+// Kimi K3 accepts only low/high/max and cannot stop thinking, so the project's
+// off/medium levels must be mapped onto a supported value instead of being sent
+// verbatim (which the API rejects).
+func TestKimiK3MapsUnsupportedReasoningEfforts(t *testing.T) {
+	cases := map[string]string{
+		"off":    "low",
+		"low":    "low",
+		"medium": "high",
+		"high":   "high",
+		"max":    "max",
+	}
+	for effort, want := range cases {
+		c := NewKimiClient("key", "kimi-k3")
+		c.SetReasoningEffort(effort)
+		body, err := c.requestBody(nil, nil, false, StreamOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if got := payload["reasoning_effort"]; got != want {
+			t.Fatalf("effort %q -> %#v, want %q", effort, got, want)
+		}
+	}
+}
+
+// Turning thinking off must not add reasoning_effort or a thinking flag for
+// providers that can genuinely disable it.
+func TestDeepSeekOffSendsNoReasoningFields(t *testing.T) {
+	c := NewOpenAICompatibleClient("deepseek", "key", "model", "https://api.example.com/v1")
+	c.SetReasoningEffort("off")
+	body, err := c.requestBody(nil, nil, false, StreamOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := payload["reasoning_effort"]; ok {
+		t.Fatalf("off must not send reasoning_effort: %v", payload)
+	}
+	if _, ok := payload["thinking"]; ok {
+		t.Fatalf("off must not send thinking: %v", payload)
+	}
+}

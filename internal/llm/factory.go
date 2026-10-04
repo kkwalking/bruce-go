@@ -13,6 +13,7 @@ import (
 var (
 	DeepSeekModels = []string{config.DeepSeekDefaultModel}
 	GLMModels      = []string{"glm-4.5-air", "glm-4.7", "glm-5-turbo", "glm-5.1", "glm-5.2", "glm-5v-turbo"}
+	KimiModels     = []string{config.KimiDefaultModel, "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6"}
 )
 
 func validReasoningEffort(s string) bool {
@@ -93,6 +94,8 @@ func NormalizeProvider(provider string) string {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "zai", "zhipu", "bigmodel", "zhipuai":
 		return "glm"
+	case "kimi", "moonshot", "moonshotai":
+		return "kimi"
 	case "openai-compatible", "openai_compatible", "openai", "compatible", "openai_compatiable":
 		return "openai_compatiable"
 	default:
@@ -107,6 +110,8 @@ func NewProviderClient(provider, model string, settings config.ProviderSetting) 
 		client = NewGLMClient(settings.APIKey, model)
 	case "deepseek":
 		client = NewDeepSeekClient(settings.APIKey, model)
+	case "kimi":
+		client = NewKimiClient(settings.APIKey, model)
 	case "openai_compatiable":
 		client = NewOpenAICompatibleClient(provider, settings.APIKey, model, settings.BaseURL)
 	default:
@@ -298,6 +303,8 @@ func supportedModels(provider string, settings config.ProviderSetting) []string 
 		return GLMModels
 	case "deepseek":
 		return DeepSeekModels
+	case "kimi":
+		return KimiModels
 	case "openai_compatiable":
 		return settings.Models
 	default:
@@ -311,6 +318,8 @@ func defaultModel(provider string, models []string) string {
 		return "glm-5.1"
 	case "deepseek":
 		return config.DeepSeekDefaultModel
+	case "kimi":
+		return config.KimiDefaultModel
 	default:
 		if len(models) > 0 {
 			return models[0]

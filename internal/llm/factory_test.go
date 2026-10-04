@@ -180,3 +180,90 @@ func TestSwitchableClientReasoningEffort(t *testing.T) {
 		t.Fatal("expected error for invalid reasoning effort")
 	}
 }
+
+func TestNormalizeProviderAliases(t *testing.T) {
+	cases := map[string]string{
+		"kimi":       "kimi",
+		"Kimi":       "kimi",
+		"moonshot":   "kimi",
+		"MoonshotAI": "kimi",
+		"zai":        "glm",
+		"zhipu":      "glm",
+		"bigmodel":   "glm",
+		"glm":        "glm",
+		"deepseek":   "deepseek",
+		"openai":     "openai_compatiable",
+		"compatible": "openai_compatiable",
+		"  Kimi  ":   "kimi",
+		"unknown-x":  "unknown-x",
+	}
+	for input, want := range cases {
+		if got := NormalizeProvider(input); got != want {
+			t.Fatalf("NormalizeProvider(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestNewProviderClientBuildsKimiClient(t *testing.T) {
+	client := NewProviderClient("kimi", "", config.ProviderSetting{APIKey: "kimi-key"})
+	if got := client.ProviderName(); got != "kimi" {
+		t.Fatalf("provider = %q, want kimi", got)
+	}
+	if got := client.ModelName(); got != config.KimiDefaultModel {
+		t.Fatalf("model = %q, want %s", got, config.KimiDefaultModel)
+	}
+	if client.MaxContextWindow() != 1048576 {
+		t.Fatalf("context window = %d, want 1048576", client.MaxContextWindow())
+	}
+	if !client.SupportsTools() {
+		t.Fatal("kimi should support tools")
+	}
+	if !client.SupportsPromptCaching() {
+		t.Fatal("kimi should report prompt caching")
+	}
+	if !client.SupportsImages() {
+		t.Fatal("kimi models accept image input")
+	}
+}
+
+// Environment-provided providers must be selectable through the switchable
+// client, which is the point of registering them as candidates.
+func TestSwitchableClientIncludesEnvironmentProviders(t *testing.T) {
+	for _, provider := range config.BuiltInProviders() {
+		t.Setenv(provider.Env, "")
+	}
+	t.Setenv(config.GLMAPIKeyEnv, "glm-env-key")
+	t.Setenv(config.KimiAPIKeyEnv, "kimi-env-key")
+
+	loader := config.NewLoader(filepath.Join(t.TempDir(), "setting.json"))
+	settings, err := loader.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewSwitchable(settings, loader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	options := map[string]bool{}
+	for _, opt := range client.Options() {
+		options[opt.Selector()] = true
+	}
+	if !options["glm/"+config.GLMDefaultModel] {
+		t.Fatalf("glm/%s missing from options: %#v", config.GLMDefaultModel, options)
+	}
+	if !options["kimi/"+config.KimiDefaultModel] {
+		t.Fatalf("kimi/%s missing from options: %#v", config.KimiDefaultModel, options)
+	}
+
+	next, err := client.Switch("kimi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Provider != "kimi" || next.Model != config.KimiDefaultModel {
+		t.Fatalf("switch result = %+v", next)
+	}
+	if got := client.ProviderName(); got != "kimi" {
+		t.Fatalf("current provider = %q, want kimi", got)
+	}
+}

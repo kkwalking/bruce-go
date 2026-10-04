@@ -59,11 +59,21 @@ func NewGLMClient(apiKey, model string) *OpenAICompatibleClient {
 	return NewOpenAICompatibleClient("glm", apiKey, model, base)
 }
 
+// NewKimiClient builds a client for the Moonshot/Kimi OpenAI-compatible
+// endpoint. The base URL is the China platform endpoint; the K2.x models reject
+// reasoning_effort, which requestBody handles per model.
+func NewKimiClient(apiKey, model string) *OpenAICompatibleClient {
+	if strings.TrimSpace(model) == "" {
+		model = config.KimiDefaultModel
+	}
+	return NewOpenAICompatibleClient("kimi", apiKey, model, "https://api.moonshot.cn/v1")
+}
+
 func (c *OpenAICompatibleClient) ProviderName() string { return c.Provider }
 func (c *OpenAICompatibleClient) ModelName() string    { return c.Model }
 func (c *OpenAICompatibleClient) SupportsTools() bool  { return true }
 func (c *OpenAICompatibleClient) SupportsPromptCaching() bool {
-	return c.Provider == "deepseek" || c.Provider == "glm"
+	return c.Provider == "deepseek" || c.Provider == "glm" || c.Provider == "kimi"
 }
 
 func (c *OpenAICompatibleClient) SetReasoningEffort(effort string) { c.reasoningEffort = effort }
@@ -75,6 +85,11 @@ func (c *OpenAICompatibleClient) SupportsImages() bool {
 		return strings.HasPrefix(strings.ToLower(c.Model), "glm-5v")
 	case "deepseek":
 		return false
+	case "kimi":
+		// kimi-k3, kimi-k2.7-code and kimi-k2.6 all accept image input. Note that
+		// Kimi only accepts base64 data URLs or ms:// file references, never
+		// public image URLs; serializeMessage already emits data URLs.
+		return true
 	default:
 		return strings.Contains(strings.ToLower(c.Model), "vision") ||
 			strings.Contains(strings.ToLower(c.Model), "vl")
@@ -113,6 +128,12 @@ func builtInModelCapability(provider, model string) (contextWindow, maxOutputTok
 		return 200000, 131072
 	case "glm/glm-5.2":
 		return 1000000, 131072
+	case "kimi/kimi-k3":
+		// 1M context; max_completion_tokens defaults to 131072 and may be raised
+		// to 1048576, so the default is the honest output ceiling.
+		return 1048576, 131072
+	case "kimi/kimi-k2.7-code", "kimi/kimi-k2.7-code-highspeed", "kimi/kimi-k2.6":
+		return 262144, 32768
 	default:
 		return 0, 0
 	}
@@ -169,6 +190,11 @@ func (c *OpenAICompatibleClient) requestBody(messages []Message, tools []ToolDef
 	}
 	if opts.MaxTokens > 0 {
 		payload["max_tokens"] = opts.MaxTokens
+		if c.Provider == "kimi" {
+			// Moonshot deprecates max_tokens in favour of max_completion_tokens;
+			// send both so neither the deprecated nor the new field is missing.
+			payload["max_completion_tokens"] = opts.MaxTokens
+		}
 	}
 	if len(tools) > 0 {
 		serialized := make([]any, 0, len(tools))
@@ -185,15 +211,48 @@ func (c *OpenAICompatibleClient) requestBody(messages []Message, tools []ToolDef
 		payload["tools"] = serialized
 		payload["tool_choice"] = "auto"
 	}
-	switch c.reasoningEffort {
-	case "", "off":
-	default:
-		payload["reasoning_effort"] = c.reasoningEffort
-		if c.Provider == "deepseek" {
-			payload["thinking"] = map[string]any{"type": "enabled"}
-		}
+	if effort, ok := c.reasoningEffortForModel(); ok {
+		payload["reasoning_effort"] = effort
+	}
+	// DeepSeek takes a thinking flag alongside the effort; providers that can
+	// actually disable thinking send nothing at all.
+	if c.Provider == "deepseek" && c.reasoningEffort != "" && c.reasoningEffort != "off" {
+		payload["thinking"] = map[string]any{"type": "enabled"}
 	}
 	return json.Marshal(payload)
+}
+
+// reasoningEffortForModel maps the session's reasoning effort onto the value
+// this model accepts, and reports whether the field should be sent at all.
+//
+// Kimi K3 only accepts low/high/max and cannot stop thinking, so the levels
+// this project also allows (off, medium) have no exact counterpart there. They
+// are mapped onto the nearest supported level — off to low, medium to high —
+// rather than sent verbatim, which the API rejects. The K2.x models take no
+// reasoning_effort at all, and providers that support disabling thinking send
+// nothing when the effort is off.
+func (c *OpenAICompatibleClient) reasoningEffortForModel() (string, bool) {
+	if c.Provider == "kimi" {
+		if !strings.EqualFold(c.Model, config.KimiDefaultModel) {
+			return "", false
+		}
+		switch c.reasoningEffort {
+		case "off", "low":
+			return "low", true
+		case "medium", "high":
+			return "high", true
+		case "max":
+			return "max", true
+		default:
+			return "", false
+		}
+	}
+	switch c.reasoningEffort {
+	case "", "off":
+		return "", false
+	default:
+		return c.reasoningEffort, true
+	}
 }
 
 func ParseChatResponse(data []byte) (ChatResponse, error) {

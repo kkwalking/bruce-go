@@ -47,13 +47,50 @@ type ModelCapability struct {
 	MaxOutputTokens int `json:"maxOutputTokens,omitempty"`
 }
 
-// DeepSeekAPIKeyEnv is the environment variable that enables the built-in
-// DeepSeek provider when no DeepSeek provider is configured explicitly.
-const DeepSeekAPIKeyEnv = "DEEPSEEK_API_KEY"
+// Environment variables that each enable a built-in provider on their own, with
+// no entry in setting.json. A provider configured explicitly in setting.json is
+// always preserved, including its API key.
+const (
+	DeepSeekAPIKeyEnv = "DEEPSEEK_API_KEY"
+	GLMAPIKeyEnv      = "GLM_API_KEY"
+	KimiAPIKeyEnv     = "MOONSHOT_API_KEY"
+)
 
-// DeepSeekDefaultModel is the only DeepSeek model exposed by the built-in
-// environment-provided provider.
-const DeepSeekDefaultModel = "deepseek-v4.1-flash"
+// Default models of the built-in providers. Each is the model selected when its
+// provider is enabled by an environment variable alone.
+const (
+	DeepSeekDefaultModel = "deepseek-v4.1-flash"
+	GLMDefaultModel      = "glm-5.1"
+	KimiDefaultModel     = "kimi-k3"
+)
+
+// BuiltInProvider describes a provider that an environment variable can enable
+// without any entry in setting.json.
+type BuiltInProvider struct {
+	// Name is the canonical provider name. It must stay identical to the value
+	// llm.NormalizeProvider returns for this provider, because that is what the
+	// model factory switches on.
+	Name string
+	// Env is the environment variable holding the API key.
+	Env string
+	// DefaultModel is the model used when this provider supplies the default.
+	DefaultModel string
+}
+
+// builtInProviders lists the built-in providers in priority order. The first
+// entry whose environment variable is set becomes the default provider when
+// setting.json configures no default of its own; the order is fixed so that
+// startup never depends on map iteration order.
+var builtInProviders = []BuiltInProvider{
+	{Name: "deepseek", Env: DeepSeekAPIKeyEnv, DefaultModel: DeepSeekDefaultModel},
+	{Name: "glm", Env: GLMAPIKeyEnv, DefaultModel: GLMDefaultModel},
+	{Name: "kimi", Env: KimiAPIKeyEnv, DefaultModel: KimiDefaultModel},
+}
+
+// BuiltInProviders returns the built-in providers in priority order.
+func BuiltInProviders() []BuiltInProvider {
+	return append([]BuiltInProvider(nil), builtInProviders...)
+}
 
 type WebSearchSettings struct {
 	Provider string        `json:"provider"`
@@ -334,27 +371,40 @@ func normalize(settings *Settings) {
 	settings.Sandbox.AllowedEnv = normalizeAllowedEnv(settings.Sandbox.AllowedEnv)
 }
 
-// applyEnvironmentDefaults registers a built-in DeepSeek provider when
-// DEEPSEEK_API_KEY is present and no DeepSeek provider has been configured
-// explicitly. An existing explicit provider (even with an empty key) and an
-// explicitly configured default provider are always preserved.
+// applyEnvironmentDefaults registers a built-in provider for every built-in
+// provider whose environment variable holds an API key. A provider that is
+// already configured explicitly in setting.json is never touched, including
+// when its apiKey is empty — an explicit entry always wins over the
+// environment.
+//
+// Registering is not the same as selecting: the environment only supplies the
+// default provider when setting.json names no default of its own. When a
+// default is configured, the environment-provided providers are still added as
+// candidates, so they can be reached with /model, but they never displace the
+// configured default.
 func applyEnvironmentDefaults(settings *Settings) {
-	apiKey := strings.TrimSpace(os.Getenv(DeepSeekAPIKeyEnv))
-	if apiKey == "" {
-		return
+	hasExplicitDefault := strings.TrimSpace(settings.LLM.DefaultProvider) != ""
+	for _, provider := range builtInProviders {
+		apiKey := strings.TrimSpace(os.Getenv(provider.Env))
+		if apiKey == "" {
+			continue
+		}
+		if _, exists := settings.LLM.Providers[provider.Name]; exists {
+			continue
+		}
+		settings.LLM.Providers[provider.Name] = ProviderSetting{
+			APIKey: apiKey,
+			Models: []string{provider.DefaultModel},
+		}
+		if hasExplicitDefault {
+			continue
+		}
+		// First built-in provider with a key becomes the default. hasExplicitDefault
+		// is updated so a lower-priority provider cannot overwrite it.
+		settings.LLM.DefaultProvider = provider.Name
+		settings.LLM.DefaultModel = provider.DefaultModel
+		hasExplicitDefault = true
 	}
-	if _, exists := settings.LLM.Providers["deepseek"]; exists {
-		return
-	}
-	if strings.TrimSpace(settings.LLM.DefaultProvider) != "" {
-		return
-	}
-	settings.LLM.Providers["deepseek"] = ProviderSetting{
-		APIKey: apiKey,
-		Models: []string{DeepSeekDefaultModel},
-	}
-	settings.LLM.DefaultProvider = "deepseek"
-	settings.LLM.DefaultModel = DeepSeekDefaultModel
 }
 
 var environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
