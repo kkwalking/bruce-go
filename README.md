@@ -142,9 +142,21 @@ go run ./cmd/bruce --no-mcp
 }
 ```
 
-`llm.providers` 支持 `deepseek`、`glm` 和 `openai_compatiable`。测试使用 fake/mock，不依赖真实 API key。
+`llm.providers` 支持 `deepseek`、`glm`、`kimi` 和 `openai_compatiable`。测试使用 fake/mock，不依赖真实 API key。
 
-当未显式配置 `deepseek` provider 且未指定 `defaultProvider` 时，若环境变量 `DEEPSEEK_API_KEY` 存在，启动会自动注册内置 `deepseek` provider 并作为默认模型，仅暴露 `deepseek-v4.1-flash` 一个模型。显式配置的 provider 或默认 provider 始终优先，环境变量不会覆盖已有配置。
+三个内置 provider 都可以只靠一个环境变量启用，不需要在 `setting.json` 里写任何配置：
+
+| provider | 环境变量 | 默认模型 | 端点 |
+|---|---|---|---|
+| `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-v4.1-flash` | `https://api.deepseek.com` |
+| `glm` | `GLM_API_KEY` | `glm-5.1` | `https://open.bigmodel.cn/api/coding/paas/v4` |
+| `kimi` | `MOONSHOT_API_KEY` | `kimi-k3` | `https://api.moonshot.cn/v1` |
+
+`glm` 同时接受 `zai` / `zhipu` / `bigmodel` 等别名，`kimi` 同时接受 `moonshot`。
+
+环境变量与 `setting.json` 的分工是「补候选」而不是「覆盖」：环境变量只会注册那些在 `setting.json` 里没有显式出现的 provider；显式配置的 provider 始终优先，即使它的 `apiKey` 是空字符串，也不会被环境变量顶掉。只有当 `setting.json` 没有指定 `defaultProvider` 时，环境变量注册的 provider 才会成为默认；多个环境变量同时存在时按上表顺序取第一个。若已配置 `defaultProvider`，环境变量注册的 provider 仍然会进入候选列表，可以用 `/model` 切换过去，但不会改变默认。
+
+`kimi` 的四个内置模型分别是 `kimi-k3`（1M 上下文）、`kimi-k2.7-code`、`kimi-k2.7-code-highspeed`（256K）和 `kimi-k2.6`（256K）。注意 K2.x 系列不接受 `reasoning_effort`（只有 `kimi-k3` 支持 `low`/`high`/`max`），请求构造会按模型区分，避免整个请求被拒。
 
 自定义模型可通过 `modelCapabilities` 声明上下文窗口和最大输出 token；键必须同时出现在 `models` 中，配置值会覆盖内置模型能力。未配置 `contextWindow` 的自定义模型不会触发阈值自动压缩，但 API 返回的显式上下文溢出仍会被识别。
 

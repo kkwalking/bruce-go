@@ -357,7 +357,17 @@ func TestLoaderReasoningEffortField(t *testing.T) {
 	}
 }
 
+// clearBuiltInProviderEnv unsets every built-in provider environment variable so
+// a test observes only the variables it sets itself.
+func clearBuiltInProviderEnv(t *testing.T) {
+	t.Helper()
+	for _, provider := range BuiltInProviders() {
+		t.Setenv(provider.Env, "")
+	}
+}
+
 func TestLoaderInjectsDeepSeekFromEnvironment(t *testing.T) {
+	clearBuiltInProviderEnv(t)
 	t.Setenv(DeepSeekAPIKeyEnv, "env-key")
 	path := filepath.Join(t.TempDir(), "setting.json")
 
@@ -380,7 +390,80 @@ func TestLoaderInjectsDeepSeekFromEnvironment(t *testing.T) {
 	}
 }
 
-func TestLoaderEnvironmentDoesNotOverrideExplicitProvider(t *testing.T) {
+func TestLoaderInjectsGLMAndKimiFromEnvironment(t *testing.T) {
+	clearBuiltInProviderEnv(t)
+	t.Setenv(GLMAPIKeyEnv, "glm-env-key")
+	t.Setenv(KimiAPIKeyEnv, "kimi-env-key")
+	path := filepath.Join(t.TempDir(), "setting.json")
+
+	settings, err := NewLoader(path).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	glm, ok := settings.LLM.Providers["glm"]
+	if !ok {
+		t.Fatal("GLM_API_KEY should register a glm provider")
+	}
+	if glm.APIKey != "glm-env-key" {
+		t.Fatalf("glm apiKey = %q, want glm-env-key", glm.APIKey)
+	}
+	if len(glm.Models) != 1 || glm.Models[0] != GLMDefaultModel {
+		t.Fatalf("glm models = %#v, want [%s]", glm.Models, GLMDefaultModel)
+	}
+	kimi, ok := settings.LLM.Providers["kimi"]
+	if !ok {
+		t.Fatal("MOONSHOT_API_KEY should register a kimi provider")
+	}
+	if kimi.APIKey != "kimi-env-key" {
+		t.Fatalf("kimi apiKey = %q, want kimi-env-key", kimi.APIKey)
+	}
+	if len(kimi.Models) != 1 || kimi.Models[0] != KimiDefaultModel {
+		t.Fatalf("kimi models = %#v, want [%s]", kimi.Models, KimiDefaultModel)
+	}
+	// Both keys are present and no default is configured: the fixed priority
+	// order decides, so the result cannot depend on map iteration order.
+	if settings.LLM.DefaultProvider != "glm" || settings.LLM.DefaultModel != GLMDefaultModel {
+		t.Fatalf("default = %s/%s, want glm/%s", settings.LLM.DefaultProvider, settings.LLM.DefaultModel, GLMDefaultModel)
+	}
+}
+
+func TestLoaderEnvironmentDefaultProviderPriority(t *testing.T) {
+	cases := []struct {
+		name         string
+		deepseek     string
+		glm          string
+		kimi         string
+		wantProvider string
+	}{
+		{name: "kimi only", kimi: "k", wantProvider: "kimi"},
+		{name: "glm only", glm: "g", wantProvider: "glm"},
+		{name: "deepseek only", deepseek: "d", wantProvider: "deepseek"},
+		{name: "deepseek wins over glm and kimi", deepseek: "d", glm: "g", kimi: "k", wantProvider: "deepseek"},
+		{name: "glm wins over kimi", glm: "g", kimi: "k", wantProvider: "glm"},
+		{name: "no keys", wantProvider: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearBuiltInProviderEnv(t)
+			t.Setenv(DeepSeekAPIKeyEnv, tc.deepseek)
+			t.Setenv(GLMAPIKeyEnv, tc.glm)
+			t.Setenv(KimiAPIKeyEnv, tc.kimi)
+
+			settings, err := NewLoader(filepath.Join(t.TempDir(), "setting.json")).Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings.LLM.DefaultProvider != tc.wantProvider {
+				t.Fatalf("default provider = %q, want %q", settings.LLM.DefaultProvider, tc.wantProvider)
+			}
+		})
+	}
+}
+
+// An environment-provided provider is a candidate, not an override: it must be
+// reachable with /model but must never displace the configured default.
+func TestLoaderEnvironmentAddsCandidatesWithoutOverridingExplicitProvider(t *testing.T) {
+	clearBuiltInProviderEnv(t)
 	t.Setenv(DeepSeekAPIKeyEnv, "env-key")
 	path := filepath.Join(t.TempDir(), "setting.json")
 	data := `{"llm":{"defaultProvider":"glm","providers":{"glm":{"apiKey":"glm-key"}}}}`
@@ -392,11 +475,37 @@ func TestLoaderEnvironmentDoesNotOverrideExplicitProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := settings.LLM.Providers["deepseek"]; ok {
-		t.Fatal("explicit default provider should suppress the environment DeepSeek provider")
+	if _, ok := settings.LLM.Providers["deepseek"]; !ok {
+		t.Fatal("environment DeepSeek provider should still be registered as a candidate")
+	}
+	if got := settings.LLM.Providers["deepseek"].APIKey; got != "env-key" {
+		t.Fatalf("deepseek apiKey = %q, want env-key", got)
 	}
 	if settings.LLM.DefaultProvider != "glm" {
 		t.Fatalf("default provider = %q, want glm", settings.LLM.DefaultProvider)
+	}
+	if settings.LLM.DefaultModel != "" {
+		t.Fatalf("default model = %q, want empty (the environment must not choose a model)", settings.LLM.DefaultModel)
+	}
+}
+
+// An explicitly configured provider always wins over its environment variable,
+// including when the configured key is empty.
+func TestLoaderEnvironmentPreservesExplicitProviderEvenWhenKeyIsEmpty(t *testing.T) {
+	clearBuiltInProviderEnv(t)
+	t.Setenv(GLMAPIKeyEnv, "env-key")
+	path := filepath.Join(t.TempDir(), "setting.json")
+	data := `{"llm":{"providers":{"glm":{"apiKey":""}}}}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	settings, err := NewLoader(path).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := settings.LLM.Providers["glm"].APIKey; got != "" {
+		t.Fatalf("glm apiKey = %q, want empty: an explicit entry must not be replaced by the environment", got)
 	}
 }
 
