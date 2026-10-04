@@ -79,12 +79,12 @@ func TestSwitchableClientOrdersOptionsWithCurrentFirst(t *testing.T) {
 		}
 	}
 
-	if _, err := client.Switch("deepseek/deepseek-v4-pro"); err != nil {
+	if _, err := client.Switch("deepseek/deepseek-v4.1-flash"); err != nil {
 		t.Fatal(err)
 	}
 	options = client.Options()
-	if got := options[0].Selector(); got != "deepseek/deepseek-v4-pro" {
-		t.Fatalf("first option after switch = %q, want deepseek/deepseek-v4-pro", got)
+	if got := options[0].Selector(); got != "deepseek/deepseek-v4.1-flash" {
+		t.Fatalf("first option after switch = %q, want deepseek/deepseek-v4.1-flash", got)
 	}
 }
 

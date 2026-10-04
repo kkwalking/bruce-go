@@ -741,7 +741,7 @@ func TestStatusReportsReasoningEffort(t *testing.T) {
 	settingsPath := filepath.Join(homeDir, "setting.json")
 	settings := config.DefaultSettings()
 	settings.LLM.DefaultProvider = "deepseek"
-	settings.LLM.DefaultModel = "deepseek-v4-flash"
+	settings.LLM.DefaultModel = "deepseek-v4.1-flash"
 	settings.LLM.ReasoningEffort = "high"
 	settings.LLM.Providers["deepseek"] = config.ProviderSetting{APIKey: "test-key"}
 	if err := config.NewLoader(settingsPath).Save(settings); err != nil {

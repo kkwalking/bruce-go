@@ -112,6 +112,8 @@ go run ./cmd/bruce --no-mcp
 
 `llm.providers` 支持 `deepseek`、`glm` 和 `openai_compatiable`。测试使用 fake/mock，不依赖真实 API key。
 
+当未显式配置 `deepseek` provider 且未指定 `defaultProvider` 时，若环境变量 `DEEPSEEK_API_KEY` 存在，启动会自动注册内置 `deepseek` provider 并作为默认模型，仅暴露 `deepseek-v4.1-flash` 一个模型。显式配置的 provider 或默认 provider 始终优先，环境变量不会覆盖已有配置。
+
 自定义模型可通过 `modelCapabilities` 声明上下文窗口和最大输出 token；键必须同时出现在 `models` 中，配置值会覆盖内置模型能力。未配置 `contextWindow` 的自定义模型不会触发阈值自动压缩，但 API 返回的显式上下文溢出仍会被识别。
 
 `/compact [instructions]` 使用当前模型生成英文结构化摘要，保留安全的 tool call/result 边界并累计已读/已修改文件。自动压缩在模型调用前和成功回合后按 `floor(contextWindow * contextWindowRatio) - reserveTokens` 检查，`contextWindowRatio` 默认是 `0.8`、合法范围为 `(0, 1]`，启用自动压缩时比例窗口必须大于 `reserveTokens`；上下文溢出时最多压缩并续跑一次，不会重复写入用户消息。`compaction.enabled=false` 仅关闭自动压缩，手动 `/compact` 仍可使用。Session JSONL 格式版本保持不变，旧 session 和缺少新增 assistant 元数据的记录仍可恢复。

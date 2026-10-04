@@ -47,6 +47,14 @@ type ModelCapability struct {
 	MaxOutputTokens int `json:"maxOutputTokens,omitempty"`
 }
 
+// DeepSeekAPIKeyEnv is the environment variable that enables the built-in
+// DeepSeek provider when no DeepSeek provider is configured explicitly.
+const DeepSeekAPIKeyEnv = "DEEPSEEK_API_KEY"
+
+// DeepSeekDefaultModel is the only DeepSeek model exposed by the built-in
+// environment-provided provider.
+const DeepSeekDefaultModel = "deepseek-v4.1-flash"
+
 type WebSearchSettings struct {
 	Provider string        `json:"provider"`
 	Zhipu    ZhipuSearch   `json:"zhipu"`
@@ -187,18 +195,21 @@ func (l Loader) Load() (Settings, error) {
 	}
 	data, err := os.ReadFile(l.Path)
 	if errors.Is(err, os.ErrNotExist) {
+		applyEnvironmentDefaults(&settings)
 		return settings, nil
 	}
 	if err != nil {
 		return settings, err
 	}
 	if len(data) == 0 {
+		applyEnvironmentDefaults(&settings)
 		return settings, nil
 	}
 	if err := json.Unmarshal(data, &settings); err != nil {
 		return settings, err
 	}
 	normalize(&settings)
+	applyEnvironmentDefaults(&settings)
 	if err := settings.Compaction.Validate(); err != nil {
 		return settings, err
 	}
@@ -321,6 +332,29 @@ func normalize(settings *Settings) {
 		settings.Sandbox.Mode = "full-access"
 	}
 	settings.Sandbox.AllowedEnv = normalizeAllowedEnv(settings.Sandbox.AllowedEnv)
+}
+
+// applyEnvironmentDefaults registers a built-in DeepSeek provider when
+// DEEPSEEK_API_KEY is present and no DeepSeek provider has been configured
+// explicitly. An existing explicit provider (even with an empty key) and an
+// explicitly configured default provider are always preserved.
+func applyEnvironmentDefaults(settings *Settings) {
+	apiKey := strings.TrimSpace(os.Getenv(DeepSeekAPIKeyEnv))
+	if apiKey == "" {
+		return
+	}
+	if _, exists := settings.LLM.Providers["deepseek"]; exists {
+		return
+	}
+	if strings.TrimSpace(settings.LLM.DefaultProvider) != "" {
+		return
+	}
+	settings.LLM.Providers["deepseek"] = ProviderSetting{
+		APIKey: apiKey,
+		Models: []string{DeepSeekDefaultModel},
+	}
+	settings.LLM.DefaultProvider = "deepseek"
+	settings.LLM.DefaultModel = DeepSeekDefaultModel
 }
 
 var environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
