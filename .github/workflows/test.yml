@@ -72,3 +72,74 @@ jobs:
         run: make build VERSION=ci
       - name: The binary answers
         run: ./bruce --version
+
+  # 每次 push/PR 都把发布路径完整走一遍（构建 → 自检），只是不建 release。
+  #
+  # 这条 job 存在的理由：release.yml 只在推 tag 时运行，而推 tag 是不可逆的
+  # 外部动作 —— 若把发布路径的验证只放在那里，配错就要等到发版当天才发现。
+  # 已经有实例：verify 脚本里 `tar -tzf | grep -q` 配 pipefail 在 GNU tar 上
+  # 稳定返回 141，macOS 上却测不出来，只有 Linux 会红。
+  #
+  # 同时跑一组负向用例：自检脚本必须真的拦得住坏产物，否则它只是装饰。
+  release-dry-run:
+    name: release dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 用一个明确不会与真实 tag 冲突的版本号，走与发版相同的 Makefile 目标。
+      - name: Build artifacts
+        run: make release-artifacts VERSION=v0.0.0-dryrun
+
+      - name: Verify artifacts
+        run: scripts/verify-release-artifacts.sh dist 0.0.0-dryrun
+
+      # 负向用例：坏产物必须被拒绝。
+      - name: Verify rejects bad artifacts
+        run: |
+          set -euo pipefail
+          version=0.0.0-dryrun
+          cp -r dist /tmp/dist-good
+
+          expect_reject() {
+            if scripts/verify-release-artifacts.sh dist "$version" >/dev/null 2>&1; then
+              echo "FAIL: accepted a bad artifact set ($1)"; exit 1
+            fi
+            echo "  rejected as expected: $1"
+          }
+
+          # 1. 篡改归档 → checksums 应失配
+          rm -rf dist && cp -r /tmp/dist-good dist
+          printf 'tampered' >> "dist/bruce_${version}_linux_amd64.tar.gz"
+          expect_reject "tampered archive"
+
+          # 2. 少一个平台 → 产物集合应不符
+          rm -rf dist && cp -r /tmp/dist-good dist
+          rm -f "dist/bruce_${version}_darwin_arm64.tar.gz"
+          expect_reject "missing darwin archive"
+
+          # 3. 多一个计划外归档 → 产物集合应不符
+          rm -rf dist && cp -r /tmp/dist-good dist
+          cp "dist/bruce_${version}_linux_amd64.tar.gz" \
+             "dist/bruce_${version}_linux_arm64.tar.gz"
+          expect_reject "unexpected extra archive"
+
+          # 4. 归档里的二进制平台与文件名不符。
+          #    必须连 checksums.txt 一起重算，否则会先被 checksum 检查拦下，
+          #    这个用例就测不到 GOOS/GOARCH 那一步了。
+          rm -rf dist && cp -r /tmp/dist-good dist
+          mkdir -p /tmp/swapped
+          tar -xzf "dist/bruce_${version}_linux_amd64.tar.gz" -C /tmp/swapped
+          tar -xzf "dist/bruce_${version}_darwin_arm64.tar.gz" -C /tmp/swapped README.md
+          # linux 二进制冒充 darwin 归档
+          tar -czf "dist/bruce_${version}_darwin_arm64.tar.gz" \
+            -C /tmp/swapped bruce README.md
+          (cd dist && sha256sum ./*.tar.gz > checksums.txt)
+          expect_reject "darwin archive carrying a linux binary (checksums recomputed)"
+
+          echo "all negative cases rejected"

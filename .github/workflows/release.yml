@@ -74,72 +74,24 @@ jobs:
           cache: true
 
       # 版本号从 tag 派生，不手工传，避免 tag 与产物不一致。
-      # 这里显式注入 $GITHUB_REF_NAME 之外的来源：make 自己会用 git describe，
-      # 而在 tag 上它正好等于这个 tag 的版本。
       - name: Build artifacts
         run: make release-artifacts
 
       # 产物自检：确认归档里的二进制真的是目标平台、版本号真的是这个 tag。
       # 少了这一步，交叉编译配错（例如 GOARCH 写错）会静默产出能上传但跑不起来的包。
+      #
+      # 逻辑放在 scripts/ 而不是内联在这里，因为 test.yml 的 release-dry-run job
+      # 要在每次 push/PR 上跑同一份脚本 —— 那才是这个脚本能持续被验证的原因。
       - name: Verify artifacts
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+        run: scripts/verify-release-artifacts.sh dist "${GITHUB_REF_NAME#v}"
 
-          # 顶层断言：不靠"每个文件看起来都对"，而是先确认产物集合就是这个。
-          test -f "dist/checksums.txt"
-          expected="bruce_${version}_darwin_arm64.tar.gz bruce_${version}_linux_amd64.tar.gz"
-          actual="$(cd dist && ls -1 *.tar.gz | tr '\n' ' ' | sed 's/ $//')"
-          test "$actual" = "$expected" \
-            || { echo "unexpected archives: got [$actual] want [$expected]"; exit 1; }
-
-          (cd dist && sha256sum -c checksums.txt)
-
-          for platform in darwin/arm64 linux/amd64; do
-            os="${platform%/*}"; arch="${platform#*/}"
-            archive="dist/bruce_${version}_${os}_${arch}.tar.gz"
-
-            # 归档解开应当是二进制的平铺，不是带外层目录的嵌套。
-            tar -tzf "$archive" | grep -qx bruce
-
-            tar -xzf "$archive" -O bruce > /tmp/bruce-check
-            chmod +x /tmp/bruce-check
-
-            # GOOS/GOARCH 内嵌在二进制里，比文件名可信。
-            info="$(go version -m /tmp/bruce-check)"
-            grep -q "GOOS=$os" <<<"$info" \
-              || { echo "$archive: not GOOS=$os"; exit 1; }
-            grep -q "GOARCH=$arch" <<<"$info" \
-              || { echo "$archive: not GOARCH=$arch"; exit 1; }
-
-            # 注入的版本号必须在二进制里。
-            # 这是存在性检查，严格程度弱于下面 linux 的实跑：字符串可能来自
-            # 依赖而不是 -X 注入。darwin 产物无法在 linux runner 上执行，
-            # 所以它只能做到这一步；linux 一侧由实跑兜底。
-            grep -a -q -F "$version" /tmp/bruce-check \
-              || { echo "$archive: version $version not embedded"; exit 1; }
-          done
-
-          echo "artifacts ok for $version"
-
-      # linux 产物直接跑一遍，确认它真能启动（不只是文件格式对）。
-      # darwin 产物无法在 ubuntu runner 上执行，由文件名 + GOOS 自检覆盖。
-      - name: Smoke test linux binary
-        run: |
-          set -eu
-          version="${GITHUB_REF_NAME#v}"
-          tar -xzf "dist/bruce_${version}_linux_amd64.tar.gz" -O bruce > /tmp/bruce-smoke
-          chmod +x /tmp/bruce-smoke
-          got="$(/tmp/bruce-smoke --version)"
-          echo "reports: $got"
-          test "$got" = "$version" || { echo "want $version, got $got"; exit 1; }
-
+      # linux 产物能在这个 runner 上直接执行，上面的 verify 脚本已经实跑过
+      # `--version` 并与 tag 比对（darwin 产物无法执行，脚本会退化成仅做检查）。
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          version="${GITHUB_REF_NAME#v}"
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \

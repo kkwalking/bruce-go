@@ -121,12 +121,22 @@ git push origin v0.9.0      # 触发 release.yml，产物挂到 GitHub Release
 发布前可以在本地预演整个打包过程：
 
 ```sh
-make release-artifacts VERSION=v0.9.0    # 产出到 dist/（已 gitignore）
+make release-artifacts VERSION=v0.9.0              # 产出到 dist/（已 gitignore）
+scripts/verify-release-artifacts.sh dist 0.9.0     # 跑发版用的那套自检
 ```
 
 `release.yml` 会在建 release **之前**先跑测试（含 `-race` 与沙箱严格模式）
-并自检产物（checksums、归档结构、内嵌的 GOOS/GOARCH 与版本号、linux 产物实跑
-`--version`）。任一环失败就不发布。
+并自检产物：产物集合、checksums、归档结构、内嵌的 GOOS/GOARCH 与版本号，
+能执行的产物还会实跑 `--version` 并与 tag 比对。任一环失败就不发布。
+
+自检逻辑在 `scripts/verify-release-artifacts.sh`，**不在 workflow 里内联** ——
+`test.yml` 的 `release-dry-run` job 每次 push/PR 都用同一份脚本跑一遍完整发布
+路径（含一组负向用例，确认坏产物真会被拒绝）。这样发布路径的回归不必等到
+发版当天才发现：`release.yml` 只在推 tag 时运行，而推 tag 是不可逆的外部动作。
+
+> 历史教训：自检脚本里曾有一处 `tar -tzf | grep -q` 配 `set -o pipefail`，
+> 在 GNU tar 上因 SIGPIPE 稳定返回 141，BSD tar 上不复现 —— 本机 macOS
+> 全绿，只有 Linux 会红。跨平台的行为差异要按 Linux 验证，别只信本机结果。
 
 ## 机器强制
 
@@ -141,6 +151,7 @@ make release-artifacts VERSION=v0.9.0    # 产出到 dist/（已 gitignore）
 | 沙箱测试不许静默跳过 | CI 设 `BRUCE_REQUIRE_SANDBOX_TESTS=1` |
 | 二进制能构建且能报版本 | CI 的 `build` job |
 | 发布产物可信 | CI 的 `release` job：测试 + 产物自检不通过就不建 release |
+| 发布路径不回归 | CI 的 `release-dry-run` job：每次 push/PR 跑一遍打包与自检 |
 
 ### 常用命令
 
