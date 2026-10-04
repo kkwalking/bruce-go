@@ -253,7 +253,7 @@ func TestLoaderDefaultsAndSave(t *testing.T) {
 		t.Fatalf("unexpected sandbox defaults: %+v", settings.Sandbox)
 	}
 	settings.LLM.DefaultProvider = "deepseek"
-	settings.LLM.DefaultModel = "deepseek-v4-flash"
+	settings.LLM.DefaultModel = "deepseek-v4.1-flash"
 	settings.LLM.Providers["deepseek"] = ProviderSetting{APIKey: "k"}
 	if err := NewLoader(path).Save(settings); err != nil {
 		t.Fatal(err)
@@ -325,12 +325,12 @@ func TestLoaderReasoningEffortField(t *testing.T) {
 	data := `{
   "llm": {
     "defaultProvider": "deepseek",
-    "defaultModel": "deepseek-v4-flash",
+    "defaultModel": "deepseek-v4.1-flash",
     "reasoningEffort": "high",
     "providers": {
       "deepseek": {
         "apiKey": "key",
-        "models": ["deepseek-v4-flash"]
+        "models": ["deepseek-v4.1-flash"]
       }
     }
   },
@@ -354,5 +354,65 @@ func TestLoaderReasoningEffortField(t *testing.T) {
 	settings2 := DefaultSettings()
 	if got := settings2.LLM.ReasoningEffort; got != "" {
 		t.Fatalf("default reasoningEffort = %q, want empty", got)
+	}
+}
+
+func TestLoaderInjectsDeepSeekFromEnvironment(t *testing.T) {
+	t.Setenv(DeepSeekAPIKeyEnv, "env-key")
+	path := filepath.Join(t.TempDir(), "setting.json")
+
+	settings, err := NewLoader(path).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, ok := settings.LLM.Providers["deepseek"]
+	if !ok {
+		t.Fatal("DEEPSEEK_API_KEY should register a deepseek provider")
+	}
+	if provider.APIKey != "env-key" {
+		t.Fatalf("provider apiKey = %q, want env-key", provider.APIKey)
+	}
+	if len(provider.Models) != 1 || provider.Models[0] != DeepSeekDefaultModel {
+		t.Fatalf("provider models = %#v, want [%s]", provider.Models, DeepSeekDefaultModel)
+	}
+	if settings.LLM.DefaultProvider != "deepseek" || settings.LLM.DefaultModel != DeepSeekDefaultModel {
+		t.Fatalf("default = %s/%s, want deepseek/%s", settings.LLM.DefaultProvider, settings.LLM.DefaultModel, DeepSeekDefaultModel)
+	}
+}
+
+func TestLoaderEnvironmentDoesNotOverrideExplicitProvider(t *testing.T) {
+	t.Setenv(DeepSeekAPIKeyEnv, "env-key")
+	path := filepath.Join(t.TempDir(), "setting.json")
+	data := `{"llm":{"defaultProvider":"glm","providers":{"glm":{"apiKey":"glm-key"}}}}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	settings, err := NewLoader(path).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := settings.LLM.Providers["deepseek"]; ok {
+		t.Fatal("explicit default provider should suppress the environment DeepSeek provider")
+	}
+	if settings.LLM.DefaultProvider != "glm" {
+		t.Fatalf("default provider = %q, want glm", settings.LLM.DefaultProvider)
+	}
+}
+
+func TestLoaderEnvironmentPreservesExplicitDeepSeekProvider(t *testing.T) {
+	t.Setenv(DeepSeekAPIKeyEnv, "env-key")
+	path := filepath.Join(t.TempDir(), "setting.json")
+	data := `{"llm":{"providers":{"deepseek":{"apiKey":"configured-key"}}}}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	settings, err := NewLoader(path).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := settings.LLM.Providers["deepseek"].APIKey; got != "configured-key" {
+		t.Fatalf("apiKey = %q, want configured-key", got)
 	}
 }

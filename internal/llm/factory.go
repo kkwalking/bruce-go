@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	DeepSeekModels = []string{"deepseek-v4-flash", "deepseek-v4-pro"}
+	DeepSeekModels = []string{"deepseek-v4.1-flash"}
 	GLMModels      = []string{"glm-4.5-air", "glm-4.7", "glm-5-turbo", "glm-5.1", "glm-5.2", "glm-5v-turbo"}
 )
 
@@ -310,7 +310,7 @@ func defaultModel(provider string, models []string) string {
 	case "glm":
 		return "glm-5.1"
 	case "deepseek":
-		return "deepseek-v4-flash"
+		return "deepseek-v4.1-flash"
 	default:
 		if len(models) > 0 {
 			return models[0]

@@ -36,7 +36,7 @@ func NewOpenAICompatibleClient(provider, apiKey, model, baseURL string) *OpenAIC
 
 func NewDeepSeekClient(apiKey, model string) *OpenAICompatibleClient {
 	if strings.TrimSpace(model) == "" {
-		model = "deepseek-v4-flash"
+		model = "deepseek-v4.1-flash"
 	}
 	c := NewOpenAICompatibleClient("deepseek", apiKey, model, "https://api.deepseek.com")
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -101,7 +101,7 @@ func (c *OpenAICompatibleClient) SetModelCapability(contextWindow, maxOutputToke
 
 func builtInModelCapability(provider, model string) (contextWindow, maxOutputTokens int) {
 	switch provider + "/" + model {
-	case "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro":
+	case "deepseek/deepseek-v4.1-flash":
 		return 1000000, 384000
 	case "glm/glm-4.5-air":
 		return 131072, 98304
