@@ -1,80 +1,188 @@
+# bruce-go — 开发约定
+
+本文件对人和 agent 同等生效。凡写「必须」「拒绝」的，都已经或应当由机器强制
+（见「机器强制」一节），不是建议。
+
 ## 项目背景
-本项目是java版本的bruce coding agent的go版本移植，目前还未完成。
-原Java版本项目位置: /User/zhouzekun/code/bruce-cli
 
-## 开发guideline
-需求开发或者bug修复时先新开分支，然后改动，开发完成之后不要提交，等我审阅
-重大功能更新要更新minor version,修复bug则要更新patch version
+本项目是 Java 版 bruce coding agent 的 Go 版本移植，尚未完成。
 
-## Code Exploration Policy
+- 原 Java 版本：`/Users/zhouzekun/code/bruce-cli`
+- 移植映射：`docs/MIGRATION_MAP.md`
+- 移植取舍与测试哲学：`docs/PORTING_NOTES.md`
 
-Always use jCodeMunch-MCP for code navigation. Never fall back to Read, Grep, Glob, or Bash for code exploration.
-**Exception:** use `Read` when you are about to edit a file — the harness requires a `Read` before `Edit`/`Write`. Use jCodeMunch to *find and understand* code, then `Read` only the file you are changing.
+## 分支与提交
 
-This server runs the **front door** surface: three tools reach every jCodeMunch capability, so the tool list stays small and the catalogue is fetched only when you need it.
+单人维护，`main` 是唯一长期分支。
 
-**Start any session:**
-1. `order { "action": "resolve_repo", "args": { "path": "." } }` — confirm the project is indexed. If it is not: `order { "action": "index_folder", "args": { "path": "." } }`
+### 必须在分支上开发
 
-**Then, for any task:**
-- Know what you want → `order { "action": "<name>", "args": { ... } }`
-- Know the goal, not the tool → `route { "query": "your task in a sentence" }` picks the action and shapes the arguments
-- Want to see what exists → `menu { "query": "what you are trying to do" }` returns matching actions with example arguments
-- Want the whole catalogue and the usage rules → `jcodemunch_guide`
+**需求开发和 bug 修复一律先开分支。** 不允许在 `main` 上直接 `commit`。
 
-`menu` and `jcodemunch_guide` list every action this server can run, including ones absent from your tool list. That is expected: the front door is the way to call them.
+```sh
+git checkout -b feat/<name>      # 或 fix/<name>、chore/<name>、refactor/<name>
+```
 
-**Interpreting results:**
-- A `verdict` of `no_implementation_found` is evidence of absence. Report the gap; do not re-search with different wording.
-- A `verdict` of `degraded` means a channel was unavailable, so absence is NOT proven. Read the note before relying on the result.
-- `source: ""` alongside `source_status` means the body could not be read, not that the symbol is empty.
+`main` 只接受两种进入方式：
 
-**After editing files:**
-- With PostToolUse hooks installed (Claude Code), edited files are reindexed automatically.
-- Otherwise `order { "action": "register_edit", "args": { "paths": [...] } }` after an edit, batched for bulk changes.
+1. 本地合并特性分支后推送（`git merge feat/<name>`，再 `git push origin main`）；
+2. 在 GitHub 上合并 PR。
 
-**Announce your model once per session** so the server can size its answers: `announce_model { "model": "<your-model-id>" }`.
+> 由 `.githooks/pre-push` 强制：在 `main` 上直接创建的提交会被拒绝推送。
+> 来自分支的提交、以及 merge 提交，正常放行。
 
-<!-- gitnexus:start -->
-# GitNexus — Code Intelligence
+### 必须带验收报告
 
-This project is indexed by GitNexus as **bruce-go** (3511 symbols, 11245 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+**每次提交的正文都是一份验收报告，不允许空正文。** 只有一句话的 subject 无法在
+半年后解释当时的判断，这是本项目最容易累积的债。
 
-> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
+格式：
 
-## Always Do
+```text
+<scope>: <一句话说清改了什么>
 
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "main"})`.
-- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
+— <改动前的行为，错在哪；涉及具体位置时给 file.go:line>
+<改成了什么，逐条对应上面每一处>
 
-## Never Do
+<验证：实际跑过的命令与结果。新增或修改的测试点名，
+ 并说明它在改动前会失败（fails without the change）>
 
-- NEVER edit a function, class, or method without first running `impact` on it.
-- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
-- NEVER commit changes without running `detect_changes()` to check affected scope.
+<未验证的部分写明「未验证」及原因，不许省略>
+```
 
-## Resources
+`<scope>` 用 `feat` / `fix` / `refactor` / `perf` / `test` / `docs` / `chore`，
+可带括号子域，例如 `fix(sandbox):`、`feat(tui):`。
 
-| Resource | Use for |
-|----------|---------|
-| `gitnexus://repo/bruce-go/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/bruce-go/clusters` | All functional areas |
-| `gitnexus://repo/bruce-go/processes` | All execution flows |
-| `gitnexus://repo/bruce-go/process/{name}` | Step-by-step execution trace |
+一份完整的例子：
 
-## CLI
+```text
+fix(sandbox): .git 写保护改为大小写不敏感
 
-| Task | Read this skill file |
-|------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+— 原来的写保护用大小写敏感的前缀比较，在 macOS 的默认文件系统上可以用
+  .GIT/config 绕过，符号链接也没有二次校验（internal/sandbox/seatbelt.go:212）。
 
-<!-- gitnexus:end -->
+现在在解析符号链接之后再比一次，并统一按大小写不敏感比较；
+deny 规则同时覆盖 .git 与其解析后的真实路径。
+
+新增 TestGitProtectionCaseInsensitive（.GIT/config 与指向 .git 的软链接
+都被拒绝）——没有这个改动它会失败。
+go vet ./...、go test ./...、go test -race ./... 全部通过。
+
+未验证：Windows 的 ACL 路径，本机没有环境。
+```
+
+> 由 `.githooks/commit-msg` 强制：去掉注释行后正文为空即拒绝提交。
+> `Merge` / `Revert` / `fixup!` / `squash!` 提交豁免。
+
+### 未验证就说未验证
+
+**不许把「没测」写成「应该没问题」。** 沙箱后端、真实 API、跨平台路径这类本机不具备
+条件的，照下面写清楚即可，这比含糊其辞有用得多：
+
+```text
+未验证：Linux Bubblewrap 路径，本机是 macOS。
+```
+
+## 版本与发布
+
+**版本号的唯一来源是 git tag，不要再手工修改源码里的版本常量。**
+
+```sh
+make tag VERSION=v0.9.0     # 打一个带注释的 tag
+git push origin v0.9.0
+```
+
+`make build` 用 `git describe` 派生版本号并注入二进制：
+
+- 正好在 tag 上 → `0.9.0`
+- tag 之后 3 个提交 → `0.9.0-3-gabc1234`
+- 工作区有未提交改动 → 带 `-dirty` 后缀
+
+裸 `go build ./cmd/bruce` 报告 `dev`。
+
+- 重大功能 → minor 递增（`v0.9.0` → `v0.10.0`）
+- bug 修复 → patch 递增（`v0.9.0` → `v0.9.1`）
+
+## 机器强制
+
+这些已不是文档约定，改坏了会在提交时或 CI 里立刻失败：
+
+| 约束 | 在哪强制 |
+|---|---|
+| 不在 `main` 上直接提交 | `.githooks/pre-push`（`make hooks` 安装） |
+| 提交必须有正文 | `.githooks/commit-msg` |
+| gofmt、vet、单测 | `make check`，以及 CI 的 `test` job |
+| race 检测 | `go test -race ./...`，CI |
+| 沙箱测试不许静默跳过 | CI 设 `BRUCE_REQUIRE_SANDBOX_TESTS=1` |
+| 二进制能构建且能报版本 | CI 的 `build` job |
+
+### 常用命令
+
+```sh
+make hooks          # 新 clone 后跑一次，启用 .githooks/
+make check          # 提交前跑这个：gofmt -l + vet + test
+make test           # 单测
+make race           # race 检测
+make sandbox-test   # 把沙箱测试的 skip 升级为失败（复现 CI 严格模式）
+make build          # 带版本号构建
+make tag VERSION=v0.9.0
+```
+
+**`make check` 是提交前的最低要求。**
+
+### 沙箱测试为什么不能静默跳过
+
+`internal/sandbox` 与 `internal/mcp` 的集成测试在本机后端不可用时默认 `t.Skip`，
+所以 `go test ./...` 全绿并不代表沙箱是好的。CI 设
+`BRUCE_REQUIRE_SANDBOX_TESTS=1` 把跳过变成失败；本地用 `make sandbox-test`
+复现同样的严格性。
+
+新增依赖沙箱后端的测试时，沿用这个环境变量判断，不要自己发明开关。
+
+## 代码导航
+
+### MCP
+
+代码导航用 jCodeMunch-MCP。它在**本机全局配置**里（`~/.claude.json` 的项目条目），
+不在仓库里；仓库不再提交 `.mcp.json`。
+
+**开始任何任务前：**
+
+1. `order { "action": "resolve_repo", "args": { "path": "." } }` 确认项目已索引。
+   未索引则 `order { "action": "index_folder", "args": { "path": "." } }`。
+
+**然后：**
+
+- 知道要什么 → `order { "action": "<name>", "args": { ... } }`
+- 只知道目标 → `route { "query": "用一句话描述任务" }` 选动作并整形参数
+- 想看有什么 → `menu { "query": "你想做什么" }` 返回匹配的动作与示例参数
+- 要完整目录与用法规则 → `jcodemunch_guide`
+
+`menu` 与 `jcodemunch_guide` 会列出不在你工具清单里的动作，这是预期的：
+front door 就是用来调用它们的。
+
+**读结果时：**
+
+- `verdict` 为 `no_implementation_found` 是「不存在」的证据。如实报告缺口，
+  不要换个说法再搜一遍。
+- `verdict` 为 `degraded` 表示某个通道不可用，此时**不能**据此断定不存在。
+  先看 note 再下结论。
+- `source: ""` 且带 `source_status` 表示正文没读到，不代表符号是空的。
+
+**编辑文件后：**
+
+- 装了 PostToolUse hook（Claude Code）时会自动重建索引。
+- 否则编辑后调用 `order { "action": "register_edit", "args": { "paths": [...] } }`，
+  批量改动用一次调用。
+
+**每个会话宣告一次模型**，让服务端据此决定回答的详细程度：
+`announce_model { "model": "<your-model-id>" }`。
+
+**例外：** 即将编辑某个文件时用 `Read` —— harness 要求 `Edit`/`Write` 前先 `Read`。
+用 jCodeMunch 去*找*和*理解*代码，只对要改的文件用 `Read`。
+
+### 不再使用的工具
+
+**不使用**代码知识图谱类工具（code-review-graph、GitNexus 等），**不使用**
+openspec 规格流程。两者已从仓库中移除，历史 spec 一并删除。不要重新引入，
+也不要引用它们。

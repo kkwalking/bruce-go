@@ -1,0 +1,51 @@
+#!/bin/sh
+# 要求提交信息带正文，也就是「验收报告」。
+#
+# AGENTS.md「分支与提交」把验收报告定为强约束，但只写在文档里的规则会被绕过
+# —— 这个仓库的历史已经证明了（AGENTS.md 要求先开分支，main 上仍有直推）。
+# 所以这里做机器强制：正文为空就拒绝提交。
+#
+# 只强制「有没有」，不强制措辞：写清楚改了什么、验证了什么即可，
+# 具体格式见 AGENTS.md。
+#
+# 跳过：git commit --no-verify
+
+set -eu
+
+msg_file="$1"
+
+# 合并、撤销、fixup 类提交没有正文是正常的。
+subject=$(sed -n '1p' "$msg_file")
+case "$subject" in
+    Merge\ *|Revert\ *|fixup!\ *|squash!\ *|amend!\ *) exit 0 ;;
+esac
+# 注释行与模板尾部（git 的 "# ..." 与 scissors）不计入正文。
+body=$(sed -n '2,$p' "$msg_file" \
+    | sed '/^#/d' \
+    | sed '/^# ------------------------ >8 ------------------------$/,$d' \
+    | tr -d '[:space:]')
+
+if [ -z "$body" ]; then
+    cat >&2 <<'EOF'
+
+✋ 这条提交没有正文。
+
+AGENTS.md 要求每次提交都带验收报告 —— 为什么改、改成了什么、验证了什么。
+没有正文的提交在半年后无法审计，也无法解释当时的判断。
+
+    <scope>: <一句话说清改了什么>
+
+    — <改动前的行为，错在哪，必要时给 file.go:line>
+    <改成了什么，逐条对应上面每一处>
+
+    TestXxx（断言什么）为新增；
+    go vet ./...、go test ./...、go test -race ./... 全部通过。
+
+未验证的部分必须写明「未验证」及原因。
+
+确需空正文时：git commit --no-verify
+EOF
+    exit 1
+fi
+
+exit 0
