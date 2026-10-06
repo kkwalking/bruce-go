@@ -385,6 +385,12 @@ func (m *Manager) loadOne(ctx context.Context, manifest *Manifest) error {
 	if err != nil {
 		return fail(StageLoad, categoryForEngineError(err, CategoryInternal), "", err)
 	}
+	// A discarded runtime is reported as an event: silently replacing a
+	// damaged runtime would hide the plugin bug that damaged it.
+	poolName := manifest.Name
+	pool.OnDiscard(func(reason string) {
+		m.emit(EventRuntimeRecycled, map[string]any{"plugin": poolName, "reason": reason})
+	})
 
 	// A warm runtime proves the module actually evaluates and that every
 	// handler really is callable. It is discarded afterwards; the pool keeps
@@ -507,32 +513,118 @@ func (m *Manager) registerTools(plugin *loadedPlugin) error {
 	return nil
 }
 
+// maxReloadRetries bounds how many times one invocation may be re-pointed at a
+// newer generation. A reload that lands while a call is queued retries once; a
+// host that reloads in a tight loop must not be able to keep a call spinning.
+const maxReloadRetries = 3
+
 // invokeTool runs one plugin tool handler.
 //
 // The plugin is looked up by name on every call rather than captured, so a
 // reload swaps the code under a still-registered tool without leaving the old
 // generation reachable.
+//
+// Reload policy, which docs/plugin.md section 19 requires to be deterministic:
+// an invocation that already holds a runtime finishes on the code it started
+// with, and an invocation that was still queued for a runtime is re-pointed at
+// the new generation instead of failing. Closing the old pool is what makes the
+// queued case visible -- its Acquire returns ErrPoolClosed -- so this loop is
+// where the policy is actually implemented rather than merely documented.
 func (m *Manager) invokeTool(ctx context.Context, pluginName, toolName, handlerPath string, timeout time.Duration, args tool.Args) (string, error) {
-	plugin, ok := m.plugin(pluginName)
-	if !ok {
-		return "", NewError(pluginName, "", handlerPath, StageInvoke, CategoryInternal,
-			errors.New("plugin is not loaded"))
-	}
-	handler, ok := plugin.handlers[handlerPath]
-	if !ok {
-		return "", NewError(pluginName, plugin.manifest.File, handlerPath, StageInvoke, CategoryMissingHandler,
-			errors.New("handler was not resolved at load time"))
-	}
 	payload, err := json.Marshal(args)
 	if err != nil {
-		return "", NewError(pluginName, plugin.manifest.File, handlerPath, StageInvoke, CategoryMalformedResult,
+		return "", NewError(pluginName, "", handlerPath, StageInvoke, CategoryMalformedResult,
 			errors.New("tool arguments are not JSON-serializable: "+err.Error()))
 	}
-	out, err := m.invoke(ctx, plugin, handlerPath, handler, timeout, payload)
-	if err != nil {
-		return "", err
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return "", NewError(pluginName, "", handlerPath, StageInvoke, CategoryCancellation, err)
+		}
+		plugin, ok := m.plugin(pluginName)
+		if !ok {
+			return "", NewError(pluginName, "", handlerPath, StageInvoke, CategoryInternal,
+				errors.New("plugin is not loaded"))
+		}
+		handler, ok := plugin.handlers[handlerPath]
+		if !ok {
+			return "", NewError(pluginName, plugin.manifest.File, handlerPath, StageInvoke, CategoryMissingHandler,
+				errors.New("handler was not resolved at load time"))
+		}
+		generation := plugin.generation
+		out, invokeErr := m.invoke(ctx, plugin, handlerPath, handler, timeout, payload)
+		if invokeErr == nil {
+			return resultText(out), nil
+		}
+		if !m.reloadSuperseded(pluginName, generation, invokeErr) || attempt >= maxReloadRetries {
+			return "", invokeErr
+		}
+		// The plugin was reloaded while this call was waiting for a runtime, so
+		// the old pool refused it. Re-point the call at the current generation.
+		if !m.awaitReload(ctx, pluginName, generation) {
+			return "", invokeErr
+		}
+		m.emit(EventReloaded, map[string]any{
+			"plugin": pluginName, "handler": handlerPath, "generation": generation,
+			"reason": "invocation was re-pointed at the new generation after a reload",
+		})
 	}
-	return resultText(out), nil
+}
+
+// reloadSuperseded reports whether an invocation failed only because a reload
+// replaced the generation it was about to use.
+//
+// It is deliberately narrow: the error must be the closed old pool and the
+// plugin's generation must have moved on. A closed pool with no reload (a
+// manager shutting down) is a real failure and must not be retried.
+//
+// The check reads the monotonic generation counter rather than the loaded
+// plugin, because a reload removes the plugin before loading its replacement.
+// A call that was waiting for a runtime when the removal happened sees the
+// plugin as absent for that instant; treating "absent" as "not superseded"
+// would turn a routine reload into a failed tool call.
+func (m *Manager) reloadSuperseded(pluginName string, generation uint64, err error) bool {
+	if !errors.Is(err, jsengine.ErrPoolClosed) {
+		return false
+	}
+	m.mu.RLock()
+	current, tracking := m.generations[pluginName]
+	_, loaded := m.plugins[pluginName]
+	closed := m.closed
+	m.mu.RUnlock()
+	if closed {
+		// A closing manager is not a reload: the pool is closed for good.
+		return false
+	}
+	if !tracking {
+		return false
+	}
+	if current != generation {
+		return true
+	}
+	// The counter has already moved past this generation but the plugin is
+	// briefly unloaded mid-reload; the reload is still in progress.
+	return !loaded
+}
+
+// awaitReload waits for an in-progress reload of a plugin to publish its new
+// generation, so a superseded invocation can be re-pointed at it.
+func (m *Manager) awaitReload(ctx context.Context, pluginName string, generation uint64) bool {
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, ok := m.plugin(pluginName); ok {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			return false
+		case <-ticker.C:
+		}
+	}
 }
 
 // invoke runs a handler with timeout, cancellation, observation and error

@@ -454,9 +454,16 @@ A reload re-reads the manifest, recompiles the JavaScript, and replaces the
 plugin's tools, hooks, commands and runtimes. Nothing accumulates: reloading ten
 times leaves one tool, one hook and one command, and no leaked runtimes.
 
-The policy is deterministic: an invocation already in flight finishes on the
-code it started with, and the next invocation uses the new code. A reload never
-interrupts work in progress.
+The policy is deterministic and is enforced, not merely documented:
+
+- An invocation **already running** finishes on the code it started with. It is
+  never interrupted by a reload.
+- An invocation that was still **waiting for a runtime** is re-pointed at the
+  new generation and runs the new code. It does not fail.
+- Every later invocation uses the new code.
+
+So a reload never turns a tool call into a failure, and never races the caller
+into a mixed result.
 
 Editing a plugin and running `/plugin reload` is the normal development loop.
 
@@ -471,7 +478,10 @@ Editing a plugin and running `/plugin reload` is the normal development loop.
 
 Load problems — a bad manifest, a syntax error, a missing handler, a permission
 denial, a command conflict — appear as diagnostics under `/plugin` and as
-activity events. A broken plugin never stops Bruce from starting, and never
+activity events. Runtime discards are reported too: if a plugin damages its
+runtime badly enough that the pool must throw it away, you see
+`plugin.runtime_discarded` with the plugin name and the reason rather than a
+silent replacement. A broken plugin never stops Bruce from starting, and never
 affects another plugin. Set `plugins.failFast: true` to make a broken manifest
 stop startup instead.
 

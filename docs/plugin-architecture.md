@@ -154,6 +154,38 @@ resolve 的东西）时，引擎把 promise 对象序列化成 `{}`，管理器�
 修复：`bruce` 键改为逐项合并而不是替换。回归测试
 `TestAsyncHandlerResolves`（它依赖 `bruce.double` 与内建命名空间共存）。
 
+### 7.5 reload 期间排队中的调用会失败（确定性策略缺失）
+
+`docs/plugin.md` 第十九节要求 reload 对进行中的 invocation 有确定性策略：
+"旧 invocation 使用旧 generation 执行完成，新 invocation 使用新 generation"。
+
+实现是 generation 化的，进行中的调用确实跑完旧代码。但**排队等 runtime 的调用**
+会被 `removePlugin` 关掉的旧 pool 拒绝，返回 `jsengine: runtime pool is closed`，
+状态是 `failed`——既不是"用旧 generation 完成"，也不是"用新 generation 开始"，
+而是一次因为运维动作而失败的工具调用。
+
+`TestReloadDuringManyInFlightInvocations`（8 并发 + reload）复现了它。
+
+修复：`invokeTool` 在拿到 `ErrPoolClosed` 时判定这是否**仅由 reload 引起**
+（generation 计数器已前进），若是则等新 generation 发布后重新指向并重试，
+最多 3 次。判定必须读单调的 generation 计数器而不是"插件当前是否已加载"：
+reload 会先移除再加载，中间有一瞬插件是缺席的，把"缺席"当作"非 superseded"
+正是最初漏判的原因。manager 正在关闭时的 pool closed 不重试——那不是 reload。
+
+### 7.6 corrupted runtime 被静默替换，不可观测
+
+`EventRuntimeRecycled` 常量已声明，但没有任何代码 emit 它。pool 丢弃一个损坏
+runtime 时完全静默，宿主看不到"某个插件刚刚弄坏了一个 runtime"。
+
+修复：`PooledModule.OnDiscard` 回调，在 corrupted 与 pool-closed 两条丢弃路径上
+触发；plugin manager 接到回调后 emit `EventRuntimeRecycled`。
+回归测试 `TestPoolReportsDiscardedRuntimes`、`TestPoolReportsRuntimesDroppedByClose`、
+`TestRuntimeDiscardIsObservable`。
+
+两个修复都用变异测试确认过是**承重**的：把 `OnDiscard` 接线去掉 →
+`TestRuntimeDiscardIsObservable` 失败；把重指向逻辑短路 →
+`TestReloadDuringManyInFlightInvocations` 失败。
+
 ## 8. 与 docs/plugin.md 验收标准的对应
 
 | 验收项 | 验证方式 |

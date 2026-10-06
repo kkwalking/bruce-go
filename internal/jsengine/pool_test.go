@@ -431,3 +431,79 @@ func TestPoolCapacityIsBounded(t *testing.T) {
 		t.Fatalf("Capacity = %d, want %d", zero.Capacity(), DefaultPoolCapacity)
 	}
 }
+
+// TestPoolReportsDiscardedRuntimes proves a discard is observable.
+//
+// Replacing a damaged runtime silently would hide the plugin bug that damaged
+// it, so the pool reports the reason through a callback.
+func TestPoolReportsDiscardedRuntimes(t *testing.T) {
+	engine := &fakeEngine{}
+	pool := newTestPool(t, engine, 2)
+
+	var mu sync.Mutex
+	var reasons []string
+	pool.OnDiscard(func(reason string) {
+		mu.Lock()
+		defer mu.Unlock()
+		reasons = append(reasons, reason)
+	})
+
+	rt, err := pool.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Release(rt, true)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		count := len(reasons)
+		mu.Unlock()
+		if count > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a corrupted runtime was discarded without reporting it")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if reasons[0] != "corrupted" {
+		t.Fatalf("reason = %q, want %q", reasons[0], "corrupted")
+	}
+}
+
+// TestPoolReportsRuntimesDroppedByClose covers the other discard path: a
+// runtime released after the pool closed.
+func TestPoolReportsRuntimesDroppedByClose(t *testing.T) {
+	engine := &fakeEngine{}
+	pool := newTestPool(t, engine, 2)
+
+	var mu sync.Mutex
+	var reasons []string
+	pool.OnDiscard(func(reason string) {
+		mu.Lock()
+		defer mu.Unlock()
+		reasons = append(reasons, reason)
+	})
+
+	rt, err := pool.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Releasing after Close must close the runtime and say why.
+	pool.Release(rt, false)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reasons) != 1 || reasons[0] != "pool closed" {
+		rt.(*fakeRuntime).mu.Lock()
+		closed := rt.(*fakeRuntime).closed
+		rt.(*fakeRuntime).mu.Unlock()
+		t.Fatalf("reasons = %v (runtime closed = %v), want one %q", reasons, closed, "pool closed")
+	}
+}

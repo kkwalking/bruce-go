@@ -48,6 +48,29 @@ type PooledModule struct {
 
 	closeOnce sync.Once
 	closedCh  chan struct{}
+
+	// onDiscard, when set, is told why a runtime was thrown away. Discarding a
+	// runtime is the pool's most consequential decision, so it must be
+	// observable rather than silent.
+	onDiscard func(reason string)
+}
+
+// OnDiscard registers a callback invoked whenever a runtime is discarded
+// instead of being returned to the idle list. It is called at most once per
+// discarded runtime and must not block.
+func (p *PooledModule) OnDiscard(fn func(reason string)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onDiscard = fn
+}
+
+func (p *PooledModule) notifyDiscard(reason string) {
+	p.mu.Lock()
+	callback := p.onDiscard
+	p.mu.Unlock()
+	if callback != nil {
+		callback(reason)
+	}
 }
 
 // NewPooledModule creates a pool for one compiled module.
@@ -183,6 +206,7 @@ func (p *PooledModule) Release(rt Runtime, corrupted bool) {
 	if corrupted {
 		_ = rt.Close()
 		p.returnPermit()
+		p.notifyDiscard("corrupted")
 		return
 	}
 	// A pending interrupt must never reach the next caller: an interrupt that
@@ -195,6 +219,7 @@ func (p *PooledModule) Release(rt Runtime, corrupted bool) {
 		p.mu.Unlock()
 		_ = rt.Close()
 		p.returnPermit()
+		p.notifyDiscard("pool closed")
 		return
 	}
 	p.idle = append(p.idle, rt)

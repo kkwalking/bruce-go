@@ -1195,3 +1195,49 @@ export function run() {
 		t.Fatalf("bruce.storage is present without the permission: %q", got)
 	}
 }
+
+// TestRuntimeDiscardIsObservable proves a damaged runtime is reported as an
+// event rather than silently replaced.
+//
+// A host function that panics is what corrupts a runtime in practice, so the
+// fixture does exactly that and the test asserts the observation reaches the
+// manager's event stream.
+func TestRuntimeDiscardIsObservable(t *testing.T) {
+	fixture := newManagerFixture(t, permissivePolicy(), func(opts *ManagerOptions) {
+		opts.ExtraGlobals = map[string]jsengine.GlobalObject{
+			"bruce": {
+				"panic": jsengine.HostFunc(func(context.Context, json.RawMessage) (json.RawMessage, error) {
+					panic("host bridge panic")
+				}),
+			},
+		}
+	})
+	fixture.write(t, pluginFixture{
+		name: "panicker",
+		manifest: `{
+          "apiVersion": "bruce.plugin/v1", "name": "panicker", "version": "1.0.0",
+          "description": "Panics in a host function", "entry": "index.js",
+          "tools": [
+            {"name": "panicker_boom", "description": "panic", "handler": "boom"},
+            {"name": "panicker_fine", "description": "works", "handler": "fine"}
+          ]
+        }`,
+		files: map[string]string{"index.js": `
+export function boom() { return bruce.panic(); }
+export function fine() { return "fine"; }`},
+	})
+	if err := fixture.manager.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	outcome := fixture.registry.ExecuteResult(context.Background(), "panicker_boom", nil)
+	if outcome.Status == tool.ToolCallSuccess {
+		t.Fatalf("a panicking host function reported success: %+v", outcome)
+	}
+	if !fixture.events.has(EventRuntimeRecycled) {
+		t.Errorf("a discarded runtime was not reported; events = %v", fixture.events.kinds())
+	}
+	// The pool must have replaced the damaged runtime, so the next call works.
+	if got := fixture.registry.Execute(context.Background(), "panicker_fine", nil); got != "fine" {
+		t.Fatalf("the plugin did not recover after a corrupted runtime: %q", got)
+	}
+}
