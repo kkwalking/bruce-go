@@ -2,7 +2,7 @@
 
 > 本文对应 `docs/plugin.md` 第「四十、工作方式要求」：在修改代码前先描述现有架构、
 > 影响面、实现计划、必须保持不变的行为与安全边界。实现完成后的用户文档见
-> [plugins.md](plugins.md)。
+> [plugins.md](plugins.md)（英文版 [plugins.en.md](plugins.en.md)）。
 
 ## 1. 当前相关架构（以仓库实际代码为准）
 

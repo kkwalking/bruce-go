@@ -217,6 +217,8 @@ sudo pacman -S bubblewrap
 
 Bruce 支持用 JavaScript 插件扩展行为。插件是 `.bruce/plugins/<name>/` 下的一个目录，含 `plugin.json` manifest 与一个 ES module 入口，可以向 Bruce 注册 **Tool**、**Hook** 与 **Slash Command**。
 
+> **当前可用状态**：Tool、Slash Command、以及 `tool.before` / `tool.after` 两个 interceptor hook 已接入执行链并可正常使用。5 个 observer hook（`session.started`、`session.ended`、`tool.started`、`tool.completed`、`message.created`）与 `chat.before` 的校验、执行与失败策略已实现，但**运行时尚未接线，注册后不会触发**。`fs.read` / `fs.write` / `net` / `shell` 四种权限的判定已完整可用，但**尚无对应的 Host API 模块**供插件调用。详见 [docs/plugins.md](docs/plugins.md)。
+
 ```text
 <workspace>/.bruce/plugins/<name>/plugin.json   workspace 级
 ~/.bruce/plugins/<name>/plugin.json             user 级（同名时 workspace 覆盖 user）
@@ -251,7 +253,7 @@ export function scan(input) {
 - **没有 `require` / `process` / `fs` / `net` / `child_process`**。插件只能通过 `bruce:api`、`bruce:storage`、`bruce:events` 这些受控 Host API 访问外部能力，每次调用都先过权限校验。
 - **import 受控**：只允许插件目录内的相对模块与 `bruce:*` virtual modules；npm、`node_modules`、Node builtin、绝对路径、网络加载全部拒绝，路径穿越与符号链接逃逸都会被拦下。
 - **动态代码默认关闭**：`eval` 与 `Function` 构造器抛 `EvalError`，内建原型被冻结。
-- **Hook 修改数据后会重新校验**：`tool.before` 把 `{"path":"src/a.go"}` 改成 `{"path":"/etc/passwd"}` 会被安全层按**最终数据**拒绝；插件无法绕过 approval、无法改沙箱模式、无法给自己提权。
+- **Hook 修改数据后会重新校验**：`tool.before` 把 `{"path":"src/a.go"}` 改成 `{"path":"/etc/passwd"}` 会被安全层按**最终数据**拒绝；插件无法绕过 approval、无法改沙箱模式、无法给自己提权。（仅对已接线的 `tool.before` / `tool.after` 生效。）
 - **取消贯通**：Ctrl-C、Tool 超时、session/agent 取消都能终止正在运行的 JS，包括 `while(true)`。
 - **reload 无残留**：`/plugin reload` 重编译并替换 generation，不留重复 Tool / Hook / Command，也不泄漏旧 Runtime。
 
@@ -259,7 +261,7 @@ export function scan(input) {
 
 `plugins.enabled: false` 可完全关闭插件发现，此时 Bruce 行为与引入插件系统前一致。
 
-完整作者文档（manifest 字段、Host API、Hook 语义与失败策略、存储 scope、调试与已知限制）见 [docs/plugins.md](docs/plugins.md)；架构与安全边界推导见 [docs/plugin-architecture.md](docs/plugin-architecture.md)。
+完整作者文档（manifest 字段、Host API、Hook 语义与失败策略、存储 scope、调试与已知限制）见 [docs/plugins.md](docs/plugins.md)（英文版 [docs/plugins.en.md](docs/plugins.en.md)）；架构与安全边界推导见 [docs/plugin-architecture.md](docs/plugin-architecture.md)。
 
 ## 原生沙箱
 

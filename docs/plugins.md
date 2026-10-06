@@ -1,75 +1,68 @@
-# Bruce Go JavaScript Plugins
+# Bruce Go JavaScript 插件
 
-Bruce Go can be extended with JavaScript plugins. A plugin is a directory with a
-manifest and a JavaScript ES module; it can contribute tools, hooks and slash
-commands, and it can use a small set of host capabilities the user explicitly
-grants.
+Bruce Go 可以用 JavaScript 插件扩展。一个插件就是「一个 manifest + 一个 JavaScript
+ES module」组成的目录，它可以向 Bruce 贡献 **Tool**、**Hook** 与 **Slash Command**，
+并使用一小组由用户显式授予的宿主能力。
 
-This document is the plugin author's reference. The design rationale, the
-module layout and the security model are in
-[plugin-architecture.md](plugin-architecture.md).
+本文是插件作者参考手册。设计取舍、模块划分与安全模型推导见
+[plugin-architecture.md](plugin-architecture.md)。
 
-## What a plugin is
+> 英文版本见 [plugins.en.md](plugins.en.md)。
 
-A plugin is:
+## 插件是什么
 
-- a **directory** under a plugin search root,
-- containing a **`plugin.json` manifest** that declares what the plugin offers
-  and what it needs,
-- and a **JavaScript entry module** that exports the handler functions the
-  manifest names.
+一个插件是：
 
-A plugin is not a separate agent runtime. The tools it defines are registered
-into Bruce's existing tool registry and then go through exactly the same
-scheduling, concurrency control, sandbox, approval, network policy,
-cancellation and event logging as a built-in tool. The agent cannot tell where
-a tool came from, and it does not need to.
+- 插件搜索根下的一个**目录**；
+- 目录里有一个 **`plugin.json` manifest**，声明插件提供什么、需要什么；
+- 以及一个 **JavaScript 入口模块**，导出 manifest 中指名引用的 handler 函数。
+
+插件**不是**第二套 Agent Runtime。它定义的 Tool 会注册进 Bruce 原有的 Tool Registry，
+然后与内建工具经历**完全相同**的调度、并发控制、沙箱、审批、网络策略、取消与事件记录。
+Agent 无法分辨一个 Tool 来自哪里，也不需要分辨。
 
 ```text
-<workspace>/.bruce/plugins/<name>/plugin.json     workspace plugin
+<workspace>/.bruce/plugins/<name>/plugin.json     workspace 级插件
 <workspace>/.bruce/plugins/<name>/index.js
-<home>/.bruce/plugins/<name>/plugin.json          user plugin
+<home>/.bruce/plugins/<name>/plugin.json          user 级插件
 <home>/.bruce/plugins/<name>/index.js
 ```
 
-`<name>.json` is also accepted as a single-file manifest next to its module.
+也支持 `<name>.json` 这种与模块同级的单文件 manifest 布局。
 
-### Plugin directories
+### 插件目录
 
-| Root | Path | Scope |
+| 级别 | 路径 | 生效范围 |
 |---|---|---|
-| Workspace | `<workspace>/.bruce/plugins/` | This project only |
-| User | `~/.bruce/plugins/` | Every project |
+| Workspace | `<workspace>/.bruce/plugins/` | 仅当前项目 |
+| User | `~/.bruce/plugins/` | 所有项目 |
 
-**Precedence: a workspace plugin overrides a user plugin with the same name.**
-The override is listed by `/plugin`. Within one root, plugins load in name
-order, so the result never depends on directory iteration order.
+**优先级：同名时 workspace 插件覆盖 user 插件**，覆盖关系会列在 `/plugin` 里。
+同一个根目录内按插件名顺序加载，因此结果不依赖目录遍历顺序。
 
-Two plugins may not declare the same tool name or the same command name. The
-first declarer (by plugin name) keeps it; the loser's declaration is dropped and
-reported as a diagnostic. Nothing is silently overwritten.
+两个插件不得声明同名 Tool 或同名 Command。按插件名排序，先声明者保留，
+后来者的该条声明被丢弃并报为诊断——不会有任何静默覆盖。
 
-## Manifest format
+## Manifest 格式
 
-`plugin.json` is JSON with camelCase field names. Unknown field names are
-rejected — a typo must not silently disable a setting you thought you had
-configured.
+`plugin.json` 是 JSON，字段名用 camelCase。**未知字段名会被拒绝**：拼错的字段
+不能静默失效，否则你会以为配置生效了。
 
 ```json
 {
   "apiVersion": "bruce.plugin/v1",
   "name": "todo-tracker",
   "version": "1.0.0",
-  "description": "Tracks TODOs found in the workspace",
+  "description": "统计 workspace 中的 TODO",
   "entry": "index.js",
   "permissions": ["fs.read"],
   "concurrency": { "maxRuntimes": 2, "parallelSafe": true },
   "tools": [
     {
       "name": "todo_scan",
-      "description": "Scan the workspace for TODO comments",
+      "description": "扫描 workspace 中的 TODO 注释",
       "handler": "scan",
-      "promptSnippet": "Find TODO comments in the workspace",
+      "promptSnippet": "查找 workspace 中的 TODO 注释",
       "schema": {
         "type": "object",
         "properties": {
@@ -91,41 +84,38 @@ configured.
     { "event": "tool.before", "handler": "guard", "timeoutMs": 2000 }
   ],
   "commands": [
-    { "name": "todo-report", "description": "Print the TODO report", "handler": "report", "usage": "/todo-report [path]" }
+    { "name": "todo-report", "description": "打印 TODO 报告", "handler": "report", "usage": "/todo-report [path]" }
   ],
   "metadata": { "homepage": "https://example.com" }
 }
 ```
 
-### Fields
+### 字段说明
 
-| Field | Required | Meaning |
+| 字段 | 必填 | 含义 |
 |---|---|---|
-| `apiVersion` | yes | Must be `bruce.plugin/v1`. |
-| `name` | yes | `^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`, at most 64 characters. |
-| `version` | yes | `1.2.3`, optionally with `-prerelease` or `+build`. |
-| `description` | yes | Shown by `/plugin`. |
-| `entry` | yes | Path to the JavaScript module, relative to the plugin directory. Must stay inside it. |
-| `permissions` | no | Plugin-wide permission requests. See [Permission model](#permission-model). |
-| `concurrency` | no | `maxRuntimes` (0–64, default 4) and `parallelSafe` (default false). |
-| `tools` | no | Tool declarations. |
-| `hooks` | no | Hook declarations. |
-| `commands` | no | Slash command declarations. |
-| `metadata` | no | Free-form string map. Keys are yours; values must be strings. |
+| `apiVersion` | 是 | 必须是 `bruce.plugin/v1`。 |
+| `name` | 是 | `^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`，最长 64 字符。 |
+| `version` | 是 | `1.2.3`，可带 `-prerelease` 或 `+build`。 |
+| `description` | 是 | 会显示在 `/plugin` 中。 |
+| `entry` | 是 | JavaScript 模块路径，相对插件目录，且必须留在该目录内。 |
+| `permissions` | 否 | 插件级权限请求，见[权限模型](#权限模型)。 |
+| `concurrency` | 否 | `maxRuntimes`（0–64，默认 4）与 `parallelSafe`（默认 false）。 |
+| `tools` | 否 | Tool 声明。 |
+| `hooks` | 否 | Hook 声明。 |
+| `commands` | 否 | Slash Command 声明。 |
+| `metadata` | 否 | 自由字符串映射。key 由你决定，value 必须是字符串。 |
 
-A tool declaration needs `name`, `description` and `handler`. `schema` defaults
-to an empty object schema. `permissions` on a tool narrow the plugin-wide set
-for that tool; a tool with no `permissions` inherits the plugin-wide ones.
-`parallelSafe` and `timeoutMs` may be set per tool.
+Tool 声明必须给出 `name`、`description`、`handler`。`schema` 缺省为空对象 schema。
+Tool 上的 `permissions` 会在该 Tool 范围内收窄插件级声明；不写 `permissions` 的
+Tool 继承插件级声明。`parallelSafe` 与 `timeoutMs` 可以逐 Tool 设置。
 
-A command name may not collide with a built-in command such as `/sandbox`,
-`/hitl` or `/plugin`. A tool name may not collide with a built-in tool such as
-`read_file` or `execute_command`. Both are rejected at load time.
+命令名不得与内建命令（如 `/sandbox`、`/hitl`、`/plugin`）冲突；工具名不得与内建工具
+（如 `read_file`、`execute_command`）冲突。两者都在**加载期**被拒绝。
 
-## JavaScript entry
+## JavaScript 入口
 
-The entry is an ES module. Handlers are **named exports**, and the manifest
-points at them by name:
+入口是 ES module。Handler 是**具名导出**，manifest 用名字指向它们：
 
 ```js
 // index.js
@@ -133,7 +123,7 @@ import { get, set } from "bruce:storage";
 import { info } from "bruce:api";
 
 export function scan(input) {
-  // input is the tool arguments object, exactly as the model produced it.
+  // input 就是模型的工具参数对象，原样传入。
   const { path, options = {}, extensions = [] } = input;
   const recursive = options.recursive === true;
   const depth = options.depth ?? 3;
@@ -142,86 +132,78 @@ export function scan(input) {
 }
 
 export function guard(input) {
-  // Return { block: true, reason } to refuse a tool call.
+  // 返回 { block: true, reason } 可拒绝一次工具调用。
   if (input.tool === "execute_command" && /rm -rf/.test(input.args.command ?? "")) {
-    return { block: true, reason: "destructive command" };
+    return { block: true, reason: "危险命令" };
   }
   return { args: input.args };
 }
 
 export function report() {
-  return { output: "TODO report: " + (get({ scope: "plugin", key: "lastPath" }).value ?? "none") };
+  return { output: "TODO 报告：" + (get({ scope: "plugin", key: "lastPath" }).value ?? "无") };
 }
 ```
 
-Handlers may be nested: `"handler": "tools.read"` resolves the `read` property
-of the exported `tools` object.
+Handler 可以是嵌套路径：`"handler": "tools.read"` 会解析导出对象 `tools` 的
+`read` 属性。
 
-### Why named exports and not `registerTool()`
+### 为什么用具名导出而不是 `registerTool()`
 
-Handlers are resolved from static metadata **before any JavaScript runs**. That
-is what makes the plugin's shape knowable at load time: a missing handler is a
-startup error with a file and a line, not a surprise on the first call. It also
-lets several runtimes serve one plugin without sharing closures, and makes
-reload a matter of recompiling a module rather than tearing down live state.
+Handler 是在**任何 JavaScript 执行之前**就由静态元数据解析出来的。这正是让插件形态
+在加载期即可知的关键：handler 写错是带文件名和行号的启动期错误，而不是第一次调用时
+的意外。它同时让多个 Runtime 服务同一个插件时不必共享闭包，也让 reload 变成"重新
+编译一个模块"，而不是"拆掉活着的状态"。
 
-### Tool arguments and results
+### Tool 参数与返回值
 
-Arguments arrive as one object. The standard JSON data model is preserved
-exactly: nested objects, arrays, booleans, numbers, `null` and strings all
-survive without stringification or flattening.
+参数以单个对象传入。标准 JSON 数据模型被**无损**保留：嵌套对象、数组、布尔、
+数字、`null` 与字符串都不会被字符串化或扁平化。
 
 ```js
 export function echo(input) {
-  return input;                 // structure and types come back unchanged
+  return input;                 // 结构与类型原样返回
 }
 export function text(input) {
-  return "a plain string is returned to the agent as-is";
+  return "纯字符串会原样交给 Agent";
 }
 ```
 
-A returned string becomes the tool's text output. Any other value is returned
-as pretty-printed JSON. Throwing produces a structured failure that names the
-plugin, the handler and the stage.
+返回字符串会成为该 Tool 的文本输出；其它值会以美化 JSON 返回。抛异常会产生结构化
+失败，其中带插件名、handler 与失败阶段。
 
-### Timeouts
+### 超时
 
-Each invocation is bounded. `timeoutMs` on a tool, hook or command declaration
-sets its own bound; otherwise the default (30s) applies. The agent's context is
-always the outer bound, so a Ctrl-C stops a plugin even when its own timeout has
-not elapsed.
+每次调用都有上界。Tool / Hook / Command 声明上的 `timeoutMs` 设置各自的上界；
+不设则用默认值（30 秒）。Agent 的 context 始终是最外层上界，所以即使插件自己的
+超时还没到，Ctrl-C 也能终止它。
 
-## Permission model
+## 权限模型
 
-A manifest's `permissions` are a **request**. They are never a grant. Bruce's
-host policy decides what a plugin actually receives, and a plugin can never
-grant itself anything.
+Manifest 里的 `permissions` 是**请求**，永远不是授予。插件实际拿到什么由 Bruce 的
+Host Policy 决定，插件无法给自己授予任何东西。
 
-| Permission | Grants |
+| 权限 | 授予的能力 |
 |---|---|
-| `fs.read` | Read files inside the workspace through host APIs. |
-| `fs.write` | Write files inside the workspace through host APIs. |
-| `net` | Make network requests through host APIs. |
-| `shell` | Run shell commands through host APIs. |
-| `storage` | Use `bruce:storage`. |
-| `events` | Emit observation events. |
+| `fs.read` | 通过宿主 API 读取 workspace 内的文件。 |
+| `fs.write` | 通过宿主 API 写入 workspace 内的文件。 |
+| `net` | 通过宿主 API 发起网络请求。 |
+| `shell` | 通过宿主 API 执行 shell 命令。 |
+| `storage` | 使用 `bruce:storage`。 |
+| `events` | 发出观测事件。 |
 
-The rules, in order:
+判定顺序：
 
-1. **Denied wins.** A permission in `plugins.deny` is never granted.
-2. **Per-plugin overrides global.** `plugins.perPlugin.<name>.allow` replaces
-   `plugins.allow` for that plugin entirely.
-3. **A plugin only gets what it declared.** A permission the host allows but the
-   manifest did not request is not granted. It is reported as "undeclared", so
-   you can see the mismatch.
-4. **The sandbox must be able to enforce it.** A capability the sandbox cannot
-   enforce is refused at load time. A plugin is never told it may read the
-   filesystem when the host cannot actually stop it from reading anything else.
+1. **拒绝永远优先。** 出现在 `plugins.deny` 中的权限永不授予。
+2. **插件级覆盖全局。** `plugins.perPlugin.<name>.allow` 会**整体替换**该插件的
+   `plugins.allow`。
+3. **插件只拿到自己声明过的。** 策略允许但 manifest 没请求的权限不会授予，只会被
+   记为 "undeclared"，让你看到这处不一致。
+4. **沙箱必须能强制执行。** 沙箱无法强制执行的能力会在加载期被拒绝。宿主不会在
+   其实拦不住插件读任意文件的情况下，告诉插件"你可以读文件系统"。
 
-By default **no permission is granted**. Installing a plugin does not by itself
-give it filesystem, network or shell access.
+默认**不授予任何权限**。安装一个插件本身并不会给它文件系统、网络或 shell 访问。
 
-### Configuring the policy
+### 配置策略
 
 ```json
 {
@@ -239,35 +221,40 @@ give it filesystem, network or shell access.
 }
 ```
 
-`plugins.enabled: false` turns discovery off entirely: Bruce then behaves exactly
-as it did before the plugin system existed.
+`plugins.enabled: false` 会完全关闭插件发现：此时 Bruce 的行为与引入插件系统之前
+完全一致。
 
-### What a plugin cannot do
+### 插件做不到的事
 
-A plugin has no `require`, no `process`, no `os`, no `fetch`, no filesystem, no
-network socket and no shell. Those names are not defined in its runtime. The
-only way out is a host capability, and every host capability is checked against
-the grant before it runs.
+插件的运行时里**不存在** `require`、`process`、`os`、`fetch`、文件系统、网络 socket
+和 shell。这些名字在它的运行时中未定义。唯一的出口是宿主能力，而每个宿主能力在
+执行前都会对照授权检查。
 
 ## Host API
 
-The host installs one global, `bruce`. What is present depends on the grant: a
-plugin without the `storage` permission has no `bruce.storage`.
+宿主只安装一个全局对象 `bruce`。它里面有什么取决于授权：没有 `storage` 权限的插件
+没有 `bruce.storage`。
+
+> **当前已实现的模块是 `bruce:api`、`bruce:storage`、`bruce:events`。**
+> `fs.read`、`fs.write`、`net`、`shell` 四种权限在 manifest 与策略层已完整可用
+> （会被正确判定、拒绝、并要求审批），但**尚无对应的 `bruce:fs` / `bruce:net`
+> 模块**供插件实际调用。也就是说插件目前可以"被允许拥有"这些能力，但还没有
+> "使用"这些能力的 API。
 
 ### `bruce:api`
 
 ```js
 import { apiVersion, name, version, source, info } from "bruce:api";
 // apiVersion: "bruce.plugin/v1"
-// name, version, source: this plugin's own identity
-// info(): the same values as an object
+// name, version, source: 该插件自身的身份
+// info(): 与上面同样的值，以对象形式返回
 ```
 
 ### `bruce:storage`
 
-Long-lived state belongs here, **not** in a module global. Several runtimes
-serve one plugin, so a module global in one runtime is not the same variable in
-the next; a value stored there will appear to change at random.
+长期状态放在这里，**不要**放在模块全局变量里。一个插件由多个 Runtime 服务，
+某个 Runtime 里的模块全局与下一个 Runtime 里的同名变量并不是同一个；存在那里的值
+会表现得"自己会变"。
 
 ```js
 import { get, set, remove, keys } from "bruce:storage";
@@ -279,18 +266,17 @@ remove({ scope: "plugin", key: "lastRun" });
 keys({ scope: "plugin" });   // { keys: ["lastRun"] }
 ```
 
-Scopes:
+作用域：
 
-| Scope | Lifetime |
+| 作用域 | 生命周期 |
 |---|---|
-| `invocation` | One tool call. Cleared when the call ends. |
-| `session` | The current session. |
-| `plugin` | Until the plugin is unloaded. |
-| `workspace` | The current workspace. |
-| `global` | Every workspace. |
+| `invocation` | 一次工具调用。调用结束时清理。 |
+| `session` | 当前 session。 |
+| `plugin` | 直到插件被卸载。 |
+| `workspace` | 当前 workspace。 |
+| `global` | 所有 workspace。 |
 
-Storage is namespaced per plugin. Plugin A cannot read or overwrite plugin B's
-values, even with the same key and scope.
+存储按插件命名空间隔离。插件 A 无法读取或覆盖插件 B 的值，即使 key 与作用域相同。
 
 ### `bruce:events`
 
@@ -299,70 +285,70 @@ import { emit } from "bruce:events";
 emit("todo.scan.finished", { count: 12 });
 ```
 
-Emitting requires the `events` permission. Events are namespaced by plugin and
-appear in Bruce's activity stream.
+发出事件需要 `events` 权限。事件按插件命名，会出现在 Bruce 的活动流中。
 
-## Import restrictions
+## Import 限制
 
-Only two kinds of import resolve:
+只有两类 import 能解析成功：
 
-1. **Relative modules inside the plugin's own directory** — `./lib/util.js`,
-   `../shared.js`. A relative import is resolved against the importing module,
-   so a module in `lib/` importing `./sibling.js` gets its own sibling.
-2. **Host virtual modules** — `bruce:api`, `bruce:storage`, `bruce:events`,
-   each available only when the plugin was granted the matching permission.
+1. **插件自身目录内的相对模块** —— `./lib/util.js`、`../shared.js`。相对 import 以
+   导入方所在目录为基准解析，因此 `lib/` 里的模块 `import "./sibling.js"` 拿到的是
+   它自己的同级模块。
+2. **宿主 virtual module** —— `bruce:api`、`bruce:storage`、`bruce:events`，
+   每个仅在该插件被授予对应权限时才可用。
 
-Everything else is refused:
+其余一切都被拒绝：
 
-- bare specifiers (`left-pad`, `lodash`) — no npm resolution,
-- `node_modules`, even when the directory exists,
-- Node builtins (`fs`, `path`, `child_process`, `node:fs`),
-- absolute paths and `file://` URLs,
-- network URLs.
+- 裸标识符（`left-pad`、`lodash`）—— 不做 npm 解析；
+- `node_modules`，即使该目录真实存在；
+- Node 内建模块（`fs`、`path`、`child_process`、`node:fs`）；
+- 绝对路径与 `file://` URL；
+- 网络 URL。
 
-Path traversal is blocked after symlink resolution, so a symlink pointing
-outside the plugin directory does not become a way out:
+路径穿越在**解析符号链接之后**判定，因此指向插件目录之外的软链接不会成为一条出路：
 
 ```js
-import "../../../../etc/passwd";   // refused
-import "./escape-link.js";         // refused when it resolves outside
+import "../../../../etc/passwd";   // 拒绝
+import "./escape-link.js";         // 当它解析到目录之外时拒绝
 ```
 
-Modules are compiled once and shared by every runtime of that plugin, so a warm
-invocation does not pay the parse cost again.
+模块只编译一次并被该插件的所有 Runtime 共享，因此热调用不会重复付出解析成本。
 
-## Dynamic code
+## 动态代码
 
-`eval`, the `Function` constructor and any equivalent are **disabled by
-default**. A plugin has no reason to generate code, and generated code is the
-classic way out of a sandbox. Attempting it throws an `EvalError`:
+`eval`、`Function` 构造器及任何等价能力**默认关闭**。插件没有理由生成代码，而生成
+代码是逃出沙箱的经典手法。尝试使用会抛 `EvalError`：
 
 ```js
 eval("1+1");                    // EvalError
 new Function("return 1")();     // EvalError
 ```
 
-`plugins.allowDynamicCode: true` turns it back on. That is for a trusted
-deployment only.
+`plugins.allowDynamicCode: true` 可以重新打开，仅适用于可信部署。
 
-The built-in prototypes are frozen and shared, so a plugin cannot patch
-`Array.prototype` to change how another plugin's code behaves.
+内建原型被冻结并共享，因此插件无法通过改写 `Array.prototype` 影响另一个插件的代码
+行为。
 
-## Hooks
+## Hook
 
-Hooks are declared in the manifest and split into two kinds.
+Hook 在 manifest 中声明，分两类。
 
-### Observer hooks
+> **接线状态（重要）**：目前只有 `tool.before` 与 `tool.after` 被真正接入执行链
+> （经由 `integrated.Runtime` 注册的 `ToolInterceptor`）。下表标注了每个事件的实际
+> 状态。未被接线的 5 个 observer 事件与 `chat.before`，其校验、执行、失败策略与
+> 单元测试都已实现，但运行时目前不会调用它们——**注册成功不等于会触发**。
 
-Observation only. They cannot change or stop anything.
+### Observer Hook（观察）
 
-| Event | Fires |
-|---|---|
-| `session.started` | A session begins. |
-| `session.ended` | A session ends. |
-| `tool.started` | A tool call begins. |
-| `tool.completed` | A tool call finishes. |
-| `message.created` | A message is produced. |
+只能观察，不能改变或阻止任何流程。
+
+| 事件 | 触发时机 | 当前状态 |
+|---|---|---|
+| `session.started` | 会话开始。 | ⚠️ 未接线，不会触发 |
+| `session.ended` | 会话结束。 | ⚠️ 未接线，不会触发 |
+| `tool.started` | 工具调用开始。 | ⚠️ 未接线，不会触发 |
+| `tool.completed` | 工具调用结束。 | ⚠️ 未接线，不会触发 |
+| `message.created` | 产生一条消息。 | ⚠️ 未接线，不会触发 |
 
 ```js
 export function onToolStarted(input) {
@@ -370,17 +356,20 @@ export function onToolStarted(input) {
 }
 ```
 
-### Interceptor hooks
+> 替代方案：Bruce 自身的 `event.Bus` 已经会发出 `tool_call_started`、
+> `tool_call_completed`、`message_completed`、`run_started` 等事件。但这些是
+> **插件主动上报**，不是宿主回调插件，语义不同。
 
-These can change or stop a flow. They run **synchronously, in a deterministic
-order**: by plugin name, then by declaration order. The second interceptor sees
-what the first one produced.
+### Interceptor Hook（拦截）
 
-| Event | Can |
-|---|---|
-| `chat.before` | Rewrite the message list, or block the turn. |
-| `tool.before` | Rewrite the arguments, or block the call. |
-| `tool.after` | Rewrite the result text. |
+可以改变或阻止流程。它们**同步、按确定顺序**执行：先按插件名，再按声明顺序。
+后一个 interceptor 能看到前一个产生的数据。
+
+| 事件 | 能做什么 | 当前状态 |
+|---|---|---|
+| `tool.before` | 改写参数，或拒绝调用。 | ✅ 已接线 |
+| `tool.after` | 改写结果文本。 | ✅ 已接线 |
+| `chat.before` | 改写消息列表，或拦截整个回合。 | ⚠️ 未接线，不会触发 |
 
 ```js
 export function guard(input) {
@@ -389,185 +378,162 @@ export function guard(input) {
 }
 ```
 
-Return shapes:
+返回结构：
 
-- `{ "args": {...} }` — replaces the arguments. A tool's declared schema and
-  every policy, sandbox and approval check then run against **these** values,
-  not the originals.
-- `{ "block": true, "reason": "..." }` — refuses the call. The reason is shown
-  to the model.
-- `{ "result": { "output": "...", "status": "success" } }` — from `tool.after`.
+- `{ "args": {...} }` —— 替换参数。该 Tool 声明的 schema、以及所有策略、沙箱、
+  审批检查随后都针对**这些**值执行，而不是原始值。
+- `{ "block": true, "reason": "..." }` —— 拒绝调用，reason 会展示给模型。
+- `{ "result": { "output": "...", "status": "success" } }` —— 由 `tool.after` 返回。
 
-An interceptor cannot grant a permission, disable the sandbox, skip approval or
-change the security mode. Extra fields in a hook result are ignored, and every
-security check runs again on the final data. If your hook rewrites
-`{"path": "src/a.go"}` into `{"path": "/etc/passwd"}`, the call is refused — the
-original argument having passed is irrelevant.
+Interceptor 无法授予权限、禁用沙箱、跳过审批或改变安全模式。Hook 返回结果中的额外
+字段会被忽略，且所有安全检查都会针对**最终数据**重新执行。如果你的 hook 把
+`{"path": "src/a.go"}` 改成 `{"path": "/etc/passwd"}`，这次调用会被拒绝——原始参数
+曾经通过检查这件事无关紧要。
 
-### Hook failure policy
+### Hook 失败策略
 
-| Hook | On failure |
+| Hook | 失败时的行为 |
 |---|---|
-| Observer | Logged and skipped. Observation never breaks a session. |
-| `tool.before`, `chat.before` | **Fails closed.** The invocation is refused. A guard that cannot run must not be skipped. |
-| `tool.after` | The produced result is kept and the failure is recorded. The operation already happened. |
+| Observer | 记录并跳过。观察永远不能弄坏会话。 |
+| `tool.before`、`chat.before` | **fail closed**：拒绝该次调用。跑不起来的守卫绝不能被跳过。 |
+| `tool.after` | 保留已经产生的结果，并记录失败。操作已经发生了。 |
 
-A failing plugin never disables another plugin: each hook runs in its own
-invocation.
+一个插件失败不会让另一个插件失效：每个 hook 在自己的调用里执行。
 
-## Slash commands
+## Slash Command
 
 ```js
 export function report(input) {
   // input: { command, args: [...], raw, joined }
-  return { output: "report" };     // or return a plain string
+  return { output: "report" };     // 也可以直接返回字符串
 }
 ```
 
-Plugin commands appear in `/help` and in Tab completion alongside built-ins.
-A plugin command may never override a built-in command; the conflict is reported
-and the built-in wins.
+插件命令与内建命令一起出现在 `/help` 与 Tab 补全中。插件命令永远不能覆盖内建命令；
+冲突会被报出，内建命令胜出。
 
-## Cancellation
+## 取消
 
-Cancellation is the same for a plugin as for any other tool. A Ctrl-C, a tool
-timeout, a session cancel, an agent cancellation or process shutdown all reach
-the running JavaScript and stop it, including a `while (true)` loop:
+插件与其它工具共用同一套取消机制。Ctrl-C、工具超时、session 取消、agent 取消或进程
+退出都会到达正在运行的 JavaScript 并终止它，包括 `while (true)` 死循环：
 
 ```js
-export function spin() { let i = 0; while (true) { i++; } }   // stoppable
+export function spin() { let i = 0; while (true) { i++; } }   // 可被终止
 ```
 
-After a cancellation the runtime is returned to the pool cleanly, so the next
-call works. A cancelled call never leaves the pool deadlocked or the session
-stuck.
+取消之后 Runtime 会被干净地归还到池中，因此下一次调用可以正常工作。被取消的调用
+不会让池死锁，也不会让会话卡住。
 
 ## Reload
 
 ```text
-/plugin reload                # every plugin
-/plugin reload todo-tracker   # one plugin
-/plugin unload todo-tracker   # remove it
+/plugin reload                # 重新加载全部插件
+/plugin reload todo-tracker   # 重新加载单个插件
+/plugin unload todo-tracker   # 卸载
 ```
 
-A reload re-reads the manifest, recompiles the JavaScript, and replaces the
-plugin's tools, hooks, commands and runtimes. Nothing accumulates: reloading ten
-times leaves one tool, one hook and one command, and no leaked runtimes.
+Reload 会重新读取 manifest、重新编译 JavaScript，并替换该插件的 Tool、Hook、Command
+与 Runtime。不会有任何累积：reload 十次之后仍然只有一个 Tool、一个 Hook、一个
+Command，也不会泄漏 Runtime。
 
-The policy is deterministic and is enforced, not merely documented:
+策略是确定的，而且是**被强制执行**的，不只是写在文档里：
 
-- An invocation **already running** finishes on the code it started with. It is
-  never interrupted by a reload.
-- An invocation that was still **waiting for a runtime** is re-pointed at the
-  new generation and runs the new code. It does not fail.
-- Every later invocation uses the new code.
+- **正在运行**的调用用它开始时的代码跑完，绝不会被 reload 打断。
+- 仍在**等待 Runtime** 的调用会被重新指向新 generation 并执行新代码，**不会失败**。
+- 之后的所有调用都使用新代码。
 
-So a reload never turns a tool call into a failure, and never races the caller
-into a mixed result.
+因此 reload 永远不会把一次工具调用变成失败，也不会让调用方拿到新旧混合的结果。
 
-Editing a plugin and running `/plugin reload` is the normal development loop.
+改完插件后执行 `/plugin reload`，这就是日常开发循环。
 
-## Debugging
+## 调试
 
 ```text
-/plugin              # loaded plugins, granted permissions, diagnostics
-/plugin info <name>  # one plugin in detail
-/plugin hooks        # registered hooks, in execution order
-/status              # plugin count, tool count, hook count
+/plugin              # 已加载的插件、已授予的权限、诊断信息
+/plugin info <name>  # 单个插件详情
+/plugin hooks        # 已注册的 hook 及其执行顺序
+/status              # 插件数、工具数、hook 数
 ```
 
-Load problems — a bad manifest, a syntax error, a missing handler, a permission
-denial, a command conflict — appear as diagnostics under `/plugin` and as
-activity events. Runtime discards are reported too: if a plugin damages its
-runtime badly enough that the pool must throw it away, you see
-`plugin.runtime_discarded` with the plugin name and the reason rather than a
-silent replacement. A broken plugin never stops Bruce from starting, and never
-affects another plugin. Set `plugins.failFast: true` to make a broken manifest
-stop startup instead.
+加载问题——manifest 错误、语法错误、handler 缺失、权限拒绝、命令冲突——会作为诊断
+出现在 `/plugin` 下，并作为活动事件出现。Runtime 丢弃也会被上报：如果插件把 Runtime
+弄坏到池必须扔掉它，你会看到 `plugin.runtime_discarded`，带插件名与原因，而不是一次
+静默替换。**坏插件永远不会阻止 Bruce 启动**，也不会影响其它插件。设置
+`plugins.failFast: true` 可以让坏 manifest 直接阻止启动。
 
-Thrown errors carry the plugin name, the plugin path, the handler and the
-failure stage, so a message tells you exactly what failed where. Credentials are
-redacted from error text.
+抛出的错误带插件名、插件路径、handler 与失败阶段，因此一条消息就能说清"哪里、什么
+阶段、失败了什么"。错误文本中的凭据会被脱敏。
 
-Common mistakes:
+常见错误：
 
-| Symptom | Cause |
+| 现象 | 原因 |
 |---|---|
-| "field timeoutMS" | Manifest field names are case-sensitive: it is `timeoutMs`. |
-| "has no exported function" | The `handler` names an export the module does not have. |
-| "does not exist in plugin" | The `entry` path is wrong, or the file is missing. |
-| "is reserved by a built-in" | A tool or command name collides with a built-in. |
-| "cannot be granted" | The permission was requested but the policy does not allow it, or the sandbox cannot enforce it. |
-| A value "changes by itself" | It is in a module global. Use `bruce:storage`. |
+| `field timeoutMS` | Manifest 字段名大小写敏感，正确的是 `timeoutMs`。 |
+| `has no exported function` | `handler` 指向的导出在模块中不存在。 |
+| `does not exist in plugin` | `entry` 路径写错，或文件不存在。 |
+| `is reserved by a built-in` | 工具名或命令名与内建冲突。 |
+| `cannot be granted` | 请求了该权限，但策略不允许，或沙箱无法强制执行。 |
+| 某个值"自己会变" | 它存在模块全局变量里。请改用 `bruce:storage`。 |
 
-## Security model
+## 安全模型
 
-> **The JavaScript VM sandbox is not an OS security boundary.**
+> **JavaScript VM 沙箱不是操作系统级安全边界。**
 >
-> Bruce's host policy is the final permission boundary.
+> **Bruce 的 Host Policy 才是最终权限边界。**
 
-The engine's frozen builtins, disabled dynamic code and runtime isolation make a
-plugin *well-behaved*, not *contained*. They stop a plugin from patching shared
-prototypes or compiling its way out of the sandbox; they do not stop a
-determined plugin from consuming CPU, and they are not a substitute for the
-operating system's own isolation.
+引擎的冻结内建、关闭动态代码、Runtime 隔离，让插件**行为规矩**，而不是让它**被关住**。
+它们能阻止插件改写共享原型或靠编译代码逃出沙箱；它们阻止不了一个铁了心的插件消耗
+CPU，也不能替代操作系统自身的隔离。
 
-What actually confines a plugin:
+真正约束插件的是这条链路：
 
 ```text
-JavaScript plugin
-   │  only the host objects the grant allows; no os, no exec, no net, no Go values
+JavaScript 插件
+   │  只能使用授权范围内的宿主对象；没有 os、没有 exec、没有 net、没有 Go 值
    ▼
-Bruce host capability   (bruce:storage, bruce:events, ...)
-   │  every call checked against the grant
+Bruce Host Capability   (bruce:storage、bruce:events ...)
+   │  每次调用都对照授权检查
    ▼
-Permission / policy     (tool.Policy capability metadata + host policy)
-   │  re-checked on the FINAL data, after any hook rewrote it
+Permission / Policy     (tool.Policy 能力元数据 + host policy)
+   │  在任何 hook 改写之后，针对【最终数据】重新检查
    ▼
-Sandbox / HITL          (sandbox.Manager, approval.Handler)
+Sandbox / HITL          (sandbox.Manager、approval.Handler)
    ▼
-The real operation
+真实操作
 ```
 
-Consequences worth internalising:
+值得记住的推论：
 
-- A plugin runs in-process. It shares the address space with Bruce. A bug in the
-  engine or in the host bridge is a bug in Bruce.
-- The sandbox constrains *shell commands and file writes*, not JavaScript. A
-  plugin that is not granted a capability has no path to the filesystem at all,
-  because there is no filesystem API in its runtime.
-- Approval is enforced by the host, not by the plugin. A plugin tool that
-  declares a write, shell or network capability asks the user for approval
-  through the same prompt as a built-in tool, and the plugin cannot suppress it.
-- A plugin cannot change the sandbox mode, grant itself a permission, or mark
-  itself approved.
+- **插件与 Bruce 同进程运行**，共享地址空间。引擎或宿主桥接里的 bug 就是 Bruce 的 bug。
+- 沙箱约束的是**shell 命令与文件写入**，不是 JavaScript。没被授予能力的插件根本
+  没有通往文件系统的路径，因为它的运行时里压根没有文件系统 API。
+- 审批由宿主强制执行，不由插件决定。声明了写、shell 或网络能力的插件工具，会通过
+  与内建工具**同一个**审批提示征求用户同意，插件无法抑制它。
+- 插件无法改变沙箱模式、无法给自己授予权限、无法把自己标记为已批准。
 
-## Known limitations
+## 已知限制
 
-- **No TypeScript.** The entry must be JavaScript. TypeScript should be
-  precompiled to JavaScript before shipping, not run through a TypeScript
-  runtime inside the VM.
-- **No npm, no `node_modules`, no `package.json`.** A plugin must be
-  self-contained: either one file or relative modules you ship with it.
-- **No Node builtins.** No `fs`, `path`, `process`, `child_process`, `http`.
-- **No Pi or OpenCode plugin compatibility.** The API is inspired by those
-  tools, not a compatibility layer for them.
-- **Storage is in-memory for now.** `session`, `plugin`, `workspace` and
-  `global` scopes do not survive a restart. The API is the durable one; the
-  backing store is not yet.
-- **`chat.before` receives the message list as JSON.** A hook can rewrite
-  messages, but it cannot yet inspect the model or the token budget.
-- **Hook ordering is by plugin name, then declaration order.** There is no
-  numeric priority. If you need to run after another plugin, its name must sort
-  after yours.
-- **A plugin cannot be loaded from outside the two search roots.** There is no
-  path-based install yet.
-- **No resource accounting.** A plugin can consume CPU up to its timeout, and
-  memory is not capped per plugin.
-- **Windows is untested.** The path handling covers Windows forms, but no
-  Windows environment was used to verify it.
+- **没有 TypeScript。** 入口必须是 JavaScript。若要用 TypeScript，应当在发布前
+  **预编译**成 JavaScript，而不是在 VM 里塞一个 TypeScript 运行时。
+- **没有 npm、没有 `node_modules`、没有 `package.json`。** 插件必须自包含：
+  要么单文件，要么带上自己用到的相对模块。
+- **没有 Node 内建模块。** 没有 `fs`、`path`、`process`、`child_process`、`http`。
+- **不兼容 Pi 或 OpenCode 插件。** API 是受它们启发的，不是它们的兼容层。
+- **Storage 目前是内存实现。** `session`、`plugin`、`workspace`、`global` 作用域
+  在进程重启后不保留。API 是按持久化设计的，后端还不是。
+- **5 个 observer hook 事件与 `chat.before` 尚未接线**：契约、校验、失败策略与测试
+  都已实现，但运行时目前不会调用它们。见 [Hook](#hook) 一节的状态表。
+- **`fs.read` / `fs.write` / `net` / `shell` 尚无对应的 Host API 模块。** 权限判定
+  已完整可用，但插件还没有使用这些能力的 API。
+- **`chat.before` 只拿到 JSON 形式的消息列表。** hook 可以改写消息，但还无法检查
+  模型或 token 预算。
+- **Hook 顺序按插件名，再按声明顺序。** 没有数值优先级。若你必须排在某个插件之后，
+  你的插件名必须排在它后面。
+- **插件无法从两个搜索根之外加载。** 还没有基于路径的安装方式。
+- **没有资源计量。** 插件最多可以消耗到超时为止的 CPU，内存未按插件设限。
+- **Windows 未验证。** 路径处理覆盖了 Windows 形式，但没有在 Windows 环境实测过。
 
-## Complete example
+## 完整示例
 
 ```text
 .bruce/plugins/todo-tracker/
@@ -575,21 +541,21 @@ Consequences worth internalising:
 └── index.js
 ```
 
-`plugin.json`:
+`plugin.json`：
 
 ```json
 {
   "apiVersion": "bruce.plugin/v1",
   "name": "todo-tracker",
   "version": "1.0.0",
-  "description": "Tracks TODO comments and reports on them",
+  "description": "统计 TODO 注释并生成报告",
   "entry": "index.js",
   "permissions": ["fs.read", "storage"],
   "concurrency": { "maxRuntimes": 2 },
   "tools": [
     {
       "name": "todo_scan",
-      "description": "Scan a path for TODO comments",
+      "description": "扫描指定路径下的 TODO 注释",
       "handler": "scan",
       "schema": {
         "type": "object",
@@ -609,12 +575,12 @@ Consequences worth internalising:
     }
   ],
   "commands": [
-    { "name": "todo-report", "description": "Show the last scan", "handler": "report" }
+    { "name": "todo-report", "description": "显示上一次扫描结果", "handler": "report" }
   ]
 }
 ```
 
-`index.js`:
+`index.js`：
 
 ```js
 import { get, set } from "bruce:storage";
@@ -629,20 +595,21 @@ export function scan(input) {
 
 export function report() {
   const found = get({ scope: "plugin", key: "lastScan" });
-  if (!found.found) return { output: "No scan has run yet." };
-  return { output: "Last scan: " + JSON.stringify(found.value) };
+  if (!found.found) return { output: "还没有执行过扫描。" };
+  return { output: "上次扫描：" + JSON.stringify(found.value) };
 }
 ```
 
-Then:
+然后：
 
 ```text
-/plugin                        # confirm it loaded and what it was granted
-/plugin reload todo-tracker    # after editing index.js
+/plugin                        # 确认已加载、以及拿到了哪些权限
+/plugin reload todo-tracker    # 改完 index.js 之后
 ```
 
-## See also
+## 另见
 
-- [plugin-architecture.md](plugin-architecture.md) — architecture, module layout,
-  implementation plan and the security boundary rationale.
-- [sandbox-design.md](sandbox-design.md) — the sandbox the host policy defers to.
+- [plugin-architecture.md](plugin-architecture.md) —— 架构、模块划分、实现计划与
+  安全边界推导，以及实现期间发现并修复的缺陷记录。
+- [sandbox-design.md](sandbox-design.md) —— host policy 所依赖的沙箱设计。
+- [plugins.en.md](plugins.en.md) —— 本文的英文版本。
