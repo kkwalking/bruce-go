@@ -18,7 +18,7 @@ func TestPlanToolsOperateOnlyOnActivePlan(t *testing.T) {
 	registry := tool.EmptyRegistry(t.TempDir())
 	RegisterPlanTools(registry, store, func() runtime.PlanState { return active })
 
-	out := registry.Execute(context.Background(), "replace_plan", map[string]string{"content": "# Plan", "summary": "create"})
+	out := registry.Execute(context.Background(), "replace_plan", tool.Args{"content": "# Plan", "summary": "create"})
 	if !strings.Contains(out, "Plan created") {
 		t.Fatalf("replace_plan output = %s", out)
 	}
@@ -34,7 +34,7 @@ func TestPlanToolsOperateOnlyOnActivePlan(t *testing.T) {
 		Content:  recorder.events[0].Content,
 	}
 
-	out = registry.Execute(context.Background(), "edit_plan", map[string]string{"old_text": "# Plan", "new_text": "# Better Plan", "summary": "edit"})
+	out = registry.Execute(context.Background(), "edit_plan", tool.Args{"old_text": "# Plan", "new_text": "# Better Plan", "summary": "edit"})
 	if !strings.Contains(out, "Plan edited") {
 		t.Fatalf("edit_plan output = %s", out)
 	}
@@ -62,11 +62,11 @@ func TestPlanToolRegistryBlocksWorkspaceWritesAndMutatingCommands(t *testing.T) 
 	// suite. rg is only *suggested* to the model (tool.go's guidelines), it
 	// is not a dependency, and CI runners have no ripgrep — this test failed
 	// there with "bash: rg: command not found" (exit 127).
-	out := registry.Execute(context.Background(), "execute_command", map[string]string{"command": "cat a.txt"})
+	out := registry.Execute(context.Background(), "execute_command", tool.Args{"command": "cat a.txt"})
 	if !strings.Contains(out, "alpha") {
 		t.Fatalf("read-only command output = %s", out)
 	}
-	out = registry.Execute(context.Background(), "execute_command", map[string]string{"command": "touch x.txt"})
+	out = registry.Execute(context.Background(), "execute_command", tool.Args{"command": "touch x.txt"})
 	if !strings.Contains(out, "plan-mode security policy") {
 		t.Fatalf("mutating command output = %s", out)
 	}

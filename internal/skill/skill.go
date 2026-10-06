@@ -303,19 +303,25 @@ func RegisterTools(registry *tool.Registry, catalog *Catalog) {
 		Name:        LoadToolName,
 		Description: "Load a Skill's complete workflow instructions; call only when the user's task matches the Skill description",
 		Parameters:  rawSchema("name", "Name of the Skill to load"),
-		Exec: func(_ context.Context, args map[string]string) (string, error) {
-			return catalog.LoadSkill(args["name"])
+		Exec: func(_ context.Context, args tool.Args) (string, error) {
+			return catalog.LoadSkill(tool.StringArg(args, "name"))
 		},
-		Policy: tool.Policy{Source: tool.SourceSkill, MinimumMode: sandbox.ModeReadOnly},
+		Policy: tool.Policy{Source: tool.SourceSkill, MinimumMode: sandbox.ModeReadOnly,
+			Capability: tool.Capability{FilesystemRead: true, WorkspaceScope: tool.ScopeWorkspace},
+			Risk:       tool.RiskSafe, ApprovalReason: "Loads Skill instructions",
+		},
 	})
 	registry.Register(tool.Tool{
 		Name:        ResourceToolName,
 		Description: "Read a resource file from a Skill loaded for the current task; load_skill must be called first",
 		Parameters:  rawSchema("skill", "Name of the active Skill", "path", "Resource path relative to the Skill directory"),
-		Exec: func(_ context.Context, args map[string]string) (string, error) {
-			return catalog.ReadResource(args["skill"], args["path"])
+		Exec: func(_ context.Context, args tool.Args) (string, error) {
+			return catalog.ReadResource(tool.StringArg(args, "skill"), tool.StringArg(args, "path"))
 		},
-		Policy: tool.Policy{Source: tool.SourceSkill, MinimumMode: sandbox.ModeReadOnly, ParallelSafe: true},
+		Policy: tool.Policy{Source: tool.SourceSkill, MinimumMode: sandbox.ModeReadOnly, ParallelSafe: true,
+			Capability: tool.Capability{FilesystemRead: true, WorkspaceScope: tool.ScopeWorkspace},
+			Risk:       tool.RiskSafe, ApprovalReason: "Reads a Skill resource file",
+		},
 	})
 }
 

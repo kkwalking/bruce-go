@@ -246,29 +246,37 @@ func RegisterTools(registry *tool.Registry, manager *Manager) {
 		Name:        "web_search",
 		Description: "Search the web and return titles, URLs, and summaries",
 		Parameters:  rawSchema("query", "Search query", "max_results", "Maximum number of results"),
-		Exec: func(ctx context.Context, args map[string]string) (string, error) {
-			results, err := manager.Search(ctx, args["query"], parsePositive(args["max_results"], defaultMaxResults))
+		Exec: func(ctx context.Context, args tool.Args) (string, error) {
+			results, err := manager.Search(ctx, tool.StringArg(args, "query"), parsePositive(tool.StringArg(args, "max_results"), defaultMaxResults))
 			if err != nil {
 				return "", err
 			}
 			return formatResults(results), nil
 		},
 		PromptSnippet: "Search the web when local context is insufficient or freshness matters",
-		Policy:        tool.Policy{Source: tool.SourceWeb, MinimumMode: sandbox.ModeReadOnly, ParallelSafe: true},
+		Policy: tool.Policy{
+			Source: tool.SourceWeb, MinimumMode: sandbox.ModeReadOnly, ParallelSafe: true,
+			Capability: tool.Capability{Network: true},
+			Risk:       tool.RiskLow, ApprovalReason: "Performs a network request",
+		},
 	})
 	registry.Register(tool.Tool{
 		Name:        "web_fetch",
 		Description: "Fetch the main text content of a web page",
 		Parameters:  rawSchema("url", "HTTP or HTTPS URL to fetch"),
-		Exec: func(ctx context.Context, args map[string]string) (string, error) {
-			page, err := manager.Fetch(ctx, args["url"])
+		Exec: func(ctx context.Context, args tool.Args) (string, error) {
+			page, err := manager.Fetch(ctx, tool.StringArg(args, "url"))
 			if err != nil {
 				return "", err
 			}
 			return formatPage(page), nil
 		},
 		PromptSnippet: "Fetch and extract readable page text from a URL",
-		Policy:        tool.Policy{Source: tool.SourceWeb, MinimumMode: sandbox.ModeReadOnly, ParallelSafe: true},
+		Policy: tool.Policy{
+			Source: tool.SourceWeb, MinimumMode: sandbox.ModeReadOnly, ParallelSafe: true,
+			Capability: tool.Capability{Network: true},
+			Risk:       tool.RiskLow, ApprovalReason: "Performs a network request",
+		},
 	})
 }
 

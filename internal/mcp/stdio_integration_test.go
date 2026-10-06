@@ -19,6 +19,7 @@ import (
 
 	"bruce-go/internal/config"
 	"bruce-go/internal/sandbox"
+	"bruce-go/internal/tool"
 )
 
 const stdioHelperEnv = "BRUCE_MCP_STDIO_TEST_HELPER"
@@ -154,17 +155,17 @@ func TestStdioMCPSandboxEnforcesFilesystemNetworkAndRestartBoundaries(t *testing
 	if _, err := os.Stat(startup); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("MCP startup write escaped read-only policy: %v", err)
 	}
-	if out, err := manager.CallTool(context.Background(), "helper", "read", map[string]string{"path": input}); err != nil || out != "read-ok" {
+	if out, err := manager.CallTool(context.Background(), "helper", "read", tool.Args{"path": input}); err != nil || out != "read-ok" {
 		t.Fatalf("read tool = %q, %v", out, err)
 	}
 	sneaky := filepath.Join(workspace, "sneaky.txt")
-	if out, err := manager.CallTool(context.Background(), "helper", "sneaky", map[string]string{"path": sneaky, "content": "bad"}); err != nil || !strings.Contains(out, "write-error") {
+	if out, err := manager.CallTool(context.Background(), "helper", "sneaky", tool.Args{"path": sneaky, "content": "bad"}); err != nil || !strings.Contains(out, "write-error") {
 		t.Fatalf("misclassified malicious tool = %q, %v", out, err)
 	}
 	if _, err := os.Stat(sneaky); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("misclassified tool wrote in read-only mode: %v", err)
 	}
-	if out, err := manager.CallTool(context.Background(), "helper", "network", map[string]string{"url": networkServer.URL}); err != nil || !strings.Contains(out, "network-error") {
+	if out, err := manager.CallTool(context.Background(), "helper", "network", tool.Args{"url": networkServer.URL}); err != nil || !strings.Contains(out, "network-error") {
 		t.Fatalf("network-off stdio tool = %q, %v", out, err)
 	}
 
@@ -180,7 +181,7 @@ func TestStdioMCPSandboxEnforcesFilesystemNetworkAndRestartBoundaries(t *testing
 		t.Fatalf("MCP process was not restarted: pid=%d", oldPID)
 	}
 	waitForProcessExit(t, oldPID)
-	if out, err := manager.CallTool(context.Background(), "helper", "network", map[string]string{"url": networkServer.URL}); err != nil || out != "network-ok" {
+	if out, err := manager.CallTool(context.Background(), "helper", "network", tool.Args{"url": networkServer.URL}); err != nil || out != "network-ok" {
 		t.Fatalf("network-on stdio tool = %q, %v", out, err)
 	}
 
@@ -190,13 +191,13 @@ func TestStdioMCPSandboxEnforcesFilesystemNetworkAndRestartBoundaries(t *testing
 		t.Fatal(err)
 	}
 	inside := filepath.Join(workspace, "inside.txt")
-	if out, err := manager.CallTool(context.Background(), "helper", "write", map[string]string{"path": inside, "content": "inside"}); err != nil || out != "wrote" {
+	if out, err := manager.CallTool(context.Background(), "helper", "write", tool.Args{"path": inside, "content": "inside"}); err != nil || out != "wrote" {
 		t.Fatalf("workspace write = %q, %v", out, err)
 	}
 	if data, err := os.ReadFile(inside); err != nil || string(data) != "inside" {
 		t.Fatalf("workspace file = %q, %v", data, err)
 	}
-	if out, err := manager.CallTool(context.Background(), "helper", "outside", map[string]string{"path": outside, "content": "outside"}); err != nil || !strings.Contains(out, "write-error") {
+	if out, err := manager.CallTool(context.Background(), "helper", "outside", tool.Args{"path": outside, "content": "outside"}); err != nil || !strings.Contains(out, "write-error") {
 		t.Fatalf("outside write = %q, %v", out, err)
 	}
 	if _, err := os.Stat(outside); !errors.Is(err, os.ErrNotExist) {
@@ -221,7 +222,7 @@ func TestStdioMCPLegacyFullAccessRemainsUnrestricted(t *testing.T) {
 	if err := manager.Enable(context.Background(), "helper"); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := manager.CallTool(context.Background(), "helper", "outside", map[string]string{"path": outside, "content": "legacy"}); err != nil || out != "wrote" {
+	if out, err := manager.CallTool(context.Background(), "helper", "outside", tool.Args{"path": outside, "content": "legacy"}); err != nil || out != "wrote" {
 		t.Fatalf("legacy full-access write = %q, %v", out, err)
 	}
 	if data, err := os.ReadFile(outside); err != nil || string(data) != "legacy" {

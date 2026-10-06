@@ -18,7 +18,40 @@ type Settings struct {
 	MCP        MCPSettings       `json:"mcp"`
 	Compaction Compaction        `json:"compaction"`
 	Sandbox    SandboxSettings   `json:"sandbox"`
+	Plugins    PluginsSettings   `json:"plugins"`
 	Variables  map[string]string `json:"variables"`
+}
+
+// PluginsSettings configures the JavaScript plugin system.
+//
+// Everything here is opt-in. A default settings file grants no plugin
+// permission at all, so installing a plugin does not by itself give it
+// filesystem, network or shell access.
+type PluginsSettings struct {
+	// Enabled turns plugin discovery on. Discovery is on by default; setting
+	// it to false makes Bruce behave exactly as it did before plugins existed.
+	Enabled *bool `json:"enabled,omitempty"`
+	// Allow lists the permissions granted to every plugin. A plugin still has
+	// to declare a permission in its manifest to receive it.
+	Allow []string `json:"allow,omitempty"`
+	// PerPlugin grants or denies permissions for one plugin by name. A denial
+	// always wins.
+	PerPlugin map[string]PluginPolicySetting `json:"perPlugin,omitempty"`
+	// Deny removes permissions from every plugin, including ones Allow listed.
+	Deny []string `json:"deny,omitempty"`
+	// FailFast makes a broken manifest stop startup instead of producing a
+	// diagnostic.
+	FailFast bool `json:"failFast,omitempty"`
+	// AllowDynamicCode turns eval and the Function constructor back on. It
+	// exists for a trusted deployment and is off by default: runtime code
+	// generation is the classic way out of a sandbox.
+	AllowDynamicCode bool `json:"allowDynamicCode,omitempty"`
+}
+
+// PluginPolicySetting is the per-plugin permission override.
+type PluginPolicySetting struct {
+	Allow []string `json:"allow,omitempty"`
+	Deny  []string `json:"deny,omitempty"`
 }
 
 type SandboxSettings struct {
@@ -202,6 +235,7 @@ func DefaultSettings() Settings {
 			KeepRecentTokens:   20000,
 		},
 		Sandbox:   SandboxSettings{Mode: "full-access"},
+		Plugins:   PluginsSettings{},
 		Variables: map[string]string{},
 	}
 }
@@ -259,6 +293,9 @@ func (l Loader) Load() (Settings, error) {
 	if err := validateAndNormalizeMCP(&settings.MCP); err != nil {
 		return settings, err
 	}
+	if err := validatePlugins(&settings.Plugins); err != nil {
+		return settings, err
+	}
 	return settings, nil
 }
 
@@ -277,6 +314,9 @@ func (l Loader) Save(settings Settings) error {
 		return err
 	}
 	if err := validateAndNormalizeMCP(&settings.MCP); err != nil {
+		return err
+	}
+	if err := validatePlugins(&settings.Plugins); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(l.Path), 0o755); err != nil {
@@ -367,6 +407,9 @@ func normalize(settings *Settings) {
 	}
 	if strings.TrimSpace(settings.Sandbox.Mode) == "" {
 		settings.Sandbox.Mode = "full-access"
+	}
+	if settings.Plugins.PerPlugin == nil {
+		settings.Plugins.PerPlugin = map[string]PluginPolicySetting{}
 	}
 	settings.Sandbox.AllowedEnv = normalizeAllowedEnv(settings.Sandbox.AllowedEnv)
 }
@@ -474,6 +517,51 @@ func validateAndNormalizeMCP(settings *MCPSettings) error {
 			server.ToolAccess = normalized
 		}
 		settings.Servers[serverName] = server
+	}
+	return nil
+}
+
+// PluginPermissions lists the permission tokens a settings file may use. It is
+// duplicated from internal/plugin on purpose: config must not import the
+// plugin package, which would make the settings loader depend on the plugin
+// runtime.
+func PluginPermissions() []string {
+	return []string{"fs.read", "fs.write", "net", "shell", "storage", "events"}
+}
+
+func validatePlugins(settings *PluginsSettings) error {
+	if settings == nil {
+		return nil
+	}
+	valid := map[string]bool{}
+	for _, permission := range PluginPermissions() {
+		valid[permission] = true
+	}
+	check := func(scope string, values []string) error {
+		for _, value := range values {
+			if !valid[strings.TrimSpace(value)] {
+				return fmt.Errorf("%s contains an invalid plugin permission: %q (allowed values: %s)",
+					scope, value, strings.Join(PluginPermissions(), ", "))
+			}
+		}
+		return nil
+	}
+	if err := check("plugins.allow", settings.Allow); err != nil {
+		return err
+	}
+	if err := check("plugins.deny", settings.Deny); err != nil {
+		return err
+	}
+	for name, policy := range settings.PerPlugin {
+		if strings.TrimSpace(name) == "" {
+			return errors.New("plugins.perPlugin contains an empty plugin name")
+		}
+		if err := check("plugins.perPlugin."+name+".allow", policy.Allow); err != nil {
+			return err
+		}
+		if err := check("plugins.perPlugin."+name+".deny", policy.Deny); err != nil {
+			return err
+		}
 	}
 	return nil
 }

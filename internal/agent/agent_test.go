@@ -32,8 +32,8 @@ func TestReActRunsToolCallsAndReturnsFinalAnswer(t *testing.T) {
 		Name:        "echo",
 		Description: "echo tool",
 		Parameters:  []byte(`{"type":"object","properties":{"text":{"type":"string"}}}`),
-		Exec: func(_ context.Context, args map[string]string) (string, error) {
-			return "tool:" + args["text"], nil
+		Exec: func(_ context.Context, args tool.Args) (string, error) {
+			return "tool:" + tool.StringArg(args, "text"), nil
 		},
 		PromptSnippet: "echo input",
 	})
@@ -131,8 +131,8 @@ func TestReActEmitsDurableToolTranscriptInProtocolOrder(t *testing.T) {
 		Name:        "echo",
 		Description: "echo tool",
 		Parameters:  []byte(`{"type":"object","properties":{"text":{"type":"string"}}}`),
-		Exec: func(_ context.Context, args map[string]string) (string, error) {
-			return "tool:" + args["text"], nil
+		Exec: func(_ context.Context, args tool.Args) (string, error) {
+			return "tool:" + tool.StringArg(args, "text"), nil
 		},
 	})
 	bus := event.NewBus()
@@ -173,14 +173,14 @@ func TestReActAppendsAllToolMessagesBeforeImageMessage(t *testing.T) {
 	registry.Register(tool.Tool{
 		Name:       "image_tool",
 		Parameters: []byte(`{"type":"object","properties":{}}`),
-		Exec: func(context.Context, map[string]string) (string, error) {
+		Exec: func(context.Context, tool.Args) (string, error) {
 			return "image text\n[bruce-image-content mimeType=image/png source=test]\niVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==\n[/bruce-image-content]", nil
 		},
 	})
 	registry.Register(tool.Tool{
 		Name:       "echo",
 		Parameters: []byte(`{"type":"object","properties":{}}`),
-		Exec:       func(context.Context, map[string]string) (string, error) { return "echo", nil },
+		Exec:       func(context.Context, tool.Args) (string, error) { return "echo", nil },
 	})
 	client := &recordingClient{responses: []llm.ChatResponse{
 		{ToolCalls: []llm.ToolCall{
@@ -240,7 +240,7 @@ func TestSkillToolResultIsRedactedAfterTask(t *testing.T) {
 		Name:        "load_skill",
 		Description: "load skill",
 		Parameters:  []byte(`{"type":"object","properties":{"name":{"type":"string"}}}`),
-		Exec: func(context.Context, map[string]string) (string, error) {
+		Exec: func(context.Context, tool.Args) (string, error) {
 			return "SECRET_SKILL_INSTRUCTIONS", nil
 		},
 	})

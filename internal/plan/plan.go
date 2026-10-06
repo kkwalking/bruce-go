@@ -381,11 +381,11 @@ func (e Executor) executeOne(ctx context.Context, task *Task) {
 	case TaskPlanning, TaskAnalysis:
 		result = "Completed: " + task.Description
 	case TaskFileRead:
-		result = e.Tools.Execute(ctx, "read_file", map[string]string{"path": task.Path})
+		result = e.Tools.Execute(ctx, "read_file", tool.Args{"path": task.Path})
 	case TaskFileWrite:
-		result = e.Tools.Execute(ctx, "write_file", map[string]string{"path": task.Path, "content": task.Content})
+		result = e.Tools.Execute(ctx, "write_file", tool.Args{"path": task.Path, "content": task.Content})
 	case TaskCommand, TaskVerification:
-		result = e.Tools.Execute(ctx, "execute_command", map[string]string{"command": task.Command})
+		result = e.Tools.Execute(ctx, "execute_command", tool.Args{"command": task.Command})
 	default:
 		result = "Tool execution failed: unknown task type"
 	}

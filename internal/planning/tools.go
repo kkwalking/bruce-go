@@ -64,14 +64,14 @@ func RegisterPlanTools(registry *tool.Registry, store *Store, active ActivePlanF
 }
 
 func readPlan(store *Store, active ActivePlanFunc) tool.Executor {
-	return func(_ context.Context, _ map[string]string) (string, error) {
+	return func(_ context.Context, _ tool.Args) (string, error) {
 		return store.Read(active())
 	}
 }
 
 func replacePlan(store *Store, active ActivePlanFunc) tool.Executor {
-	return func(_ context.Context, args map[string]string) (string, error) {
-		state, err := store.Replace(active(), args["content"], args["summary"])
+	return func(_ context.Context, args tool.Args) (string, error) {
+		state, err := store.Replace(active(), tool.StringArg(args, "content"), tool.StringArg(args, "summary"))
 		if err != nil {
 			return "", err
 		}
@@ -80,12 +80,12 @@ func replacePlan(store *Store, active ActivePlanFunc) tool.Executor {
 }
 
 func editPlan(store *Store, active ActivePlanFunc) tool.Executor {
-	return func(_ context.Context, args map[string]string) (string, error) {
+	return func(_ context.Context, args tool.Args) (string, error) {
 		state := active()
 		if state.Empty() {
 			return "", errors.New("there is no active plan; create one with replace_plan first")
 		}
-		oldText := args["old_text"]
+		oldText := tool.StringArg(args, "old_text")
 		if oldText == "" {
 			return "", errors.New("old_text must not be empty")
 		}
@@ -100,8 +100,8 @@ func editPlan(store *Store, active ActivePlanFunc) tool.Executor {
 		if count > 1 {
 			return "", fmt.Errorf("old_text matched more than once (%d matches); provide more specific text; the plan was not modified", count)
 		}
-		updated := strings.Replace(content, oldText, args["new_text"], 1)
-		next, err := store.Replace(state, updated, args["summary"])
+		updated := strings.Replace(content, oldText, tool.StringArg(args, "new_text"), 1)
+		next, err := store.Replace(state, updated, tool.StringArg(args, "summary"))
 		if err != nil {
 			return "", err
 		}
@@ -110,17 +110,17 @@ func editPlan(store *Store, active ActivePlanFunc) tool.Executor {
 }
 
 func planExecuteCommand(base *tool.Registry) tool.Executor {
-	return func(ctx context.Context, args map[string]string) (string, error) {
-		command := args["command"]
+	return func(ctx context.Context, args tool.Args) (string, error) {
+		command := tool.StringArg(args, "command")
 		if result := CheckReadOnlyCommand(command); !result.Allowed {
 			message := "Command rejected by the plan-mode security policy: " + result.Reason
 			return message, tool.NewExecutionError(tool.ToolCallRejected, errors.New(message))
 		}
 		var outcome tool.ExecutionOutcome
 		if base.SandboxCanEnforce(sandbox.ModeReadOnly) {
-			outcome = base.ExecuteWithSandboxModeResult(ctx, "execute_command", map[string]string{"command": command}, sandbox.ModeReadOnly)
+			outcome = base.ExecuteWithSandboxModeResult(ctx, "execute_command", tool.Args{"command": command}, sandbox.ModeReadOnly)
 		} else {
-			outcome = base.ExecuteResult(ctx, "execute_command", map[string]string{"command": command})
+			outcome = base.ExecuteResult(ctx, "execute_command", tool.Args{"command": command})
 		}
 		if outcome.Status != tool.ToolCallSuccess {
 			return outcome.Output, tool.NewExecutionError(outcome.Status, errors.New(outcome.Output))

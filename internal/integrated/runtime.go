@@ -17,10 +17,12 @@ import (
 	"bruce-go/internal/config"
 	"bruce-go/internal/event"
 	"bruce-go/internal/instructions"
+	"bruce-go/internal/jsengine/moejs"
 	"bruce-go/internal/llm"
 	"bruce-go/internal/mcp"
 	"bruce-go/internal/minimal"
 	"bruce-go/internal/planning"
+	"bruce-go/internal/plugin"
 	"bruce-go/internal/render"
 	"bruce-go/internal/runtime"
 	"bruce-go/internal/sandbox"
@@ -61,6 +63,8 @@ type Runtime struct {
 	StartMCP      bool
 	ResumeOnStart bool
 	Sandbox       *sandbox.Manager
+	Plugins       *plugin.Manager
+	Commands      *cli.Registry
 
 	react      *agent.Agent
 	planning   *agent.Agent
@@ -70,6 +74,42 @@ type Runtime struct {
 	mcpStarted bool
 
 	mcpToolNames []string
+
+	pluginRuntimeContext pluginRuntimeContext
+}
+
+// pluginRuntimeContext is the identity a plugin hook receives for the current
+// invocation. The agent sets it around a run so an interceptor can tell which
+// turn it is observing.
+type pluginRuntimeContext struct {
+	mu      sync.RWMutex
+	runID   string
+	session string
+	mode    string
+}
+
+func (c *pluginRuntimeContext) set(runID, session, mode string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.runID, c.session, c.mode = runID, session, mode
+}
+
+func (c *pluginRuntimeContext) get() (string, string, string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.runID, c.session, c.mode
+}
+
+// setPluginContext publishes the identity of the current run so a plugin
+// interceptor can tell which turn it is observing, and returns a restore
+// function.
+func (r *Runtime) setPluginContext(runID string) func() {
+	sessionID := ""
+	if r.Session != nil {
+		sessionID = r.Session.Context(r.Mode).SessionID
+	}
+	r.pluginRuntimeContext.set(runID, sessionID, string(r.Mode))
+	return func() { r.pluginRuntimeContext.set("", "", "") }
 }
 
 type modelSwitcher interface {
@@ -222,8 +262,152 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	r.Mode = store.Context(runtime.ModeReact).Mode
 	r.subscribeSessionRecorder()
 	r.refreshMCPTools()
+	r.startPlugins(ctx)
 	r.rebuildAgents()
 	return r, nil
+}
+
+// startPlugins discovers and loads JavaScript plugins.
+//
+// A failure here is never fatal: plugins are an extension point, so a broken
+// plugin directory must not stop Bruce from starting. Anything that goes wrong
+// becomes a diagnostic and an activity event.
+func (r *Runtime) startPlugins(ctx context.Context) {
+	if !pluginEnabled(r.Settings.Plugins) {
+		return
+	}
+	manager, err := plugin.NewManager(plugin.ManagerOptions{
+		Engine:             moejs.Engine{},
+		Workspace:          r.Workspace,
+		HomeDir:            r.HomeDir,
+		Policy:             pluginPolicy(r.Settings.Plugins),
+		FailFast:           r.Settings.Plugins.FailFast,
+		Sandbox:            r.pluginSandboxStatus,
+		Observer:           plugin.ObserverFunc(r.observePluginEvent),
+		DisableDynamicCode: boolPointer(!r.Settings.Plugins.AllowDynamicCode),
+	})
+	if err != nil {
+		r.emit(event.NewActivity("", "The plugin system could not be initialized: "+err.Error()))
+		return
+	}
+	r.Plugins = manager
+
+	// The registry publishes plugin tools and the interceptor runs plugin
+	// hooks, so a plugin tool goes through exactly the same policy, sandbox,
+	// approval and cancellation path as a built-in one.
+	manager.WithRegistry(r.Tools)
+	commands := cli.NewRegistry()
+	manager.WithCommandRegistry(commands)
+	r.Commands = commands
+	r.Tools.WithInterceptor(plugin.ToolInterceptor{
+		Hooks: manager.Hooks(),
+		Context: func(context.Context) plugin.HookContext {
+			runID, session, mode := r.pluginRuntimeContext.get()
+			return plugin.HookContext{RunID: runID, SessionID: session, Mode: mode}
+		},
+	})
+	if err := manager.Load(ctx); err != nil {
+		r.emit(event.NewActivity("", "Plugin discovery failed: "+err.Error()))
+		return
+	}
+	r.reportPluginDiagnostics()
+}
+
+// reportPluginDiagnostics surfaces load failures without stopping startup.
+func (r *Runtime) reportPluginDiagnostics() {
+	if r.Plugins == nil {
+		return
+	}
+	for _, diagnostic := range r.Plugins.Diagnostics() {
+		r.emit(event.NewActivity("", "Plugin not loaded: "+diagnostic.String()))
+	}
+	for _, conflict := range r.Plugins.CommandConflicts() {
+		r.emit(event.NewActivity("", "Plugin command not registered: "+conflict))
+	}
+}
+
+// pluginSandboxStatus reports the live sandbox so capability checks fail closed
+// when the backend cannot enforce them.
+func (r *Runtime) pluginSandboxStatus() plugin.SandboxStatus {
+	if r.Sandbox == nil {
+		return plugin.SandboxStatus{}
+	}
+	status := r.Sandbox.Status()
+	return plugin.SandboxStatus{
+		Mode:          string(status.Mode),
+		NetworkAccess: status.NetworkAccess,
+		Available:     status.Capabilities.Available || status.Mode == sandbox.ModeFullAccess,
+		Backend:       status.Capabilities.Backend,
+		Reason:        status.Capabilities.Reason,
+		Generation:    status.Generation,
+	}
+}
+
+// observePluginEvent forwards plugin lifecycle and invocation events into
+// Bruce's existing event bus, so plugin activity is observable through the
+// same channel as everything else.
+func (r *Runtime) observePluginEvent(kind string, fields map[string]any) {
+	summary := kind
+	if name, ok := fields["plugin"].(string); ok && name != "" {
+		summary += " " + name
+	}
+	if handler, ok := fields["handler"].(string); ok && handler != "" {
+		summary += "." + handler
+	}
+	if category, ok := fields["category"].(string); ok && category != "" {
+		summary += " (" + category + ")"
+	}
+	if errText, ok := fields["error"].(string); ok && errText != "" {
+		summary += ": " + errText
+	}
+	r.emit(event.NewActivity("", "Plugin: "+summary))
+}
+
+// boolPointer returns a pointer to a bool, for an option that distinguishes
+// "unset" from "false".
+func boolPointer(value bool) *bool { return &value }
+
+// pluginEnabled reports whether plugin discovery is turned on.
+func pluginEnabled(settings config.PluginsSettings) bool {
+	return settings.Enabled == nil || *settings.Enabled
+}
+
+// pluginPolicy converts the settings file into the host policy.
+//
+// The default is deny-all: a plugin receives nothing it did not declare and the
+// host did not explicitly allow. That is why installing a plugin is not by
+// itself a grant of filesystem, network or shell access.
+func pluginPolicy(settings config.PluginsSettings) plugin.HostPolicy {
+	policy := plugin.HostPolicy{
+		Allowed:   map[plugin.Permission]bool{},
+		PerPlugin: map[string]map[plugin.Permission]bool{},
+		Denied:    map[plugin.Permission]bool{},
+	}
+	for _, raw := range settings.Allow {
+		if permission, err := plugin.ParsePermission(raw); err == nil {
+			policy.Allowed[permission] = true
+		}
+	}
+	for _, raw := range settings.Deny {
+		if permission, err := plugin.ParsePermission(raw); err == nil {
+			policy.Denied[permission] = true
+		}
+	}
+	for name, override := range settings.PerPlugin {
+		entry := map[plugin.Permission]bool{}
+		for _, raw := range override.Allow {
+			if permission, err := plugin.ParsePermission(raw); err == nil {
+				entry[permission] = true
+			}
+		}
+		policy.PerPlugin[name] = entry
+		for _, raw := range override.Deny {
+			if permission, err := plugin.ParsePermission(raw); err == nil {
+				policy.Denied[permission] = true
+			}
+		}
+	}
+	return policy
 }
 
 func (r *Runtime) Close() error {
@@ -311,6 +495,8 @@ func (r *Runtime) runTask(ctx context.Context, input string, allowPendingPlanInp
 	if task == "" {
 		task = strings.TrimSpace(input)
 	}
+	restorePluginContext := r.setPluginContext(runID)
+	defer restorePluginContext()
 	r.emit(event.NewRunStarted(runID, r.Mode, task))
 	if r.Mode == runtime.ModePlan && !allowPendingPlanInput {
 		if prompt, ok := r.pendingPlanInputPrompt(); ok {
@@ -376,9 +562,25 @@ func (r *Runtime) runTask(ctx context.Context, input string, allowPendingPlanInp
 
 func (r *Runtime) HandleCommand(ctx context.Context, command cli.Command) cli.Result {
 	result := cli.Result{Handled: true}
+	// A plugin command is dispatched before the built-in switch. A plugin can
+	// never reach this branch for a built-in name: the command registry
+	// refuses to register one.
+	if r.Plugins != nil {
+		if handled, ok := r.Plugins.RunCommand(ctx, command.Name, command.Args, command.Raw); ok {
+			result.Output = handled.Output
+			result.Err = handled.Err
+			result.Exit = handled.Exit
+			if result.Err != nil && result.Output == "" {
+				result.Output = result.Err.Error()
+			}
+			return result
+		}
+	}
 	switch command.Name {
 	case "help":
-		result.Output = cli.Help()
+		result.Output = r.Help()
+	case "plugin":
+		result.Output, result.Err = r.handlePlugin(ctx, command.Args)
 	case "exit":
 		result.Exit = true
 		result.Output = "bye"
@@ -448,6 +650,75 @@ func (r *Runtime) HandleCommand(ctx context.Context, command cli.Command) cli.Re
 	return result
 }
 
+// Help renders the command list from the live registry, so plugin commands are
+// listed alongside built-ins.
+func (r *Runtime) Help() string {
+	if r.Commands == nil {
+		return cli.Help()
+	}
+	return r.Commands.Help()
+}
+
+// handlePlugin implements /plugin.
+func (r *Runtime) handlePlugin(ctx context.Context, args []string) (string, error) {
+	if r.Plugins == nil {
+		return "The plugin system is disabled. Set \"plugins\": {\"enabled\": true} in setting.json to turn it on.", nil
+	}
+	if len(args) == 0 || args[0] == "list" {
+		return render.Plugins(r.Plugins.Plugins(), r.Plugins.Diagnostics(), r.Plugins.Overrides(), r.pluginCommandConflicts()), nil
+	}
+	switch args[0] {
+	case "reload":
+		if len(args) == 1 {
+			if err := r.Plugins.Load(ctx); err != nil {
+				return "", err
+			}
+			r.reportPluginDiagnostics()
+			return "Reloaded all plugins.\n\n" + render.Plugins(r.Plugins.Plugins(), r.Plugins.Diagnostics(), r.Plugins.Overrides(), r.pluginCommandConflicts()), nil
+		}
+		name := args[1]
+		if err := r.Plugins.Reload(ctx, name); err != nil {
+			return "", err
+		}
+		r.reportPluginDiagnostics()
+		return "Reloaded plugin: " + name, nil
+	case "unload":
+		if len(args) != 2 {
+			return "", errors.New("usage: /plugin unload <name>")
+		}
+		r.Plugins.Unload(args[1])
+		return "Unloaded plugin: " + args[1], nil
+	case "hooks":
+		return render.PluginHooks(r.Plugins.Hooks().Bindings()), nil
+	case "info":
+		if len(args) != 2 {
+			return "", errors.New("usage: /plugin info <name>")
+		}
+		for _, status := range r.Plugins.Plugins() {
+			if status.Name == args[1] {
+				return render.Plugin(status), nil
+			}
+		}
+		return "", errors.New("unknown plugin: " + args[1])
+	default:
+		return "", errors.New("usage: /plugin [list|info <name>|reload [name]|unload <name>|hooks]")
+	}
+}
+
+// pluginCommandConflicts returns the rejected command registrations from both
+// the plugin manager and the command registry.
+func (r *Runtime) pluginCommandConflicts() []string {
+	var conflicts []string
+	if r.Plugins != nil {
+		conflicts = append(conflicts, r.Plugins.CommandConflicts()...)
+	}
+	if r.Commands != nil {
+		conflicts = append(conflicts, r.Commands.Conflicts()...)
+	}
+	sort.Strings(conflicts)
+	return conflicts
+}
+
 func (r *Runtime) Status() runtime.Status {
 	toolNames := r.Tools.ToolNames()
 	if r.Mode == runtime.ModeMinimal {
@@ -458,6 +729,12 @@ func (r *Runtime) Status() runtime.Status {
 	mcpSummary := render.MCP(mcpStatuses)
 	sandboxStatus := r.Sandbox.Status()
 	contextTokens, contextWindow := r.contextUsage()
+	pluginCount, pluginTools, pluginHooks := 0, 0, 0
+	if r.Plugins != nil {
+		pluginCount = r.Plugins.Count()
+		pluginTools = len(r.Plugins.ToolNames())
+		pluginHooks = r.Plugins.Hooks().Count()
+	}
 	return runtime.Status{
 		Mode:              r.Mode,
 		Model:             r.Client.ModelName(),
@@ -479,6 +756,9 @@ func (r *Runtime) Status() runtime.Status {
 		BatchTimeout:      r.Concurrent.BatchTimeout,
 		RAGIndexed:        false,
 		SkillCount:        len(r.Skills.Skills()),
+		PluginCount:       pluginCount,
+		PluginTools:       pluginTools,
+		PluginHooks:       pluginHooks,
 		ToolNames:         toolNames,
 		ActivePlan:        r.currentPlanState(),
 		ContextTokens:     contextTokens,

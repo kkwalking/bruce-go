@@ -202,6 +202,7 @@ sudo pacman -S bubblewrap
 - `/resume <id|path>`
 - `/tree [entryId]`
 - `/compact [instructions]`
+- `/plugin [list|info <name>|reload [name]|unload <name>|hooks]`
 - `/clear`
 - `/help`
 - `/exit`
@@ -211,6 +212,54 @@ sudo pacman -S bubblewrap
 `/minimal` 切换到借鉴 DeepSeek Harness 极简 preset 的精简模式：切换时会**新建一个空会话**，不携带切换前的完整模式历史；系统提示词固定为 `You are a helpful software engineer assistant.`，不注入 AGENTS 指令、Skill 目录或工作目录等额外上下文，模型只能使用 `execute_command`、`read_file`、`write_file`、`edit_file` 四个基础工具。极简模式下显式 `$skill` 调用会被拒绝，`/react` 可切回完整模式。`/status` 仍展示进程级 MCP、Skill、沙箱等运行时信息，但其中的工具列表只包含极简模式的四个工具。
 
 `/plan` 是只读 planning workflow：Planning Agent 可以读取和搜索项目、维护 `~/.bruce/plans/` 下的 markdown 计划，并把计划生命周期写入 session JSONL。只有执行 `/plan approve` 批准计划后，Bruce 才会切回 ReAct 并按批准计划执行；具体文件修改和命令仍受 HITL 设置约束。
+
+## JavaScript 插件
+
+Bruce 支持用 JavaScript 插件扩展行为。插件是 `.bruce/plugins/<name>/` 下的一个目录，含 `plugin.json` manifest 与一个 ES module 入口，可以向 Bruce 注册 **Tool**、**Hook** 与 **Slash Command**。
+
+```text
+<workspace>/.bruce/plugins/<name>/plugin.json   workspace 级
+~/.bruce/plugins/<name>/plugin.json             user 级（同名时 workspace 覆盖 user）
+```
+
+```json
+{
+  "apiVersion": "bruce.plugin/v1",
+  "name": "todo-tracker",
+  "version": "1.0.0",
+  "description": "Tracks TODO comments",
+  "entry": "index.js",
+  "permissions": ["fs.read", "storage"],
+  "tools": [{ "name": "todo_scan", "description": "Scan for TODOs", "handler": "scan" }]
+}
+```
+
+```js
+import { set } from "bruce:storage";
+
+export function scan(input) {
+  set({ scope: "plugin", key: "last", value: input.path });
+  return { path: input.path, options: input.options, files: input.files };
+}
+```
+
+要点：
+
+- **插件 Tool 进入 Bruce 原有 Tool Registry**，与内建 Tool、MCP Tool 走完全相同的调度、并发控制、沙箱、HITL、取消与事件路径。Agent 无法区分 Tool 来自哪里，也不需要区分。
+- **参数是标准 JSON 数据模型**：nested object / array / boolean / number / null 无损传递，不做字符串化或扁平化。
+- **权限默认全拒**。manifest 里声明的 permission 只是"请求"，最终由 Bruce Host Policy 决定；未声明的权限拿不到，沙箱无法强制的能力也不会授予。
+- **没有 `require` / `process` / `fs` / `net` / `child_process`**。插件只能通过 `bruce:api`、`bruce:storage`、`bruce:events` 这些受控 Host API 访问外部能力，每次调用都先过权限校验。
+- **import 受控**：只允许插件目录内的相对模块与 `bruce:*` virtual modules；npm、`node_modules`、Node builtin、绝对路径、网络加载全部拒绝，路径穿越与符号链接逃逸都会被拦下。
+- **动态代码默认关闭**：`eval` 与 `Function` 构造器抛 `EvalError`，内建原型被冻结。
+- **Hook 修改数据后会重新校验**：`tool.before` 把 `{"path":"src/a.go"}` 改成 `{"path":"/etc/passwd"}` 会被安全层按**最终数据**拒绝；插件无法绕过 approval、无法改沙箱模式、无法给自己提权。
+- **取消贯通**：Ctrl-C、Tool 超时、session/agent 取消都能终止正在运行的 JS，包括 `while(true)`。
+- **reload 无残留**：`/plugin reload` 重编译并替换 generation，不留重复 Tool / Hook / Command，也不泄漏旧 Runtime。
+
+> **JavaScript VM sandbox ≠ OS security boundary。** 插件与 Bruce 同进程运行；真正约束插件的是 Host API + Host Policy + Sandbox + HITL，而不是 JS 引擎本身。
+
+`plugins.enabled: false` 可完全关闭插件发现，此时 Bruce 行为与引入插件系统前一致。
+
+完整作者文档（manifest 字段、Host API、Hook 语义与失败策略、存储 scope、调试与已知限制）见 [docs/plugins.md](docs/plugins.md)；架构与安全边界推导见 [docs/plugin-architecture.md](docs/plugin-architecture.md)。
 
 ## 原生沙箱
 

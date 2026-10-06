@@ -58,8 +58,8 @@ func TestCheckpointCrashHelper(t *testing.T) {
 		return llm.ChatResponse{Content: "verified and finished"}, nil
 	}
 	r := newCheckpointRuntime(t, workspace, home, client)
-	r.Tools.Register(tool.Tool{Name: "checkpoint_write", Parameters: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`), Exec: func(_ context.Context, args map[string]string) (string, error) {
-		path := args["path"]
+	r.Tools.Register(tool.Tool{Name: "checkpoint_write", Parameters: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`), Exec: func(_ context.Context, args tool.Args) (string, error) {
+		path := tool.StringArg(args, "path")
 		err := os.WriteFile(filepath.Join(workspace, path), []byte("written once"), 0o644)
 		return "wrote " + path, err
 	}})
@@ -113,7 +113,7 @@ func TestCheckpointSurvivesProcessExitAndDoesNotReplayTools(t *testing.T) {
 			}
 			cleanupRuntime(t, r)
 			// Any replay through the executor would be a regression.
-			r.Tools.Register(tool.Tool{Name: "checkpoint_write", Exec: func(context.Context, map[string]string) (string, error) {
+			r.Tools.Register(tool.Tool{Name: "checkpoint_write", Exec: func(context.Context, tool.Args) (string, error) {
 				t.Fatal("replayed completed tool")
 				return "", nil
 			}})
