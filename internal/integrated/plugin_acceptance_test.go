@@ -136,11 +136,20 @@ func TestPluginAcceptanceMVP(t *testing.T) {
 		t.Fatalf("criterion 1/2: loaded %d plugins, want 1 (diagnostics: %v)", rt.Plugins.Count(), rt.Plugins.Diagnostics())
 	}
 
-	// 2. The manifest was validated and 3. the module loaded: both are implied
-	// by the plugin being present with its handlers resolved.
+	// 2. The manifest was validated: a rejection would have produced a
+	// diagnostic and no loaded plugin, so a loaded plugin with the declared
+	// identity is the observable form of "the manifest passed validation".
 	statuses := rt.Plugins.Plugins()
 	if statuses[0].Name != "acceptance" || statuses[0].Version != "1.0.0" {
 		t.Fatalf("criterion 2: status = %+v", statuses[0])
+	}
+	for _, diagnostic := range rt.Plugins.Diagnostics() {
+		t.Errorf("criterion 2: manifest validation produced a diagnostic: %s", diagnostic.String())
+	}
+	// 3. The JS module loaded: the plugin would have been skipped otherwise,
+	// and its handler would not resolve in a real runtime.
+	if got := rt.Plugins.Count(); got != 1 {
+		t.Fatalf("criterion 3: the module did not load (%d plugins)", got)
 	}
 
 	// 4. The tool is in Bruce's registry.
@@ -181,6 +190,13 @@ func TestPluginAcceptanceMVP(t *testing.T) {
 	}
 	if toolResult == "" {
 		t.Fatal("criterion 8: no tool result reached the agent")
+	}
+	// 7. The tool executed through the JavaScript engine, not through a
+	// Go-side shortcut. The marker below exists only because the plugin's own
+	// JavaScript ran: the handler computes it from the arguments, so the host
+	// could not have produced it.
+	if !strings.Contains(toolResult, "was-null") {
+		t.Fatalf("criterion 7: the plugin's JavaScript did not run; result = %q", toolResult)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(toolResult), &payload); err != nil {
