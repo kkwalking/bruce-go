@@ -251,7 +251,29 @@ func TestSecurityImportTraversalIsRefused(t *testing.T) {
 			if !strings.Contains(text, string(CategoryLink)) {
 				t.Errorf("a refused import must be categorised as %q, got: %s", CategoryLink, text)
 			}
-			if !strings.Contains(text, "not allowed") && !strings.Contains(text, "does not exist") {
+			// The refusal must explain itself, but WHICH explanation is
+			// platform-dependent and both are correct.
+			//
+			// A traversal specifier is refused either because it resolves
+			// outside the plugin root ("escapes the plugin directory") or
+			// because it resolves to nothing at all ("does not exist"). Which
+			// one you get depends on the temp-directory depth, because that
+			// decides how many "../" are needed to climb out of the tree:
+			//
+			//   Linux  /tmp/T/001/.bruce/plugins/escaper + 8x"../" -> /etc/passwd      (exists -> "escapes")
+			//   macOS  /var/folders/xx/T/T/001/...      + 8x"../" -> /var/folders/etc/passwd (absent -> "does not exist")
+			//
+			// Both are refusals and the security property is identical on both
+			// platforms; only the message differs. Asserting a single message
+			// made this test fail on Linux CI while passing on macOS, which is
+			// the cross-platform trap AGENTS.md warns about. The strong
+			// assertions above (the plugin did not load, the tool is not
+			// registered, the failure is categorised as a link error) are what
+			// actually pin the security property.
+			explained := strings.Contains(text, "not allowed") ||
+				strings.Contains(text, "does not exist") ||
+				strings.Contains(text, "escapes the plugin directory")
+			if !explained {
 				t.Errorf("the refusal must explain why %q was refused, got: %s", specifier, text)
 			}
 		})
