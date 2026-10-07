@@ -8,8 +8,6 @@
 本项目是 Java 版 bruce coding agent 的 Go 版本移植，尚未完成。
 
 - 原 Java 版本：`/Users/zhouzekun/code/bruce-cli`
-- 移植映射：`docs/MIGRATION_MAP.md`
-- 移植取舍与测试哲学：`docs/PORTING_NOTES.md`
 
 ## 分支与提交
 

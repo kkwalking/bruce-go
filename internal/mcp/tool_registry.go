@@ -64,7 +64,7 @@ func (m *Manager) Tools() []RegisteredTool {
 	return out
 }
 
-func (m *Manager) CallTool(ctx context.Context, serverName, toolName string, args map[string]string) (string, error) {
+func (m *Manager) CallTool(ctx context.Context, serverName, toolName string, args tool.Args) (string, error) {
 	policy := m.sandboxStatus()
 	m.mu.RLock()
 	server := m.servers[serverName]
@@ -105,7 +105,7 @@ func RegisterTools(registry *tool.Registry, manager *Manager) {
 			Name:        localName,
 			Description: "[MCP " + serverName + "] " + item.Tool.Description + annotationSummary(item.Tool.Annotations),
 			Parameters:  schema,
-			Exec: func(ctx context.Context, args map[string]string) (string, error) {
+			Exec: func(ctx context.Context, args tool.Args) (string, error) {
 				return manager.CallTool(ctx, serverName, remoteName, args)
 			},
 			PromptSnippet: "Call MCP tool " + serverName + "/" + remoteName,
@@ -113,6 +113,13 @@ func RegisterTools(registry *tool.Registry, manager *Manager) {
 				Source:          tool.SourceMCP,
 				MinimumMode:     item.MinimumMode,
 				RequiresNetwork: item.RequiresNetwork,
+				// An MCP tool is third-party code: its capabilities are
+				// declared by the remote server and cannot be trusted, so it
+				// keeps requiring human approval and is classified as
+				// medium risk regardless of what it claims.
+				RequiresApproval: true,
+				Risk:             tool.RiskMedium,
+				ApprovalReason:   "Calls a third-party MCP tool that may access local or remote resources",
 			},
 		})
 	}

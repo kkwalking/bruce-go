@@ -94,6 +94,13 @@ type Request struct {
 	Suggestion      string
 }
 
+// NewRequest builds an approval request from a tool name alone.
+//
+// Callers that hold the tool's declared Policy must set DangerLevel and
+// RiskDescription from it instead: since the plugin system exists, the tool
+// name is no longer a trustworthy source of risk information. This
+// constructor remains for callers that only have a name, and keeps its
+// historical behavior so nothing regresses.
 func NewRequest(toolName, args, suggestion string) Request {
 	return Request{
 		ToolName:        toolName,

@@ -31,7 +31,7 @@ func TestManagerEnableRegisterAndCallTool(t *testing.T) {
 	}
 	registry := tool.EmptyRegistry(t.TempDir())
 	RegisterTools(registry, manager)
-	out := registry.Execute(context.Background(), "mcp_demo_echo", map[string]string{"text": "hello"})
+	out := registry.Execute(context.Background(), "mcp_demo_echo", tool.Args{"text": "hello"})
 	if out != "mcp:hello" {
 		t.Fatalf("tool output = %q", out)
 	}
@@ -300,7 +300,7 @@ func TestMCPToolAccessFiltersDefinitionsAndRejectsStaleCalls(t *testing.T) {
 	if len(defs) != 1 || defs[0].Name != "mcp_filesystem_read" {
 		t.Fatalf("read-only definitions = %+v", defs)
 	}
-	out := registry.Execute(context.Background(), "mcp_filesystem_write", map[string]string{"path": "blocked"})
+	out := registry.Execute(context.Background(), "mcp_filesystem_write", tool.Args{"path": "blocked"})
 	if !strings.Contains(out, "required=workspace-write") {
 		t.Fatalf("write policy output = %q", out)
 	}
@@ -613,8 +613,8 @@ func (f *fakeTransport) Call(_ context.Context, method string, params any) (json
 		return json.RawMessage(`{"tools":[{"name":"echo","description":"echo text","inputSchema":{"type":"object","properties":{"text":{"type":"string"}}}}]}`), nil
 	case "tools/call":
 		payload := params.(map[string]any)
-		args := payload["arguments"].(map[string]string)
-		return json.RawMessage(`{"content":[{"type":"text","text":"mcp:` + args["text"] + `"}]}`), nil
+		args := payload["arguments"].(map[string]any)
+		return json.RawMessage(`{"content":[{"type":"text","text":"mcp:` + args["text"].(string) + `"}]}`), nil
 	default:
 		return json.RawMessage(`{}`), nil
 	}

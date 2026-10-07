@@ -13,7 +13,7 @@ import (
 func TestCheckpointPersistenceFailurePreventsToolExecution(t *testing.T) {
 	registry := tool.EmptyRegistry(t.TempDir())
 	executed := 0
-	registry.Register(tool.Tool{Name: "write", Exec: func(context.Context, map[string]string) (string, error) { executed++; return "written", nil }})
+	registry.Register(tool.Tool{Name: "write", Exec: func(context.Context, tool.Args) (string, error) { executed++; return "written", nil }})
 	client := &FakeClient{Responses: []llm.ChatResponse{{ToolCalls: []llm.ToolCall{{ID: "call", Function: llm.FunctionCall{Name: "write", Arguments: `{}`}}}}}}
 	a := New(client, registry, "", runtime.DefaultConcurrency(), nil)
 	failure := errors.New("disk full")
@@ -34,7 +34,7 @@ func TestCheckpointPersistenceFailurePreventsToolExecution(t *testing.T) {
 func TestCheckpointJournalFailureStopsFurtherTools(t *testing.T) {
 	registry := tool.EmptyRegistry(t.TempDir())
 	executed := 0
-	registry.Register(tool.Tool{Name: "write", Exec: func(context.Context, map[string]string) (string, error) { executed++; return "written", nil }})
+	registry.Register(tool.Tool{Name: "write", Exec: func(context.Context, tool.Args) (string, error) { executed++; return "written", nil }})
 	client := &FakeClient{Responses: []llm.ChatResponse{{ToolCalls: []llm.ToolCall{
 		{ID: "one", Function: llm.FunctionCall{Name: "write", Arguments: `{}`}},
 		{ID: "two", Function: llm.FunctionCall{Name: "write", Arguments: `{}`}},

@@ -22,11 +22,11 @@ func TestRegistryBuiltinsAndHITL(t *testing.T) {
 	dir := t.TempDir()
 	registry := NewRegistry(dir)
 
-	out := registry.Execute(context.Background(), "write_file", map[string]string{"path": "a.txt", "content": "hello"})
+	out := registry.Execute(context.Background(), "write_file", Args{"path": "a.txt", "content": "hello"})
 	if !strings.Contains(out, "File written") {
 		t.Fatalf("write_file output = %q", out)
 	}
-	out = registry.Execute(context.Background(), "edit_file", map[string]string{"path": "a.txt", "old_text": "hello", "new_text": "hi"})
+	out = registry.Execute(context.Background(), "edit_file", Args{"path": "a.txt", "old_text": "hello", "new_text": "hi"})
 	if !strings.Contains(out, "File edited") {
 		t.Fatalf("edit_file output = %q", out)
 	}
@@ -37,13 +37,13 @@ func TestRegistryBuiltinsAndHITL(t *testing.T) {
 	if string(data) != "hi" {
 		t.Fatalf("file content = %q", data)
 	}
-	out = registry.Execute(context.Background(), "read_file", map[string]string{"path": "a.txt"})
+	out = registry.Execute(context.Background(), "read_file", Args{"path": "a.txt"})
 	if !strings.Contains(out, "hi") {
 		t.Fatalf("read_file output = %q", out)
 	}
 
 	registry.WithHITL(approval.NewAutoHandler(true, approval.Reject("no writes")))
-	out = registry.Execute(context.Background(), "write_file", map[string]string{"path": "b.txt", "content": "blocked"})
+	out = registry.Execute(context.Background(), "write_file", Args{"path": "b.txt", "content": "blocked"})
 	if !strings.Contains(out, "[HITL] Operation was rejected") {
 		t.Fatalf("HITL output = %q", out)
 	}
@@ -61,10 +61,10 @@ func TestRegistrySubsetKeepsSharedExecutionSettings(t *testing.T) {
 	if _, ok := subset.Lookup("edit_file"); ok {
 		t.Fatal("subset unexpectedly contains edit_file")
 	}
-	if out := subset.Execute(context.Background(), "write_file", map[string]string{"path": "a.txt", "content": "blocked"}); !strings.Contains(out, "[HITL] Operation was rejected") {
+	if out := subset.Execute(context.Background(), "write_file", Args{"path": "a.txt", "content": "blocked"}); !strings.Contains(out, "[HITL] Operation was rejected") {
 		t.Fatalf("subset write did not reuse HITL: %q", out)
 	}
-	if out := subset.Execute(context.Background(), "edit_file", map[string]string{"path": "a.txt", "old_text": "x", "new_text": "y"}); !strings.Contains(out, "Unknown tool: edit_file") {
+	if out := subset.Execute(context.Background(), "edit_file", Args{"path": "a.txt", "old_text": "x", "new_text": "y"}); !strings.Contains(out, "Unknown tool: edit_file") {
 		t.Fatalf("subset edit_file output = %q", out)
 	}
 }
@@ -73,14 +73,14 @@ func TestHITLModifiedArgumentsAreRevalidated(t *testing.T) {
 	dir := t.TempDir()
 	modifiedWrite := approval.Result{Decision: approval.Modified, Arguments: `{"path":".git/config","content":"malicious"}`}
 	registry := NewRegistry(dir).WithHITL(approval.NewAutoHandler(true, modifiedWrite))
-	out := registry.Execute(context.Background(), "write_file", map[string]string{"path": "safe.txt", "content": "safe"})
+	out := registry.Execute(context.Background(), "write_file", Args{"path": "safe.txt", "content": "safe"})
 	if !strings.Contains(out, "file tools must not modify .git directly") {
 		t.Fatalf("modified write was not revalidated: %q", out)
 	}
 
 	modifiedCommand := approval.Result{Decision: approval.Modified, Arguments: `{"command":"rm -rf /"}`}
 	registry.WithHITL(approval.NewAutoHandler(true, modifiedCommand))
-	out = registry.Execute(context.Background(), "execute_command", map[string]string{"command": "pwd"})
+	out = registry.Execute(context.Background(), "execute_command", Args{"command": "pwd"})
 	if !strings.Contains(out, "Command rejected by security policy") {
 		t.Fatalf("modified command was not revalidated: %q", out)
 	}
@@ -111,7 +111,7 @@ func TestBuildPromptIncludesRoutingGuidelines(t *testing.T) {
 		Name:          "mcp__filesystem__directory_tree",
 		Description:   "directory tree",
 		Parameters:    mustSchema(t, `{"type":"object","properties":{}}`),
-		Exec:          func(context.Context, map[string]string) (string, error) { return "[]", nil },
+		Exec:          func(context.Context, Args) (string, error) { return "[]", nil },
 		PromptSnippet: "MCP filesystem tree",
 	})
 	prompt = registry.BuildPrompt()
@@ -126,13 +126,13 @@ func TestReadFileOffsetLimitAndContinuationHints(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := NewRegistry(dir)
-	out := registry.Execute(context.Background(), "read_file", map[string]string{"path": "notes.txt", "offset": "2", "limit": "2"})
+	out := registry.Execute(context.Background(), "read_file", Args{"path": "notes.txt", "offset": "2", "limit": "2"})
 	for _, want := range []string{"lines 2-3 of 4", "line2\nline3", "Use offset=4 to continue"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("read_file output missing %q:\n%s", want, out)
 		}
 	}
-	out = registry.Execute(context.Background(), "read_file", map[string]string{"path": "notes.txt", "offset": "5"})
+	out = registry.Execute(context.Background(), "read_file", Args{"path": "notes.txt", "offset": "5"})
 	if !strings.Contains(out, "offset is past the end of the file") || !strings.Contains(out, "total lines=4") {
 		t.Fatalf("offset output = %q", out)
 	}
@@ -150,7 +150,7 @@ func TestReadFileLargeOutputKeepsContinuationHint(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := NewRegistry(dir)
-	out := registry.Execute(context.Background(), "read_file", map[string]string{"path": "large.txt"})
+	out := registry.Execute(context.Background(), "read_file", Args{"path": "large.txt"})
 	if !strings.Contains(out, "char limit") || !strings.Contains(out, "Use offset=") {
 		t.Fatalf("large read output missing continuation hint:\n%s", out)
 	}
@@ -170,34 +170,34 @@ func TestFileToolsRejectTraversalSymlinksAndGitMetadata(t *testing.T) {
 	}
 	registry := NewRegistry(workspace)
 
-	out := registry.Execute(context.Background(), "read_file", map[string]string{"path": "../secret.txt"})
+	out := registry.Execute(context.Background(), "read_file", Args{"path": "../secret.txt"})
 	if !strings.Contains(out, "path is outside the working directory") {
 		t.Fatalf("parent traversal output = %q", out)
 	}
-	out = registry.Execute(context.Background(), "read_file", map[string]string{"path": filepath.Join(outside, "secret.txt")})
+	out = registry.Execute(context.Background(), "read_file", Args{"path": filepath.Join(outside, "secret.txt")})
 	if !strings.Contains(out, "path is outside the working directory") {
 		t.Fatalf("absolute traversal output = %q", out)
 	}
-	out = registry.Execute(context.Background(), "read_file", map[string]string{"path": "escape/secret.txt"})
+	out = registry.Execute(context.Background(), "read_file", Args{"path": "escape/secret.txt"})
 	if strings.Contains(out, "outside-secret") || !strings.Contains(out, "Tool execution failed") {
 		t.Fatalf("symlink read output = %q", out)
 	}
-	out = registry.Execute(context.Background(), "write_file", map[string]string{"path": "escape/new.txt", "content": "bad"})
+	out = registry.Execute(context.Background(), "write_file", Args{"path": "escape/new.txt", "content": "bad"})
 	if !strings.Contains(out, "Tool execution failed") {
 		t.Fatalf("symlink write output = %q", out)
 	}
 	if _, err := os.Stat(filepath.Join(outside, "new.txt")); !os.IsNotExist(err) {
 		t.Fatalf("symlink write escaped workspace: %v", err)
 	}
-	out = registry.Execute(context.Background(), "read_file", map[string]string{"path": "final-link"})
+	out = registry.Execute(context.Background(), "read_file", Args{"path": "final-link"})
 	if strings.Contains(out, "outside-secret") || !strings.Contains(out, "Tool execution failed") {
 		t.Fatalf("final symlink read output = %q", out)
 	}
-	out = registry.Execute(context.Background(), "read_file", map[string]string{"path": "escape/"})
+	out = registry.Execute(context.Background(), "read_file", Args{"path": "escape/"})
 	if strings.Contains(out, "outside-secret") || !strings.Contains(out, "Tool execution failed") {
 		t.Fatalf("trailing slash escape output = %q", out)
 	}
-	out = registry.Execute(context.Background(), "write_file", map[string]string{"path": ".git/config", "content": "bad"})
+	out = registry.Execute(context.Background(), "write_file", Args{"path": ".git/config", "content": "bad"})
 	if !strings.Contains(out, "must not modify .git directly") {
 		t.Fatalf("git metadata output = %q", out)
 	}
@@ -206,11 +206,11 @@ func TestFileToolsRejectTraversalSymlinksAndGitMetadata(t *testing.T) {
 func TestFileToolsRejectGitMetadataCaseVariants(t *testing.T) {
 	registry := NewRegistry(t.TempDir())
 	for _, path := range []string{".GIT/config", ".Git/hooks/pre-commit", "sub/.gIt/config"} {
-		out := registry.Execute(context.Background(), "write_file", map[string]string{"path": path, "content": "bad"})
+		out := registry.Execute(context.Background(), "write_file", Args{"path": path, "content": "bad"})
 		if !strings.Contains(out, "must not modify .git directly") {
 			t.Fatalf("case variant %q output = %q", path, out)
 		}
-		out = registry.Execute(context.Background(), "edit_file", map[string]string{"path": path, "old_text": "a", "new_text": "b"})
+		out = registry.Execute(context.Background(), "edit_file", Args{"path": path, "old_text": "a", "new_text": "b"})
 		if !strings.Contains(out, "must not modify .git directly") {
 			t.Fatalf("case variant edit %q output = %q", path, out)
 		}
@@ -234,7 +234,7 @@ func TestFileToolsRejectSymlinkIntoGitMetadata(t *testing.T) {
 	}
 	registry := NewRegistry(workspace)
 	for _, path := range []string{"innocent/hooks/pre-commit", "nested/link/pre-commit"} {
-		out := registry.Execute(context.Background(), "write_file", map[string]string{"path": path, "content": "#!/bin/sh\necho pwned"})
+		out := registry.Execute(context.Background(), "write_file", Args{"path": path, "content": "#!/bin/sh\necho pwned"})
 		if !strings.Contains(out, "must not modify .git directly") {
 			t.Fatalf("symlinked git write %q output = %q", path, out)
 		}
@@ -252,7 +252,7 @@ func TestReadOnlySandboxRejectsFileWritesBeforeExecution(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = manager.Close() })
 	registry := NewRegistry(workspace).WithSandbox(manager)
-	out := registry.Execute(context.Background(), "write_file", map[string]string{"path": "blocked.txt", "content": "bad"})
+	out := registry.Execute(context.Background(), "write_file", Args{"path": "blocked.txt", "content": "bad"})
 	if !strings.Contains(out, "read-only mode") {
 		t.Fatalf("read-only output = %q", out)
 	}
@@ -273,7 +273,7 @@ func TestSandboxPolicyHidesAndRejectsUnknownToolBeforeHITL(t *testing.T) {
 		Description:   "unclassified extension",
 		Parameters:    mustSchema(t, `{"type":"object","properties":{}}`),
 		PromptSnippet: "must stay hidden",
-		Exec: func(context.Context, map[string]string) (string, error) {
+		Exec: func(context.Context, Args) (string, error) {
 			executed.Add(1)
 			return "bad", nil
 		},
@@ -310,8 +310,8 @@ func TestSandboxPolicyAllowsWorkspaceToolAndRevalidatesGeneration(t *testing.T) 
 		Name:        "mcp_write",
 		Description: "workspace writer",
 		Parameters:  mustSchema(t, `{"type":"object","properties":{}}`),
-		Policy:      Policy{Source: SourceMCP, MinimumMode: sandbox.ModeWorkspaceWrite},
-		Exec: func(context.Context, map[string]string) (string, error) {
+		Policy:      Policy{Source: SourceMCP, MinimumMode: sandbox.ModeWorkspaceWrite, RequiresApproval: true},
+		Exec: func(context.Context, Args) (string, error) {
 			executed.Add(1)
 			return "bad", nil
 		},
@@ -358,7 +358,7 @@ func TestParallelToolCallExecutor(t *testing.T) {
 		Description: "sleepy fake tool",
 		Parameters:  mustSchema(t, `{"type":"object","properties":{"value":{"type":"string"}}}`),
 		Policy:      Policy{ParallelSafe: true},
-		Exec: func(_ context.Context, args map[string]string) (string, error) {
+		Exec: func(_ context.Context, args Args) (string, error) {
 			cur := atomic.AddInt32(&running, 1)
 			for {
 				old := atomic.LoadInt32(&maxSeen)
@@ -368,7 +368,7 @@ func TestParallelToolCallExecutor(t *testing.T) {
 			}
 			time.Sleep(20 * time.Millisecond)
 			atomic.AddInt32(&running, -1)
-			return args["value"], nil
+			return StringArg(args, "value"), nil
 		},
 	})
 	calls := []llm.ToolCall{
@@ -393,10 +393,10 @@ func TestParallelSafeWorkerCountRespectsLimit(t *testing.T) {
 		Name:       "limited",
 		Parameters: mustSchema(t, `{"type":"object","properties":{"value":{"type":"string"}}}`),
 		Policy:     Policy{ParallelSafe: true},
-		Exec: func(_ context.Context, args map[string]string) (string, error) {
-			started <- args["value"]
+		Exec: func(_ context.Context, args Args) (string, error) {
+			started <- StringArg(args, "value")
 			<-release
-			return args["value"], nil
+			return StringArg(args, "value"), nil
 		},
 	})
 	calls := make([]llm.ToolCall, 4)
@@ -433,15 +433,15 @@ func TestParallelSafeCallsReturnInInputOrderAfterOutOfOrderCompletion(t *testing
 		Name:       "ordered",
 		Parameters: mustSchema(t, `{"type":"object","properties":{"value":{"type":"string"}}}`),
 		Policy:     Policy{ParallelSafe: true},
-		Exec: func(_ context.Context, args map[string]string) (string, error) {
-			started <- args["value"]
-			if args["value"] == "a" {
+		Exec: func(_ context.Context, args Args) (string, error) {
+			started <- StringArg(args, "value")
+			if StringArg(args, "value") == "a" {
 				<-releaseA
 			} else {
 				<-releaseB
 			}
-			executed <- args["value"]
-			return args["value"], nil
+			executed <- StringArg(args, "value")
+			return StringArg(args, "value"), nil
 		},
 	})
 	calls := []llm.ToolCall{
@@ -472,11 +472,11 @@ func TestExclusiveToolCallsRunInInputOrder(t *testing.T) {
 	registry.Register(Tool{
 		Name:       "exclusive",
 		Parameters: mustSchema(t, `{"type":"object","properties":{"value":{"type":"string"}}}`),
-		Exec: func(_ context.Context, args map[string]string) (string, error) {
+		Exec: func(_ context.Context, args Args) (string, error) {
 			mu.Lock()
-			order = append(order, args["value"])
+			order = append(order, StringArg(args, "value"))
 			mu.Unlock()
-			return args["value"], nil
+			return StringArg(args, "value"), nil
 		},
 	})
 	calls := []llm.ToolCall{
@@ -502,9 +502,9 @@ func TestParallelismOnePreservesOrderForParallelSafeCalls(t *testing.T) {
 		Name:       "safe",
 		Parameters: mustSchema(t, `{"type":"object","properties":{"value":{"type":"string"}}}`),
 		Policy:     Policy{ParallelSafe: true},
-		Exec: func(_ context.Context, args map[string]string) (string, error) {
-			order = append(order, args["value"])
-			return args["value"], nil
+		Exec: func(_ context.Context, args Args) (string, error) {
+			order = append(order, StringArg(args, "value"))
+			return StringArg(args, "value"), nil
 		},
 	})
 	calls := []llm.ToolCall{
@@ -532,7 +532,7 @@ func TestExclusiveToolIsBarrierBetweenParallelSafeSegments(t *testing.T) {
 		Name:       "safe",
 		Parameters: mustSchema(t, `{"type":"object","properties":{}}`),
 		Policy:     Policy{ParallelSafe: true},
-		Exec: func(context.Context, map[string]string) (string, error) {
+		Exec: func(context.Context, Args) (string, error) {
 			if exclusiveRunning.Load() != 0 {
 				violation.Store(true)
 			}
@@ -545,7 +545,7 @@ func TestExclusiveToolIsBarrierBetweenParallelSafeSegments(t *testing.T) {
 	registry.Register(Tool{
 		Name:       "exclusive",
 		Parameters: mustSchema(t, `{"type":"object","properties":{}}`),
-		Exec: func(context.Context, map[string]string) (string, error) {
+		Exec: func(context.Context, Args) (string, error) {
 			exclusiveRunning.Add(1)
 			if safeRunning.Load() != 0 {
 				violation.Store(true)
@@ -581,7 +581,7 @@ func TestBatchTimeoutReturnsWithoutWaitingForUncooperativeTool(t *testing.T) {
 	registry.Register(Tool{
 		Name:       "blocked",
 		Parameters: mustSchema(t, `{"type":"object","properties":{}}`),
-		Exec: func(context.Context, map[string]string) (string, error) {
+		Exec: func(context.Context, Args) (string, error) {
 			close(started)
 			<-release
 			return "late", nil
@@ -613,7 +613,7 @@ func TestBatchTimeoutFinalizesMultipleCallsAndDropsLateResults(t *testing.T) {
 		Name:       "blocked-safe",
 		Parameters: mustSchema(t, `{"type":"object","properties":{}}`),
 		Policy:     Policy{ParallelSafe: true},
-		Exec: func(context.Context, map[string]string) (string, error) {
+		Exec: func(context.Context, Args) (string, error) {
 			started.Add(1)
 			<-release
 			returned <- struct{}{}
@@ -655,7 +655,7 @@ func TestBatchTimeoutDoesNotStartQueuedExclusiveCalls(t *testing.T) {
 	registry.Register(Tool{
 		Name:       "first",
 		Parameters: mustSchema(t, `{"type":"object","properties":{}}`),
-		Exec: func(ctx context.Context, _ map[string]string) (string, error) {
+		Exec: func(ctx context.Context, _ Args) (string, error) {
 			<-ctx.Done()
 			return "", ctx.Err()
 		},
@@ -663,7 +663,7 @@ func TestBatchTimeoutDoesNotStartQueuedExclusiveCalls(t *testing.T) {
 	registry.Register(Tool{
 		Name:       "second",
 		Parameters: mustSchema(t, `{"type":"object","properties":{}}`),
-		Exec: func(context.Context, map[string]string) (string, error) {
+		Exec: func(context.Context, Args) (string, error) {
 			secondStarted.Store(true)
 			return "bad", nil
 		},
@@ -703,7 +703,7 @@ func TestParentCancellationInterruptsRunningBatch(t *testing.T) {
 	registry.Register(Tool{
 		Name:       "wait",
 		Parameters: mustSchema(t, `{"type":"object","properties":{}}`),
-		Exec: func(ctx context.Context, _ map[string]string) (string, error) {
+		Exec: func(ctx context.Context, _ Args) (string, error) {
 			close(started)
 			<-ctx.Done()
 			return "", ctx.Err()
@@ -752,7 +752,7 @@ func TestToolPanicBecomesFailedResult(t *testing.T) {
 	registry.Register(Tool{
 		Name:       "panic",
 		Parameters: mustSchema(t, `{"type":"object","properties":{}}`),
-		Exec: func(context.Context, map[string]string) (string, error) {
+		Exec: func(context.Context, Args) (string, error) {
 			panic("boom")
 		},
 	})
@@ -764,7 +764,7 @@ func TestToolPanicBecomesFailedResult(t *testing.T) {
 	if result.Status != ToolCallFailed || !strings.Contains(result.Result, "panic: boom") {
 		t.Fatalf("result = %+v", result)
 	}
-	outcome := registry.ExecuteResult(context.Background(), "panic", map[string]string{})
+	outcome := registry.ExecuteResult(context.Background(), "panic", Args{})
 	if outcome.Status != ToolCallFailed || !strings.Contains(outcome.Output, "panic: boom") {
 		t.Fatalf("registry outcome = %+v", outcome)
 	}
@@ -794,7 +794,7 @@ func TestApprovalWaitDoesNotConsumeBatchTimeout(t *testing.T) {
 	registry.Register(Tool{
 		Name:       "write_file",
 		Parameters: mustSchema(t, `{"type":"object","properties":{}}`),
-		Exec:       func(context.Context, map[string]string) (string, error) { return "done", nil },
+		Exec:       func(context.Context, Args) (string, error) { return "done", nil },
 	})
 	result := (ParallelExecutor{Registry: registry, Config: runtime.ConcurrencyConfig{MaxParallelism: 1, BatchTimeout: 10 * time.Millisecond}}).Execute(
 		context.Background(),
@@ -815,7 +815,7 @@ func TestStructuredToolCallStatuses(t *testing.T) {
 	})
 	t.Run("rejected", func(t *testing.T) {
 		registry := EmptyRegistry(t.TempDir()).WithHITL(&delayedApprovalHandler{result: approval.Reject("no")})
-		registry.Register(Tool{Name: "write_file", Parameters: mustSchema(t, `{"type":"object","properties":{}}`), Exec: func(context.Context, map[string]string) (string, error) { return "bad", nil }})
+		registry.Register(Tool{Name: "write_file", Parameters: mustSchema(t, `{"type":"object","properties":{}}`), Policy: Policy{RequiresApproval: true}, Exec: func(context.Context, Args) (string, error) { return "bad", nil }})
 		result := RunToolCall(context.Background(), registry, llm.ToolCall{ID: "1", Function: llm.FunctionCall{Name: "write_file", Arguments: `{"path":"x.txt"}`}})
 		if result.Status != ToolCallRejected {
 			t.Fatalf("result = %+v", result)
@@ -823,7 +823,7 @@ func TestStructuredToolCallStatuses(t *testing.T) {
 	})
 	t.Run("skipped", func(t *testing.T) {
 		registry := EmptyRegistry(t.TempDir()).WithHITL(&delayedApprovalHandler{result: approval.Skip()})
-		registry.Register(Tool{Name: "write_file", Parameters: mustSchema(t, `{"type":"object","properties":{}}`), Exec: func(context.Context, map[string]string) (string, error) { return "bad", nil }})
+		registry.Register(Tool{Name: "write_file", Parameters: mustSchema(t, `{"type":"object","properties":{}}`), Policy: Policy{RequiresApproval: true}, Exec: func(context.Context, Args) (string, error) { return "bad", nil }})
 		result := RunToolCall(context.Background(), registry, llm.ToolCall{ID: "1", Function: llm.FunctionCall{Name: "write_file", Arguments: `{"path":"x.txt"}`}})
 		if result.Status != ToolCallSkipped {
 			t.Fatalf("result = %+v", result)
@@ -870,5 +870,52 @@ func TestEncodeToolImage(t *testing.T) {
 	}
 	if !strings.Contains(out, "dGVzdA==") {
 		t.Fatalf("output missing base64 data: %q", out)
+	}
+}
+
+// TestPolicyTimeoutIsEnforced proves the declared per-tool timeout actually
+// bounds an invocation.
+//
+// The field existed but had no consumer, so a tool that declared a timeout
+// still ran forever under a background context. A declared limit that is not
+// enforced is worse than no limit: the caller stops worrying about it.
+func TestPolicyTimeoutIsEnforced(t *testing.T) {
+	registry := EmptyRegistry(t.TempDir())
+	registry.Register(Tool{
+		Name:       "slow",
+		Parameters: mustSchema(t, `{"type":"object","properties":{}}`),
+		Policy:     Policy{Timeout: 100 * time.Millisecond},
+		Exec: func(ctx context.Context, _ Args) (string, error) {
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+	})
+	start := time.Now()
+	outcome := registry.ExecuteResult(context.Background(), "slow", nil)
+	elapsed := time.Since(start)
+	if elapsed > 10*time.Second {
+		t.Fatalf("the declared timeout did not apply: %s", elapsed)
+	}
+	if outcome.Status != ToolCallTimeout {
+		t.Fatalf("status = %q, want timeout; output = %q", outcome.Status, outcome.Output)
+	}
+}
+
+// TestNoPolicyTimeoutMeansNoBound keeps the default honest: a tool that does
+// not declare a timeout is not silently bounded by this change.
+func TestNoPolicyTimeoutMeansNoBound(t *testing.T) {
+	registry := EmptyRegistry(t.TempDir())
+	registry.Register(Tool{
+		Name:       "quick",
+		Parameters: mustSchema(t, `{"type":"object","properties":{}}`),
+		Exec: func(ctx context.Context, _ Args) (string, error) {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			return "ran", nil
+		},
+	})
+	if outcome := registry.ExecuteResult(context.Background(), "quick", nil); outcome.Status != ToolCallSuccess {
+		t.Fatalf("outcome = %+v", outcome)
 	}
 }

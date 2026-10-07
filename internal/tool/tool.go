@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +21,7 @@ import (
 	"bruce-go/internal/sandbox"
 )
 
-type Executor func(ctx context.Context, args map[string]string) (string, error)
+type Executor func(ctx context.Context, args Args) (string, error)
 
 type ToolCallStatus string
 
@@ -48,14 +47,141 @@ const (
 	SourceSkill   Source = "skill"
 	SourcePlan    Source = "plan"
 	SourceMCP     Source = "mcp"
+	SourcePlugin  Source = "plugin"
 	SourceUnknown Source = "unknown"
 )
+
+// Risk is the declared risk classification of a tool. It drives the approval
+// prompt text and lets a host policy reason about a tool without inspecting
+// its name.
+type Risk string
+
+const (
+	RiskSafe   Risk = "safe"
+	RiskLow    Risk = "low"
+	RiskMedium Risk = "medium"
+	RiskHigh   Risk = "high"
+)
+
+// WorkspaceScope says how far a tool's filesystem capability may reach.
+type WorkspaceScope string
+
+const (
+	// ScopeNone means the tool declares no filesystem capability.
+	ScopeNone WorkspaceScope = ""
+	// ScopeWorkspace confines filesystem access to the workspace root.
+	ScopeWorkspace WorkspaceScope = "workspace"
+	// ScopeHost allows filesystem access outside the workspace, which only a
+	// full-access sandbox may authorize.
+	ScopeHost WorkspaceScope = "host"
+)
+
+// Capability is the explicit capability metadata of a tool.
+//
+// Before this existed, the risk of a tool was inferred from its name and from
+// the "mcp_" prefix. A JavaScript plugin could therefore have picked any name
+// it liked and inherited the inference. Every tool now declares its
+// capabilities, and the host policy reads these fields only.
+type Capability struct {
+	FilesystemRead  bool
+	FilesystemWrite bool
+	Network         bool
+	Shell           bool
+	WorkspaceScope  WorkspaceScope
+}
+
+// Empty reports whether the capability set grants nothing.
+func (c Capability) Empty() bool {
+	return !c.FilesystemRead && !c.FilesystemWrite && !c.Network && !c.Shell && c.WorkspaceScope == ScopeNone
+}
 
 type Policy struct {
 	Source          Source
 	MinimumMode     sandbox.Mode
 	RequiresNetwork bool
 	ParallelSafe    bool
+
+	// Capability is the explicit capability metadata. It is the only thing a
+	// host policy needs in order to decide whether an invocation is allowed.
+	Capability Capability
+	// RequiresApproval asks the HITL handler for human confirmation.
+	RequiresApproval bool
+	// ApprovalReason is shown to the user instead of the name-derived text.
+	ApprovalReason string
+	// Risk classifies the tool for the approval prompt and for status output.
+	Risk Risk
+	// Timeout bounds one invocation. Zero means no tool-specific bound beyond
+	// the caller's context and the batch timeout.
+	Timeout time.Duration
+}
+
+// EffectiveNetwork reports whether the tool needs network access, accepting
+// either spelling so that MCP registration and capability metadata cannot
+// disagree.
+func (p Policy) EffectiveNetwork() bool {
+	return p.RequiresNetwork || p.Capability.Network
+}
+
+// NeedsApproval decides whether an invocation requires human approval.
+//
+// The declared flag wins when set. When it is not set, a tool that declares a
+// mutating capability is still treated as requiring approval: an undeclared or
+// third-party tool must fail safe rather than inherit "safe" by omission.
+func (p Policy) NeedsApproval() bool {
+	if p.RequiresApproval {
+		return true
+	}
+	return p.Capability.FilesystemWrite || p.Capability.Shell || p.Capability.Network
+}
+
+// DangerText renders the approval prompt's danger level.
+func (p Policy) DangerText() string {
+	switch p.Risk {
+	case RiskHigh:
+		return "high risk"
+	case RiskMedium:
+		return "medium risk"
+	case RiskLow:
+		return "low risk"
+	case RiskSafe:
+		return "safe"
+	default:
+		return ""
+	}
+}
+
+// Interceptor observes and may modify a tool invocation. Plugin hooks and any
+// future built-in policy implement it, so there is exactly one extension point
+// instead of a second execution path.
+//
+// BeforeTool runs after the arguments are parsed and before any policy,
+// sandbox, or approval check. A returned argument object replaces the
+// original, and every subsequent check runs against the replacement: a hook
+// that rewrites {"path":"src/a.go"} into {"path":"/etc/passwd"} is validated
+// as /etc/passwd, not as the original.
+type Interceptor interface {
+	BeforeTool(ctx context.Context, name string, args Args) (Args, error)
+	AfterTool(ctx context.Context, name string, args Args, outcome ExecutionOutcome) (ExecutionOutcome, error)
+}
+
+// InterceptorFunc adapts plain functions to Interceptor.
+type InterceptorFunc struct {
+	Before func(ctx context.Context, name string, args Args) (Args, error)
+	After  func(ctx context.Context, name string, args Args, outcome ExecutionOutcome) (ExecutionOutcome, error)
+}
+
+func (f InterceptorFunc) BeforeTool(ctx context.Context, name string, args Args) (Args, error) {
+	if f.Before == nil {
+		return args, nil
+	}
+	return f.Before(ctx, name, args)
+}
+
+func (f InterceptorFunc) AfterTool(ctx context.Context, name string, args Args, outcome ExecutionOutcome) (ExecutionOutcome, error) {
+	if f.After == nil {
+		return outcome, nil
+	}
+	return f.After(ctx, name, args, outcome)
 }
 
 type Tool struct {
@@ -66,6 +192,10 @@ type Tool struct {
 	PromptSnippet    string
 	PromptGuidelines []string
 	Policy           Policy
+	// ValidateArguments, when set, is called with the final arguments after
+	// every interceptor ran and before the policy and approval checks. It is
+	// how a plugin tool enforces its declared JSON Schema.
+	ValidateArguments func(args Args) error
 }
 
 type Registry struct {
@@ -76,6 +206,7 @@ type Registry struct {
 	commandGuard  CommandGuard
 	config        runtime.ConcurrencyConfig
 	sandbox       *sandbox.Manager
+	interceptor   Interceptor
 }
 
 func NewRegistry(workspaceRoot string) *Registry {
@@ -119,6 +250,21 @@ func (r *Registry) WithSandbox(manager *sandbox.Manager) *Registry {
 	defer r.mu.Unlock()
 	r.sandbox = manager
 	return r
+}
+
+// WithInterceptor installs the single before/after extension point used by
+// plugin interceptor hooks. Passing nil removes it.
+func (r *Registry) WithInterceptor(interceptor Interceptor) *Registry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.interceptor = interceptor
+	return r
+}
+
+func (r *Registry) interceptorFor() Interceptor {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.interceptor
 }
 
 func (r *Registry) WorkspaceRoot() string { return r.workspaceRoot }
@@ -172,6 +318,7 @@ func (r *Registry) Subset(names ...string) *Registry {
 		commandGuard:  r.commandGuard,
 		config:        r.config,
 		sandbox:       r.sandbox,
+		interceptor:   r.interceptor,
 	}
 	for _, name := range names {
 		if candidate, ok := r.tools[name]; ok {
@@ -300,7 +447,7 @@ func defaultGuidelines(tools []Tool) []string {
 
 type preparedExecution struct {
 	tool         Tool
-	args         map[string]string
+	args         Args
 	modeOverride *sandbox.Mode
 }
 
@@ -323,19 +470,19 @@ func (r *Registry) ExecuteJSON(ctx context.Context, name, argumentsJSON string) 
 	return r.executeJSONOutcome(ctx, name, argumentsJSON, nil).Output
 }
 
-func (r *Registry) Execute(ctx context.Context, name string, args map[string]string) string {
+func (r *Registry) Execute(ctx context.Context, name string, args Args) string {
 	return r.executeOutcome(ctx, name, args, nil).Output
 }
 
-func (r *Registry) ExecuteResult(ctx context.Context, name string, args map[string]string) ExecutionOutcome {
+func (r *Registry) ExecuteResult(ctx context.Context, name string, args Args) ExecutionOutcome {
 	return r.executeOutcome(ctx, name, args, nil)
 }
 
-func (r *Registry) ExecuteWithSandboxMode(ctx context.Context, name string, args map[string]string, mode sandbox.Mode) string {
+func (r *Registry) ExecuteWithSandboxMode(ctx context.Context, name string, args Args, mode sandbox.Mode) string {
 	return r.executeOutcome(ctx, name, args, &mode).Output
 }
 
-func (r *Registry) ExecuteWithSandboxModeResult(ctx context.Context, name string, args map[string]string, mode sandbox.Mode) ExecutionOutcome {
+func (r *Registry) ExecuteWithSandboxModeResult(ctx context.Context, name string, args Args, mode sandbox.Mode) ExecutionOutcome {
 	return r.executeOutcome(ctx, name, args, &mode)
 }
 
@@ -347,7 +494,7 @@ func (r *Registry) executeJSONOutcome(ctx context.Context, name, argumentsJSON s
 	return r.executeOutcome(ctx, name, args, modeOverride)
 }
 
-func (r *Registry) executeOutcome(ctx context.Context, name string, args map[string]string, modeOverride *sandbox.Mode) (outcome ExecutionOutcome) {
+func (r *Registry) executeOutcome(ctx context.Context, name string, args Args, modeOverride *sandbox.Mode) (outcome ExecutionOutcome) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			outcome = ExecutionOutcome{Output: fmt.Sprintf("Tool execution failed: panic: %v", recovered), Status: ToolCallFailed}
@@ -360,7 +507,12 @@ func (r *Registry) executeOutcome(ctx context.Context, name string, args map[str
 	return r.executePrepared(ctx, prepared)
 }
 
-func (r *Registry) prepare(ctx context.Context, name string, args map[string]string, modeOverride *sandbox.Mode) (preparedExecution, ExecutionOutcome, bool) {
+// prepare resolves the tool, runs the before interceptors, validates the
+// final arguments, and asks for approval when the tool policy requires it.
+//
+// Every security check below this point sees the arguments as the
+// interceptors left them. Nothing is validated "before the hook" only.
+func (r *Registry) prepare(ctx context.Context, name string, args Args, modeOverride *sandbox.Mode) (preparedExecution, ExecutionOutcome, bool) {
 	if err := ctx.Err(); err != nil {
 		return preparedExecution{}, contextOutcome(name, err), false
 	}
@@ -381,13 +533,31 @@ func (r *Registry) prepare(ctx context.Context, name string, args map[string]str
 			Status: ToolCallFailed,
 		}, false
 	}
+	if interceptor := r.interceptorFor(); interceptor != nil {
+		updated, err := interceptor.BeforeTool(ctx, name, CloneArgs(args))
+		if err != nil {
+			return preparedExecution{}, interceptorFailureOutcome(name, err), false
+		}
+		args = updated
+	}
+	if t.ValidateArguments != nil {
+		if err := t.ValidateArguments(args); err != nil {
+			return preparedExecution{}, validationOutcome("Tool argument validation failed: " + err.Error()), false
+		}
+	}
 	if _, rejected := r.validateToolRequest(t, args, modeOverride); rejected != "" {
 		return preparedExecution{}, validationOutcome(rejected), false
 	}
 	hitl := r.approvalHandler()
-	if hitl != nil && hitl.Enabled() && approval.RequiresApproval(name) {
-		raw, _ := json.Marshal(args)
-		result, err := hitl.Request(ctx, approval.NewRequest(name, string(raw), ""))
+	if hitl != nil && hitl.Enabled() && t.Policy.NeedsApproval() {
+		raw, err := EncodeArguments(args)
+		if err != nil {
+			return preparedExecution{}, ExecutionOutcome{Output: "Tool argument parsing failed: " + err.Error(), Status: ToolCallFailed}, false
+		}
+		request := approval.NewRequest(name, raw, "")
+		request.DangerLevel = t.Policy.DangerText()
+		request.RiskDescription = t.Policy.ApprovalReason
+		result, err := hitl.Request(ctx, request)
 		if err != nil {
 			return preparedExecution{}, contextOrFailureOutcome(name, "", err), false
 		}
@@ -401,7 +571,7 @@ func (r *Registry) prepare(ctx context.Context, name string, args map[string]str
 			return preparedExecution{}, ExecutionOutcome{Output: "[HITL] Operation was skipped", Status: ToolCallSkipped}, false
 		}
 		if result.Decision == approval.Modified {
-			modified, err := ParseArguments(result.EffectiveArguments(string(raw)))
+			modified, err := ParseArguments(result.EffectiveArguments(raw))
 			if err != nil {
 				return preparedExecution{}, ExecutionOutcome{Output: "Tool argument parsing failed: " + err.Error(), Status: ToolCallFailed}, false
 			}
@@ -418,6 +588,22 @@ func (r *Registry) prepare(ctx context.Context, name string, args map[string]str
 	return preparedExecution{tool: t, args: args, modeOverride: modeOverride}, ExecutionOutcome{}, true
 }
 
+// interceptorFailureOutcome converts a failed before-hook into a tool result.
+//
+// A hook that could not run must never be silently ignored: the invocation is
+// refused, with the hook's identity in the message, and the caller's context
+// error is preserved so cancellation still reads as an interruption.
+func interceptorFailureOutcome(name string, err error) ExecutionOutcome {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return contextOutcome(name, err)
+	}
+	var statusErr *executionStatusError
+	if errors.As(err, &statusErr) {
+		return ExecutionOutcome{Output: statusErr.Error(), Status: statusErr.status}
+	}
+	return ExecutionOutcome{Output: "Tool execution rejected: " + err.Error(), Status: ToolCallRejected}
+}
+
 func (r *Registry) executePrepared(ctx context.Context, prepared preparedExecution) (outcome ExecutionOutcome) {
 	name := prepared.tool.Name
 	defer func() {
@@ -431,6 +617,14 @@ func (r *Registry) executePrepared(ctx context.Context, prepared preparedExecuti
 	if _, rejected := r.validateToolRequest(prepared.tool, prepared.args, prepared.modeOverride); rejected != "" {
 		return validationOutcome(rejected)
 	}
+	// Policy.Timeout bounds one invocation. Without this the field would be
+	// advertised but never enforced, which is worse than not having it: a
+	// caller that sets it would believe a tool cannot run forever.
+	if timeout := prepared.tool.Policy.Timeout; timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	var out string
 	var err error
 	if name == "execute_command" && prepared.modeOverride != nil {
@@ -443,12 +637,48 @@ func (r *Registry) executePrepared(ctx context.Context, prepared preparedExecuti
 		if out != "" {
 			outcome.Output = out
 		}
-		return outcome
+		return r.applyAfterInterceptor(ctx, prepared, outcome)
 	}
 	if err != nil {
-		return contextOrFailureOutcome(name, out, err)
+		return r.applyAfterInterceptor(ctx, prepared, contextOrFailureOutcome(name, out, err))
 	}
-	return ExecutionOutcome{Output: r.concurrencyConfig().Truncate(out), Status: ToolCallSuccess}
+	return r.applyAfterInterceptor(ctx, prepared, ExecutionOutcome{Output: r.concurrencyConfig().Truncate(out), Status: ToolCallSuccess})
+}
+
+// applyAfterInterceptor runs the after hooks on the produced outcome.
+//
+// The after hook may rewrite the text and the status, but it may not turn a
+// rejected, interrupted or timed-out invocation into a success: that would let
+// a hook erase the record of a policy decision that already happened.
+func (r *Registry) applyAfterInterceptor(ctx context.Context, prepared preparedExecution, outcome ExecutionOutcome) ExecutionOutcome {
+	interceptor := r.interceptorFor()
+	if interceptor == nil {
+		return outcome
+	}
+	original := outcome
+	updated, err := interceptor.AfterTool(ctx, prepared.tool.Name, prepared.args, outcome)
+	if err != nil {
+		var statusErr *executionStatusError
+		if errors.As(err, &statusErr) {
+			return ExecutionOutcome{Output: statusErr.Error(), Status: statusErr.status}
+		}
+		return ExecutionOutcome{Output: "Tool execution failed after the operation completed: " + err.Error(), Status: original.Status}
+	}
+	if terminalStatus(original.Status) && updated.Status == ToolCallSuccess {
+		updated.Status = original.Status
+	}
+	return updated
+}
+
+// terminalStatus reports whether a status records a decision that a hook must
+// not be able to erase.
+func terminalStatus(status ToolCallStatus) bool {
+	switch status {
+	case ToolCallRejected, ToolCallInterrupted, ToolCallTimeout:
+		return true
+	default:
+		return false
+	}
 }
 
 func validationOutcome(message string) ExecutionOutcome {
@@ -484,14 +714,14 @@ func contextOrFailureOutcome(name, output string, err error) ExecutionOutcome {
 	return ExecutionOutcome{Output: "Tool execution failed: " + err.Error(), Status: ToolCallFailed}
 }
 
-func (r *Registry) validateToolRequest(t Tool, args map[string]string, modeOverride *sandbox.Mode) (uint64, string) {
+func (r *Registry) validateToolRequest(t Tool, args Args, modeOverride *sandbox.Mode) (uint64, string) {
 	generation, rejected := r.validateToolPolicy(t, modeOverride)
 	if rejected != "" {
 		return generation, rejected
 	}
 	name := t.Name
 	if name == "execute_command" {
-		if result := r.commandGuard.Check(args["command"]); !result.Allowed {
+		if result := r.commandGuard.Check(StringArg(args, "command")); !result.Allowed {
 			return generation, "Command rejected by security policy: " + result.Reason
 		}
 		if manager := r.sandboxManager(); manager != nil {
@@ -501,7 +731,7 @@ func (r *Registry) validateToolRequest(t Tool, args map[string]string, modeOverr
 		}
 	}
 	if name == "write_file" || name == "edit_file" {
-		rel, err := r.writeTargetRelativePath(args["path"])
+		rel, err := r.writeTargetRelativePath(StringArg(args, "path"))
 		if err != nil {
 			if errors.Is(err, sandbox.ErrPolicy) {
 				return generation, "Command rejected by sandbox: " + err.Error()
@@ -574,27 +804,6 @@ func (r *Registry) SandboxCanEnforce(mode sandbox.Mode) bool {
 	return manager != nil && manager.Preflight(&mode) == nil
 }
 
-func ParseArguments(raw string) (map[string]string, error) {
-	if strings.TrimSpace(raw) == "" {
-		return map[string]string{}, nil
-	}
-	var generic map[string]any
-	if err := json.Unmarshal([]byte(raw), &generic); err != nil {
-		return nil, err
-	}
-	args := map[string]string{}
-	for k, v := range generic {
-		switch value := v.(type) {
-		case string:
-			args[k] = value
-		default:
-			b, _ := json.Marshal(value)
-			args[k] = string(b)
-		}
-	}
-	return args, nil
-}
-
 func (r *Registry) RegisterBuiltins() {
 	r.Register(Tool{
 		Name:          "read_file",
@@ -602,7 +811,11 @@ func (r *Registry) RegisterBuiltins() {
 		Parameters:    params(param{"path", "string", "File path", true}, param{"offset", "integer", "Starting line number", false}, param{"limit", "integer", "Maximum number of lines to read", false}),
 		Exec:          r.readFile,
 		PromptSnippet: "Read known file contents with optional offset/limit",
-		Policy:        Policy{Source: SourceBuiltin, MinimumMode: sandbox.ModeReadOnly, ParallelSafe: true},
+		Policy: Policy{
+			Source: SourceBuiltin, MinimumMode: sandbox.ModeReadOnly, ParallelSafe: true,
+			Capability: Capability{FilesystemRead: true, WorkspaceScope: ScopeWorkspace},
+			Risk:       RiskSafe, ApprovalReason: "Reads a file inside the workspace",
+		},
 	})
 	r.Register(Tool{
 		Name:          "write_file",
@@ -610,7 +823,12 @@ func (r *Registry) RegisterBuiltins() {
 		Parameters:    params(param{"path", "string", "File path", true}, param{"content", "string", "File content", true}),
 		Exec:          r.writeFile,
 		PromptSnippet: "Create new files or completely overwrite existing files",
-		Policy:        Policy{Source: SourceBuiltin, MinimumMode: sandbox.ModeWorkspaceWrite},
+		Policy: Policy{
+			Source: SourceBuiltin, MinimumMode: sandbox.ModeWorkspaceWrite,
+			Capability:       Capability{FilesystemWrite: true, WorkspaceScope: ScopeWorkspace},
+			RequiresApproval: true, Risk: RiskMedium,
+			ApprovalReason: "Writes or overwrites file content",
+		},
 	})
 	r.Register(Tool{
 		Name:          "edit_file",
@@ -618,7 +836,12 @@ func (r *Registry) RegisterBuiltins() {
 		Parameters:    params(param{"path", "string", "File path", true}, param{"old_text", "string", "Exact text to replace", true}, param{"new_text", "string", "Replacement text", true}),
 		Exec:          r.editFile,
 		PromptSnippet: "Make precise small edits by replacing one unique exact text block",
-		Policy:        Policy{Source: SourceBuiltin, MinimumMode: sandbox.ModeWorkspaceWrite},
+		Policy: Policy{
+			Source: SourceBuiltin, MinimumMode: sandbox.ModeWorkspaceWrite,
+			Capability:       Capability{FilesystemWrite: true, WorkspaceScope: ScopeWorkspace},
+			RequiresApproval: true, Risk: RiskMedium,
+			ApprovalReason: "Modifies matching text in a file",
+		},
 	})
 	r.Register(Tool{
 		Name:          "execute_command",
@@ -626,15 +849,20 @@ func (r *Registry) RegisterBuiltins() {
 		Parameters:    params(param{"command", "string", "Command to execute", true}),
 		Exec:          r.executeCommand,
 		PromptSnippet: "Execute shell commands for ls, rg, find, git, build, test, and scripts",
-		Policy:        Policy{Source: SourceBuiltin, MinimumMode: sandbox.ModeReadOnly},
+		Policy: Policy{
+			Source: SourceBuiltin, MinimumMode: sandbox.ModeReadOnly,
+			Capability:       Capability{FilesystemRead: true, FilesystemWrite: true, Shell: true, WorkspaceScope: ScopeWorkspace},
+			RequiresApproval: true, Risk: RiskHigh,
+			ApprovalReason: "Executes a shell command that may modify files, install software, or affect system state",
+		},
 	})
 }
 
-func (r *Registry) readFile(ctx context.Context, args map[string]string) (string, error) {
+func (r *Registry) readFile(ctx context.Context, args Args) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	rel, err := r.relativePath(args["path"])
+	rel, err := r.relativePath(StringArg(args, "path"))
 	if err != nil {
 		return "", err
 	}
@@ -652,11 +880,11 @@ func (r *Registry) readFile(ctx context.Context, args map[string]string) (string
 	}
 	content := string(data)
 	outputLimit := r.readFileOutputLimit()
-	offset, err := optionalInt(args["offset"], "offset")
+	offset, err := OptionalIntArg(args, "offset")
 	if err != nil {
 		return "", err
 	}
-	limit, err := optionalInt(args["limit"], "limit")
+	limit, err := OptionalIntArg(args, "limit")
 	if err != nil {
 		return "", err
 	}
@@ -727,11 +955,11 @@ func (r *Registry) readFile(ctx context.Context, args map[string]string) (string
 	return result.String(), nil
 }
 
-func (r *Registry) writeFile(ctx context.Context, args map[string]string) (string, error) {
+func (r *Registry) writeFile(ctx context.Context, args Args) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	rel, err := r.writeTargetRelativePath(args["path"])
+	rel, err := r.writeTargetRelativePath(StringArg(args, "path"))
 	if err != nil {
 		return "", err
 	}
@@ -743,7 +971,7 @@ func (r *Registry) writeFile(ctx context.Context, args map[string]string) (strin
 	if err := root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
 		return "", err
 	}
-	if err := root.WriteFile(rel, []byte(args["content"]), 0o644); err != nil {
+	if err := root.WriteFile(rel, []byte(StringArg(args, "content")), 0o644); err != nil {
 		return "", err
 	}
 	if err := ctx.Err(); err != nil {
@@ -752,11 +980,11 @@ func (r *Registry) writeFile(ctx context.Context, args map[string]string) (strin
 	return "File written: " + rel, nil
 }
 
-func (r *Registry) editFile(ctx context.Context, args map[string]string) (string, error) {
+func (r *Registry) editFile(ctx context.Context, args Args) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	rel, err := r.writeTargetRelativePath(args["path"])
+	rel, err := r.writeTargetRelativePath(StringArg(args, "path"))
 	if err != nil {
 		return "", err
 	}
@@ -765,7 +993,7 @@ func (r *Registry) editFile(ctx context.Context, args map[string]string) (string
 		return "", err
 	}
 	defer root.Close()
-	oldText := args["old_text"]
+	oldText := StringArg(args, "old_text")
 	if oldText == "" {
 		return "", errors.New("edit_file failed: old_text must not be empty; the file was not modified")
 	}
@@ -784,22 +1012,22 @@ func (r *Registry) editFile(ctx context.Context, args map[string]string) (string
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	updated := strings.Replace(content, oldText, args["new_text"], 1)
+	updated := strings.Replace(content, oldText, StringArg(args, "new_text"), 1)
 	if err := root.WriteFile(rel, []byte(updated), 0o644); err != nil {
 		return "", err
 	}
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("File edited: %s (1 replacement, %d -> %d characters)", rel, len(oldText), len(args["new_text"])), nil
+	return fmt.Sprintf("File edited: %s (1 replacement, %d -> %d characters)", rel, len(oldText), len(StringArg(args, "new_text"))), nil
 }
 
-func (r *Registry) executeCommand(ctx context.Context, args map[string]string) (string, error) {
+func (r *Registry) executeCommand(ctx context.Context, args Args) (string, error) {
 	return r.executeCommandWithMode(ctx, args, nil)
 }
 
-func (r *Registry) executeCommandWithMode(ctx context.Context, args map[string]string, modeOverride *sandbox.Mode) (string, error) {
-	command := strings.TrimSpace(args["command"])
+func (r *Registry) executeCommandWithMode(ctx context.Context, args Args, modeOverride *sandbox.Mode) (string, error) {
+	command := strings.TrimSpace(StringArg(args, "command"))
 	if command == "" {
 		return "", errors.New("command must not be empty")
 	}
@@ -937,17 +1165,6 @@ func (r *Registry) readFileOutputLimit() int {
 		return 200
 	}
 	return limit
-}
-
-func optionalInt(raw, name string) (*int, error) {
-	if strings.TrimSpace(raw) == "" {
-		return nil, nil
-	}
-	n, err := strconv.Atoi(strings.Trim(raw, `"`))
-	if err != nil {
-		return nil, fmt.Errorf("%s must be an integer: %s", name, raw)
-	}
-	return &n, nil
 }
 
 func splitLines(content string) []string {

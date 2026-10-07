@@ -46,6 +46,13 @@ type CommandInfo struct {
 	// typed. It defaults to "/" + Name.
 	Complete string
 	Options  []CommandOption
+	// Source records who contributed the command: "builtin" or "plugin".
+	Source string
+	// Plugin is the owning plugin name, empty for a built-in command.
+	Plugin string
+	// Builtin marks a command the host itself owns. A plugin may never
+	// replace one.
+	Builtin bool
 }
 
 var statusOptions = []CommandOption{
@@ -136,6 +143,14 @@ var Commands = []CommandInfo{
 	{Name: "checkpoint", Usage: "/checkpoint", Description: "Inspect task progress and workspace changes"},
 	{Name: "tree", Usage: "/tree [entryId]", Description: "View or select a session-tree node", Complete: "/tree "},
 	{Name: "compact", Usage: "/compact [instructions]", Description: "Compact earlier session history", Complete: "/compact "},
+	{Name: "plugin", Usage: "/plugin [list|info <name>|reload [name]|unload <name>|hooks]", Description: "List, inspect, reload, or unload JavaScript plugins", Complete: "/plugin ", Options: []CommandOption{
+		{Value: "list", Description: "List loaded plugins", Group: "Plugin"},
+		{Value: "info ", Description: "Inspect a plugin", Group: "Plugin"},
+		{Value: "reload", Description: "Reload every plugin", Group: "Plugin"},
+		{Value: "reload ", Description: "Reload one plugin", Group: "Plugin"},
+		{Value: "unload ", Description: "Unload a plugin", Group: "Plugin"},
+		{Value: "hooks", Description: "List registered hooks", Group: "Plugin"},
+	}},
 	{Name: "clear", Usage: "/clear", Description: "Start a new session and clear current state"},
 	{Name: "help", Usage: "/help", Description: "Show help"},
 	{Name: "exit", Usage: "/exit", Description: "Exit the program"},
@@ -150,14 +165,24 @@ func (c CommandInfo) CompletionValue() string {
 	return "/" + c.Name
 }
 
-// FindCommand resolves a command token case-insensitively.
+// defaultRegistry holds the built-in commands. Callers that need plugin
+// commands use a Registry instead; this exists so existing call sites keep
+// working unchanged.
+var defaultRegistry = NewRegistry()
+
+// FindCommand resolves a command token case-insensitively against the built-in
+// command table.
 func FindCommand(name string) (CommandInfo, bool) {
-	for _, command := range Commands {
-		if strings.EqualFold(command.Name, name) {
-			return command, true
-		}
+	return defaultRegistry.Find(name)
+}
+
+// FindCommandIn resolves a command token against a registry that may also hold
+// plugin commands.
+func FindCommandIn(registry *Registry, name string) (CommandInfo, bool) {
+	if registry == nil {
+		return FindCommand(name)
 	}
-	return CommandInfo{}, false
+	return registry.Find(name)
 }
 
 func Parse(input string) (Command, bool) {
@@ -204,4 +229,10 @@ func Help() string {
 func IsKnown(name string) bool {
 	_, ok := FindCommand(strings.ToLower(name))
 	return ok
+}
+
+// ParseInvocation splits a slash command into its name, arguments and the raw
+// input, without checking whether the command exists.
+func ParseInvocation(input string) (Command, bool) {
+	return Parse(input)
 }

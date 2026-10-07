@@ -76,7 +76,7 @@ type slashCompletionContext struct {
 	endsWithSpace bool
 }
 
-func parseSlashCompletion(input, word string) (slashCompletionContext, bool) {
+func parseSlashCompletion(input, word string, rt *integrated.Runtime) (slashCompletionContext, bool) {
 	start := leadingSlashStart(input)
 	if start < 0 {
 		return slashCompletionContext{}, false
@@ -92,6 +92,11 @@ func parseSlashCompletion(input, word string) (slashCompletionContext, bool) {
 	}
 
 	command, known := cli.FindCommand(fields[0])
+	if rt != nil && rt.Commands != nil {
+		if resolved, ok := rt.Commands.Find(fields[0]); ok {
+			command, known = resolved, true
+		}
+	}
 	ctx := slashCompletionContext{
 		command:       command,
 		known:         known,
@@ -108,12 +113,12 @@ func parseSlashCompletion(input, word string) (slashCompletionContext, bool) {
 }
 
 func completeSlash(input, word string, rt *integrated.Runtime) []CompletionItem {
-	ctx, ok := parseSlashCompletion(input, word)
+	ctx, ok := parseSlashCompletion(input, word, rt)
 	if !ok {
 		return nil
 	}
 	if ctx.typingCommand {
-		return completeTopLevelCommands(word)
+		return completeTopLevelCommands(word, rt)
 	}
 	if !ctx.known {
 		return nil
@@ -124,13 +129,26 @@ func completeSlash(input, word string, rt *integrated.Runtime) []CompletionItem 
 	return completeCommandOptions(ctx.command.Options, ctx.args, ctx.prefix, ctx.endsWithSpace, rt)
 }
 
-func completeTopLevelCommands(prefix string) []CompletionItem {
+func completeTopLevelCommands(prefix string, rt *integrated.Runtime) []CompletionItem {
+	// The live registry is preferred so plugin commands complete too; it is
+	// the same registry the dispatcher resolves against.
+	var commands []cli.CommandInfo
+	if rt != nil && rt.Commands != nil {
+		commands = rt.Commands.All()
+	} else {
+		commands = cli.Commands
+	}
 	var out []CompletionItem
-	for _, command := range cli.Commands {
+	for _, command := range commands {
 		value := command.CompletionValue()
-		if matches(value, prefix) {
-			out = append(out, completion(value, command.Description, "Bruce command"))
+		if !matches(value, prefix) {
+			continue
 		}
+		group := "Bruce command"
+		if command.Plugin != "" {
+			group = "Plugin command"
+		}
+		out = append(out, completion(value, command.Description, group))
 	}
 	return out
 }

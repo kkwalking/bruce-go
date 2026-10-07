@@ -141,6 +141,9 @@ type Status struct {
 	BatchTimeout      time.Duration
 	RAGIndexed        bool
 	SkillCount        int
+	PluginCount       int
+	PluginTools       int
+	PluginHooks       int
 	ToolNames         []string
 	ActivePlan        PlanState
 	ContextTokens     int
@@ -167,6 +170,7 @@ func (s Status) DisplayString() string {
 			"Sandbox: " + empty(s.SandboxMode, "unknown") + " (backend=" + empty(s.SandboxBackend, "unknown") + ", network=" + onOff(s.SandboxNetwork) + ", available=" + onOff(s.SandboxAvailable) + ")\n" +
 			"Parallel: " + onOff(s.ParallelEnabled) + "\n" +
 			"Skills: " + itoa(s.SkillCount) + "\n" +
+			"Plugins: " + itoa(s.PluginCount) + " (tools=" + itoa(s.PluginTools) + ", hooks=" + itoa(s.PluginHooks) + ")\n" +
 			"Tools: " + strings.Join(tools, ", "),
 	)
 	if !s.SandboxAvailable && strings.TrimSpace(s.SandboxReason) != "" {

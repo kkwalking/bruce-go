@@ -31,11 +31,11 @@ func TestLoaderProjectOverridesUserAndToolsReadResources(t *testing.T) {
 
 	registry := tool.EmptyRegistry(workspace)
 	RegisterTools(registry, catalog)
-	out := registry.Execute(context.Background(), "load_skill", map[string]string{"name": "review"})
+	out := registry.Execute(context.Background(), "load_skill", tool.Args{"name": "review"})
 	if !strings.Contains(out, "project instructions") {
 		t.Fatalf("load_skill output = %q", out)
 	}
-	out = registry.Execute(context.Background(), "read_skill_resource", map[string]string{"skill": "review", "path": "notes.md"})
+	out = registry.Execute(context.Background(), "read_skill_resource", tool.Args{"skill": "review", "path": "notes.md"})
 	if out != "resource text" {
 		t.Fatalf("resource output = %q", out)
 	}
