@@ -45,44 +45,27 @@ func NewSwitchable(settings config.Settings, loader config.Loader) (*SwitchableC
 	if len(settings.LLM.Providers) == 0 {
 		return nil, ErrNoProvider
 	}
-	options := []ModelOption{}
+	catalog := BuildCatalog(settings)
+	if len(catalog.Options) == 0 {
+		return nil, fmt.Errorf("%w: no provider has both an API key and a model list", ErrNoProvider)
+	}
 	suppliers := map[string]func() ChatClient{}
-	defaults := map[string]string{}
 	for name, providerSettings := range settings.LLM.Providers {
 		provider := NormalizeProvider(name)
-		if strings.TrimSpace(providerSettings.APIKey) == "" {
-			continue
-		}
-		// A provider with no compiled-in endpoint needs an explicit one; a
-		// built-in provider may still override its endpoint via baseUrl.
-		explicitProtocol := strings.TrimSpace(providerSettings.Protocol) != ""
-		if (explicitProtocol || !providerHasEndpoint(provider)) && strings.TrimSpace(providerSettings.BaseURL) == "" {
-			continue
-		}
-		models := supportedModels(provider, providerSettings)
-		if len(models) == 0 {
-			continue
-		}
-		defaults[provider] = defaultModel(provider, models)
-		for _, model := range models {
-			opt := ModelOption{Provider: provider, Model: model}
-			options = append(options, opt)
-			ps := providerSettings
-			suppliers[key(opt)] = func() ChatClient {
+		ps := providerSettings
+		for _, model := range catalog.modelsOf(provider) {
+			suppliers[key(ModelOption{Provider: provider, Model: model})] = func() ChatClient {
 				return NewProviderClient(provider, model, ps)
 			}
 		}
 	}
-	if len(options) == 0 {
-		return nil, fmt.Errorf("%w: no provider has both an API key and a model list", ErrNoProvider)
-	}
-	initial := initialModel(settings.LLM, options, defaults)
+	initial := catalog.Initial(settings.LLM)
 	c := &SwitchableClient{
 		settings:      &settings,
 		loader:        loader,
-		options:       options,
+		options:       catalog.Options,
 		suppliers:     suppliers,
-		defaultModels: defaults,
+		defaultModels: catalog.Defaults,
 		current:       initial,
 	}
 	c.client = c.suppliers[key(initial)]()
@@ -383,25 +366,6 @@ func defaultModel(provider string, models []string) string {
 		}
 		return ""
 	}
-}
-
-func initialModel(settings config.LLMSettings, options []ModelOption, defaults map[string]string) ModelOption {
-	provider := NormalizeProvider(settings.DefaultProvider)
-	if provider != "" && settings.DefaultModel != "" {
-		for _, opt := range options {
-			if strings.EqualFold(opt.Provider, provider) && strings.EqualFold(opt.Model, settings.DefaultModel) {
-				return opt
-			}
-		}
-	}
-	if model, ok := defaults[provider]; ok {
-		for _, opt := range options {
-			if strings.EqualFold(opt.Provider, provider) && strings.EqualFold(opt.Model, model) {
-				return opt
-			}
-		}
-	}
-	return options[0]
 }
 
 func key(opt ModelOption) string {

@@ -604,6 +604,8 @@ func (r *Runtime) HandleCommand(ctx context.Context, command cli.Command) cli.Re
 		result.Output, result.Err = r.handlePlan(ctx, command.Args, command.Raw)
 	case "model":
 		result.Output, result.Err = r.handleModel(command.Args)
+	case "provider":
+		result.Output, result.Err = r.handleProvider(ctx, command.Args)
 	case "web":
 		result.Output, result.Err = r.handleWeb(ctx, command.Args)
 	case "mcp":

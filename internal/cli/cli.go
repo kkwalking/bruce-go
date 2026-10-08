@@ -25,6 +25,7 @@ const (
 	CompletionStatic    CompletionKind = ""
 	CompletionMCPServer CompletionKind = "mcp-server"
 	CompletionSkillName CompletionKind = "skill-name"
+	CompletionProvider  CompletionKind = "provider"
 )
 
 // CommandOption is one static or dynamic candidate in a slash command's
@@ -77,6 +78,16 @@ var Commands = []CommandInfo{
 	{
 		Name: "model", Usage: "/model [provider/model | reasoning [off|low|medium|high|max]]", Description: "View or switch models and adjust reasoning effort",
 		Complete: "/model ",
+	},
+	{
+		Name: "provider", Usage: "/provider [add|edit <name>|remove <name>|list]", Description: "View or manage LLM providers (add and edit open the configuration wizard)",
+		Complete: "/provider ",
+		Options: []CommandOption{
+			{Value: "add", Description: "Configure a new provider", Group: "Provider"},
+			{Value: "edit ", Description: "Edit an existing provider", Group: "Provider", Kind: CompletionProvider},
+			{Value: "remove ", Description: "Delete a provider", Group: "Provider", Kind: CompletionProvider},
+			{Value: "list", Description: "List configured providers", Group: "Provider"},
+		},
 	},
 	{
 		Name: "web", Usage: "/web on|off|status|search <query>|fetch <url>", Description: "Enable, disable, inspect, or manually use WebSearch and WebFetch",
