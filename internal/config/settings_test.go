@@ -525,3 +525,237 @@ func TestLoaderEnvironmentPreservesExplicitDeepSeekProvider(t *testing.T) {
 		t.Fatalf("apiKey = %q, want configured-key", got)
 	}
 }
+
+// A provider name becomes part of the /model selector and of the settings file
+// path, so it has to survive a round trip through both. Names outside the
+// pattern are refused instead of silently producing an unreachable provider.
+func TestLoaderRejectsInvalidProviderNames(t *testing.T) {
+	clearBuiltInProviderEnv(t)
+	for _, name := range []string{"My Provider", "provider/name", "provider:name", "-leading-dash", ""} {
+		path := filepath.Join(t.TempDir(), "setting.json")
+		data := `{"llm":{"providers":{"` + name + `":{"apiKey":"k","baseUrl":"http://x/v1","models":["m"]}}}}`
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := NewLoader(path).Load()
+		if name == "" {
+			// An empty name is dropped by the loader rather than reported: the
+			// JSON object key is legal, but there is nothing to address.
+			if err != nil {
+				t.Fatalf("empty provider name should be dropped, got %v", err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), "invalid provider name") {
+			t.Fatalf("provider name %q should be rejected, err=%v", name, err)
+		}
+	}
+}
+
+// Provider names are normalized to lower case so a selector typed by hand
+// resolves regardless of how the entry was spelled.
+func TestLoaderNormalizesProviderNames(t *testing.T) {
+	clearBuiltInProviderEnv(t)
+	path := filepath.Join(t.TempDir(), "setting.json")
+	data := `{"llm":{"providers":{"MyGateway":{"apiKey":"k","baseUrl":"http://x/v1","models":["m"]}}}}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	settings, err := NewLoader(path).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := settings.LLM.Providers["mygateway"]; !ok {
+		t.Fatalf("provider keys = %v, want a lower-cased mygateway", providerNames(settings))
+	}
+}
+
+// An unknown protocol is a typo in a security-relevant field: it decides which
+// endpoint receives the API key. Refuse it instead of falling back silently.
+func TestLoaderRejectsUnknownProtocol(t *testing.T) {
+	clearBuiltInProviderEnv(t)
+	path := filepath.Join(t.TempDir(), "setting.json")
+	data := `{"llm":{"providers":{"custom":{"apiKey":"k","baseUrl":"http://x/v1","models":["m"],"protocol":"openai_chat_completions"}}}}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := NewLoader(path).Load()
+	if err == nil || !strings.Contains(err.Error(), "protocol") {
+		t.Fatalf("unknown protocol should be rejected, err=%v", err)
+	}
+}
+
+func TestLoaderAcceptsKnownProtocolAliases(t *testing.T) {
+	clearBuiltInProviderEnv(t)
+	for _, tc := range []struct{ alias, want string }{
+		{"openai", ProtocolOpenAIChat},
+		{"openai_compatible", ProtocolOpenAIChat},
+		{"openai_chat", ProtocolOpenAIChat},
+		{"responses", ProtocolOpenAIResponses},
+		{"openai_responses", ProtocolOpenAIResponses},
+		{"anthropic", ProtocolAnthropic},
+		{"anthropic_messages", ProtocolAnthropic},
+		{"OpenAI_Chat", ProtocolOpenAIChat},
+	} {
+		path := filepath.Join(t.TempDir(), "setting.json")
+		data := `{"llm":{"providers":{"custom":{"apiKey":"k","baseUrl":"http://x/v1","models":["m"],"protocol":"` + tc.alias + `"}}}}`
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		settings, err := NewLoader(path).Load()
+		if err != nil {
+			t.Fatalf("alias %q should load: %v", tc.alias, err)
+		}
+		got := ResolveProtocol("custom", settings.LLM.Providers["custom"])
+		if got != tc.want {
+			t.Fatalf("ResolveProtocol(%q) = %q, want %q", tc.alias, got, tc.want)
+		}
+	}
+}
+
+// The protocol decides which request shape is sent, so an entry that omits it
+// must still resolve to something. Built-ins speak Chat Completions; a name
+// that says anthropic/claude does not.
+func TestResolveProtocolInfersFromName(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		setting  ProviderSetting
+		expected string
+	}{
+		{"deepseek", ProviderSetting{}, ProtocolOpenAIChat},
+		{"glm", ProviderSetting{}, ProtocolOpenAIChat},
+		{"kimi", ProviderSetting{}, ProtocolOpenAIChat},
+		{"openai_compatiable", ProviderSetting{}, ProtocolOpenAIChat},
+		{"mygateway", ProviderSetting{}, ProtocolOpenAIChat},
+		{"anthropic", ProviderSetting{}, ProtocolAnthropic},
+		{"claude-proxy", ProviderSetting{}, ProtocolAnthropic},
+		{"MyClaudeGateway", ProviderSetting{}, ProtocolAnthropic},
+		{"openai-responses", ProviderSetting{}, ProtocolOpenAIResponses},
+		{"gateway_responses", ProviderSetting{}, ProtocolOpenAIResponses},
+		// An explicit value always wins over inference.
+		{"anthropic", ProviderSetting{Protocol: ProtocolOpenAIChat}, ProtocolOpenAIChat},
+		{"mygateway", ProviderSetting{Protocol: ProtocolAnthropic}, ProtocolAnthropic},
+	} {
+		got := ResolveProtocol(tc.name, tc.setting)
+		if got != tc.expected {
+			t.Fatalf("ResolveProtocol(%q, %+v) = %q, want %q", tc.name, tc.setting, got, tc.expected)
+		}
+	}
+}
+
+// Declared models are the provider's own list, so whitespace and duplicates
+// must not reach the /model menu.
+func TestLoaderNormalizesDeclaredModels(t *testing.T) {
+	clearBuiltInProviderEnv(t)
+	path := filepath.Join(t.TempDir(), "setting.json")
+	data := `{"llm":{"providers":{"custom":{"apiKey":"k","baseUrl":"http://x/v1","models":[" a ","a","b","","  "]}}}}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	settings, err := NewLoader(path).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := settings.LLM.Providers["custom"].Models
+	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("models = %#v, want [a b]", got)
+	}
+}
+
+func providerNames(settings Settings) []string {
+	names := make([]string, 0, len(settings.LLM.Providers))
+	for name := range settings.LLM.Providers {
+		names = append(names, name)
+	}
+	return names
+}
+
+// Two entry names that resolve to one provider cannot both be honoured: only
+// one endpoint and one credential can win, so the pair has to be refused rather
+// than resolved by map iteration order.
+func TestLoaderRejectsProviderNamesThatResolveToTheSameProvider(t *testing.T) {
+	clearBuiltInProviderEnv(t)
+	for _, providers := range []string{
+		`{"kimi":{"apiKey":"a","models":["m"]},"moonshot":{"apiKey":"b","models":["m"]}}`,
+		`{"glm":{"apiKey":"a"},"zai":{"apiKey":"b"}}`,
+		`{"openai":{"apiKey":"a","baseUrl":"https://a.example/v1","models":["m"]},"openai_compatible":{"apiKey":"b","baseUrl":"https://b.example/v1","models":["m"]}}`,
+	} {
+		path := filepath.Join(t.TempDir(), "setting.json")
+		data := `{"llm":{"providers":` + providers + `}}`
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := NewLoader(path).Load()
+		if err == nil {
+			t.Fatalf("expected a collision error for %s", providers)
+		}
+		if !strings.Contains(err.Error(), "same provider") {
+			t.Fatalf("error %q does not explain the collision", err)
+		}
+	}
+}
+
+// An entry written under an alias already configures that provider, so the
+// environment must not add a second entry under the canonical name — that would
+// make a correct configuration fail validation.
+func TestLoaderEnvironmentDoesNotCollideWithAliasEntry(t *testing.T) {
+	clearBuiltInProviderEnv(t)
+	t.Setenv(GLMAPIKeyEnv, "env-key")
+	path := filepath.Join(t.TempDir(), "setting.json")
+	data := `{"llm":{"providers":{"zai":{"apiKey":"explicit-key","models":["glm-5.1"]}}}}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := NewLoader(path).Load()
+	if err != nil {
+		t.Fatalf("an alias entry plus the environment should load: %v", err)
+	}
+	if len(settings.LLM.Providers) != 1 {
+		t.Fatalf("providers = %#v, want only the explicit entry", providerNames(settings))
+	}
+	if got := settings.LLM.Providers["zai"].APIKey; got != "explicit-key" {
+		t.Fatalf("api key = %q, the explicit entry must win", got)
+	}
+}
+
+// setting.json holds provider API keys in plaintext, so it must not be
+// world-readable. It is created 0600 and an existing file is tightened to 0600
+// on the next save, since a file written before this rule could be 0644.
+func TestLoaderSavesSettingsWithOwnerOnlyPermissions(t *testing.T) {
+	clearBuiltInProviderEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "setting.json")
+
+	settings, err := NewLoader(path).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := NewLoader(path).Save(settings); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("new settings file mode = %o, want 600", got)
+	}
+
+	// An existing file with looser permissions is tightened, not left alone.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewLoader(path).Save(settings); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("settings file mode after save = %o, want 600", got)
+	}
+}

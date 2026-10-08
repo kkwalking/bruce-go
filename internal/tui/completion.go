@@ -227,9 +227,32 @@ func dynamicOptionCompletions(kind cli.CompletionKind, prefix string, rt *integr
 		return completeMCPServers(prefix, rt)
 	case cli.CompletionSkillName:
 		return completeSkillNames(prefix, rt, false)
+	case cli.CompletionProvider:
+		return completeProviderNames(prefix, rt)
 	default:
 		return nil
 	}
+}
+
+func completeProviderNames(prefix string, rt *integrated.Runtime) []CompletionItem {
+	summaries, err := rt.ListProviders()
+	if err != nil {
+		// Completion is never worth surfacing an error for: an unreadable
+		// settings file just means no candidates.
+		return nil
+	}
+	var out []CompletionItem
+	for _, summary := range summaries {
+		if !matches(summary.Name, prefix) {
+			continue
+		}
+		description := summary.Protocol
+		if summary.Active {
+			description += " (active)"
+		}
+		out = append(out, completion(summary.Name, description, "Provider"))
+	}
+	return out
 }
 
 func completeModel(input string, rt *integrated.Runtime) []CompletionItem {

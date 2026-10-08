@@ -36,48 +36,53 @@ type SwitchableClient struct {
 	reasoningEffort string
 }
 
+// ErrNoProvider means there is nothing to talk to: no provider entry at all, or
+// none of them usable. It is distinct from a misconfiguration that must be
+// fixed before Bruce can run, such as an invalid compaction window.
+var ErrNoProvider = errors.New("error: llm.providers is not configured")
+
 func NewSwitchable(settings config.Settings, loader config.Loader) (*SwitchableClient, error) {
 	if len(settings.LLM.Providers) == 0 {
-		return nil, errors.New("error: llm.providers is not configured")
+		return nil, ErrNoProvider
 	}
-	options := []ModelOption{}
+	// Checked here as well as in validateLLM: the provider editor builds a
+	// candidate client from edited settings before it saves them, so this is
+	// the first place a new collision can be seen.
+	if err := config.CheckProviderNameCollisions(settings.LLM.Providers); err != nil {
+		return nil, err
+	}
+	catalog := BuildCatalog(settings)
+	if len(catalog.Options) == 0 {
+		return nil, fmt.Errorf("%w: no provider has both an API key and a model list", ErrNoProvider)
+	}
 	suppliers := map[string]func() ChatClient{}
-	defaults := map[string]string{}
 	for name, providerSettings := range settings.LLM.Providers {
 		provider := NormalizeProvider(name)
-		if strings.TrimSpace(providerSettings.APIKey) == "" {
-			continue
-		}
-		if provider == "openai_compatiable" && strings.TrimSpace(providerSettings.BaseURL) == "" {
-			continue
-		}
-		models := supportedModels(provider, providerSettings)
-		if len(models) == 0 {
-			continue
-		}
-		defaults[provider] = defaultModel(provider, models)
-		for _, model := range models {
-			opt := ModelOption{Provider: provider, Model: model}
-			options = append(options, opt)
-			ps := providerSettings
-			suppliers[key(opt)] = func() ChatClient {
+		ps := providerSettings
+		for _, model := range catalog.modelsOf(provider) {
+			suppliers[key(ModelOption{Provider: provider, Model: model})] = func() ChatClient {
 				return NewProviderClient(provider, model, ps)
 			}
 		}
 	}
-	if len(options) == 0 {
-		return nil, errors.New("error: setting.json contains no usable LLM provider")
+	initial := catalog.Initial(settings.LLM)
+	initialSupplier := suppliers[key(initial)]
+	if initialSupplier == nil {
+		// The option list and the supplier table are derived from the same
+		// settings, so a miss means the two derivations disagreed. Reporting it
+		// beats calling a nil function: the cause is a configuration shape that
+		// slipped past validation, and the user can act on the message.
+		return nil, fmt.Errorf("no client can be built for the initial model %s; check the provider entries for that name", initial.Selector())
 	}
-	initial := initialModel(settings.LLM, options, defaults)
 	c := &SwitchableClient{
 		settings:      &settings,
 		loader:        loader,
-		options:       options,
+		options:       catalog.Options,
 		suppliers:     suppliers,
-		defaultModels: defaults,
+		defaultModels: catalog.Defaults,
 		current:       initial,
 	}
-	c.client = c.suppliers[key(initial)]()
+	c.client = initialSupplier()
 	if err := validateCompactionWindow(settings.Compaction, initial, c.client); err != nil {
 		return nil, err
 	}
@@ -90,35 +95,59 @@ func NewSwitchable(settings config.Settings, loader config.Loader) (*SwitchableC
 	return c, nil
 }
 
+// NormalizeProvider resolves a provider name or alias to its canonical name.
+// The table lives in config so validation can detect two entries that name the
+// same provider before a client is built from either.
 func NormalizeProvider(provider string) string {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "zai", "zhipu", "bigmodel", "zhipuai":
-		return "glm"
-	case "kimi", "moonshot", "moonshotai":
-		return "kimi"
-	case "openai-compatible", "openai_compatible", "openai", "compatible", "openai_compatiable":
-		return "openai_compatiable"
+	return config.NormalizeProvider(provider)
+}
+
+// NewProviderClient builds the client for one provider/model pair.
+//
+// The protocol decides the wire format, and it is resolved per provider rather
+// than per name: the built-in names keep their compiled-in endpoints and
+// behaviour, an explicit "protocol" wins everywhere, and a name that says
+// anthropic or claude is spoken to in the Messages format.
+func NewProviderClient(provider, model string, settings config.ProviderSetting) ChatClient {
+	protocol := config.ResolveProtocol(provider, settings)
+	// A built-in provider with a compiled-in endpoint keeps its own client, so
+	// its request quirks (HTTP/2, endpoint selection, per-model fields) stay
+	// intact. An explicit protocol or an explicit baseUrl overrides that: the
+	// user asked for a different endpoint, and the quirks travel with the
+	// provider name rather than with the constructor.
+	explicit := strings.TrimSpace(settings.Protocol) != "" || strings.TrimSpace(settings.BaseURL) != ""
+	if !explicit {
+		switch provider {
+		case "glm":
+			return withCapability(NewGLMClient(settings.APIKey, model), settings, model)
+		case "deepseek":
+			return withCapability(NewDeepSeekClient(settings.APIKey, model), settings, model)
+		case "kimi":
+			return withCapability(NewKimiClient(settings.APIKey, model), settings, model)
+		}
+	}
+	switch protocol {
+	case config.ProtocolAnthropic:
+		return withCapability(NewAnthropicClient(provider, settings.APIKey, model, settings.BaseURL), settings, model)
+	case config.ProtocolOpenAIResponses:
+		return withCapability(NewOpenAIResponsesClient(provider, settings.APIKey, model, settings.BaseURL), settings, model)
 	default:
-		return strings.ToLower(strings.TrimSpace(provider))
+		return withCapability(NewOpenAICompatibleClient(provider, settings.APIKey, model, settings.BaseURL), settings, model)
 	}
 }
 
-func NewProviderClient(provider, model string, settings config.ProviderSetting) ChatClient {
-	var client *OpenAICompatibleClient
-	switch provider {
-	case "glm":
-		client = NewGLMClient(settings.APIKey, model)
-	case "deepseek":
-		client = NewDeepSeekClient(settings.APIKey, model)
-	case "kimi":
-		client = NewKimiClient(settings.APIKey, model)
-	case "openai_compatiable":
-		client = NewOpenAICompatibleClient(provider, settings.APIKey, model, settings.BaseURL)
-	default:
-		client = NewOpenAICompatibleClient(provider, settings.APIKey, model, settings.BaseURL)
-	}
+// withCapability applies the declared context window and output limit to a
+// client that supports them.
+func withCapability(client ChatClient, settings config.ProviderSetting, model string) ChatClient {
 	capability := settings.ModelCapabilities[model]
-	client.SetModelCapability(capability.ContextWindow, capability.MaxOutputTokens)
+	if capability.ContextWindow == 0 && capability.MaxOutputTokens == 0 {
+		return client
+	}
+	if configurable, ok := client.(interface {
+		SetModelCapability(contextWindow, maxOutputTokens int)
+	}); ok {
+		configurable.SetModelCapability(capability.ContextWindow, capability.MaxOutputTokens)
+	}
 	return client
 }
 
@@ -297,7 +326,15 @@ func (c *SwitchableClient) find(provider, model string) (ModelOption, error) {
 	return ModelOption{}, errors.New("unknown model: " + provider + "/" + model)
 }
 
+// supportedModels returns the models to offer for a provider.
+//
+// An explicitly declared list always wins, for built-in providers too: it is the
+// user's statement of what their key can reach, and the compiled-in table is
+// only a fallback for entries that do not say.
 func supportedModels(provider string, settings config.ProviderSetting) []string {
+	if len(settings.Models) > 0 {
+		return settings.Models
+	}
 	switch provider {
 	case "glm":
 		return GLMModels
@@ -305,10 +342,21 @@ func supportedModels(provider string, settings config.ProviderSetting) []string 
 		return DeepSeekModels
 	case "kimi":
 		return KimiModels
-	case "openai_compatiable":
-		return settings.Models
 	default:
 		return nil
+	}
+}
+
+// providerHasEndpoint reports whether a provider can be reached without an
+// explicit baseUrl. The built-in providers carry compiled-in endpoints; every
+// other provider must name one, because guessing an endpoint would send the API
+// key to a host the user never chose.
+func providerHasEndpoint(provider string) bool {
+	switch provider {
+	case "glm", "deepseek", "kimi":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -326,25 +374,6 @@ func defaultModel(provider string, models []string) string {
 		}
 		return ""
 	}
-}
-
-func initialModel(settings config.LLMSettings, options []ModelOption, defaults map[string]string) ModelOption {
-	provider := NormalizeProvider(settings.DefaultProvider)
-	if provider != "" && settings.DefaultModel != "" {
-		for _, opt := range options {
-			if strings.EqualFold(opt.Provider, provider) && strings.EqualFold(opt.Model, settings.DefaultModel) {
-				return opt
-			}
-		}
-	}
-	if model, ok := defaults[provider]; ok {
-		for _, opt := range options {
-			if strings.EqualFold(opt.Provider, provider) && strings.EqualFold(opt.Model, model) {
-				return opt
-			}
-		}
-	}
-	return options[0]
 }
 
 func key(opt ModelOption) string {

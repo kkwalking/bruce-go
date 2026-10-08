@@ -32,7 +32,7 @@ func NewOpenAICompatibleClient(provider, apiKey, model, baseURL string) *OpenAIC
 		APIKey:     apiKey,
 		Model:      model,
 		APIURL:     chatCompletionsURL(baseURL),
-		HTTPClient: &http.Client{Timeout: 120 * time.Second},
+		HTTPClient: newHTTPClient(120 * time.Second),
 	}
 }
 
@@ -530,7 +530,7 @@ func (c *OpenAICompatibleClient) httpClient() *http.Client {
 	if c.HTTPClient != nil {
 		return c.HTTPClient
 	}
-	return &http.Client{Timeout: 120 * time.Second}
+	return newHTTPClient(120 * time.Second)
 }
 
 func firstNonEmpty(values ...string) string {

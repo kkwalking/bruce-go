@@ -93,10 +93,11 @@ go run ./cmd/bruce --no-mcp
 ```json
 {
   "llm": {
-    "defaultProvider": "openai_compatiable",
+    "defaultProvider": "my-gateway",
     "defaultModel": "local-model",
     "providers": {
-      "openai_compatiable": {
+      "my-gateway": {
+        "protocol": "openai_chat",
         "apiKey": "your_key",
         "baseUrl": "http://localhost:9000/v1",
         "models": ["local-model"],
@@ -142,7 +143,7 @@ go run ./cmd/bruce --no-mcp
 }
 ```
 
-`llm.providers` 支持 `deepseek`、`glm`、`kimi` 和 `openai_compatiable`。测试使用 fake/mock，不依赖真实 API key。
+`llm.providers` 是任意命名的供应商表，每个条目用 `protocol` 声明线协议（`openai_chat`、`openai_responses`、`anthropic`），配 `baseUrl`、`apiKey` 与 `models`。名字可以随意起（小写字母、数字、`.`、`-`、`_`），首次配置建议用 TUI 里的 `/provider add` 向导：它连上端点测试连通性、自动拉取模型列表，并把探测到的上下文窗口写进 `modelCapabilities`。详见 [docs/providers.md](docs/providers.md)。测试使用 fake/mock，不依赖真实 API key。
 
 三个内置 provider 都可以只靠一个环境变量启用，不需要在 `setting.json` 里写任何配置：
 
@@ -187,6 +188,7 @@ sudo pacman -S bubblewrap
 - `/minimal`
 - `/plan [task|approve|reject|cancel|continue]`
 - `/model [provider/model]`
+- `/provider [add|edit <name>|remove <name>|list]`
 - `/web on|off|status|search <query>|fetch <url>`
 - `/mcp [restart|logs|disable|enable <name>]`
 - `/skill list|show <name>|reload`

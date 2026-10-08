@@ -66,11 +66,17 @@ type Runtime struct {
 	Plugins       *plugin.Manager
 	Commands      *cli.Registry
 
-	react      *agent.Agent
-	planning   *agent.Agent
-	minimal    *agent.Agent
-	planStore  *planning.Store
-	startMu    sync.Mutex
+	react     *agent.Agent
+	planning  *agent.Agent
+	minimal   *agent.Agent
+	planStore *planning.Store
+	startMu   sync.Mutex
+	// stateMu guards the configuration a model switch or provider edit
+	// replaces: Client, switchable and Settings. Those run on a bubbletea
+	// command goroutine while the render loop reads the same fields through
+	// Status and contextUsage, and Settings holds maps, so an unguarded write
+	// there is a fatal concurrent-map error rather than a stale read.
+	stateMu    sync.RWMutex
 	mcpStarted bool
 
 	mcpToolNames []string
@@ -162,11 +168,22 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		}
 	} else {
 		s, err := llm.NewSwitchable(settings, loader)
-		if err != nil {
+		switch {
+		case err == nil:
+			client = s
+			switcher = s
+		case errors.Is(err, llm.ErrNoProvider):
+			// No usable provider is not a startup failure: it is the state a
+			// first-run user is in, and the TUI opens the configuration wizard
+			// for it. A stand-in client keeps every dereference downstream
+			// valid, and the switchable client stays nil so the existing nil
+			// branches keep reporting "nothing to switch to".
+			client = llm.NewUnconfiguredClient()
+		default:
+			// Anything else (an invalid compaction window, say) is a real
+			// misconfiguration and still refuses to start.
 			return nil, err
 		}
-		client = s
-		switcher = s
 	}
 	if err := validateCompactionWindow(settings.Compaction, client); err != nil {
 		return nil, err
@@ -593,6 +610,8 @@ func (r *Runtime) HandleCommand(ctx context.Context, command cli.Command) cli.Re
 		result.Output, result.Err = r.handlePlan(ctx, command.Args, command.Raw)
 	case "model":
 		result.Output, result.Err = r.handleModel(command.Args)
+	case "provider":
+		result.Output, result.Err = r.handleProvider(ctx, command.Args)
 	case "web":
 		result.Output, result.Err = r.handleWeb(ctx, command.Args)
 	case "mcp":
@@ -735,15 +754,17 @@ func (r *Runtime) Status() runtime.Status {
 		pluginTools = len(r.Plugins.ToolNames())
 		pluginHooks = r.Plugins.Hooks().Count()
 	}
+	client := r.currentClient()
+	settings := r.currentSettings()
 	return runtime.Status{
 		Mode:              r.Mode,
-		Model:             r.Client.ModelName(),
-		Provider:          r.Client.ProviderName(),
+		Model:             client.ModelName(),
+		Provider:          client.ProviderName(),
 		ReasoningEffort:   r.ReasoningEffort(),
 		WorkspaceRoot:     r.Workspace,
 		RAGEnabled:        false,
 		WebEnabled:        r.Web != nil && r.Web.Enabled,
-		WebSearchProvider: strings.TrimSpace(r.Settings.WebSearch.Provider),
+		WebSearchProvider: strings.TrimSpace(settings.WebSearch.Provider),
 		MCPSummary:        mcpSummary,
 		HITLEnabled:       r.HITL.Enabled(),
 		SandboxMode:       string(sandboxStatus.Mode),
@@ -869,14 +890,19 @@ func (r *Runtime) handleModel(args []string) (string, error) {
 	if len(args) > 0 && strings.EqualFold(args[0], "reasoning") {
 		return r.handleModelReasoning(args[1:])
 	}
-	if r.switchable == nil {
-		return fmt.Sprintf("Current model: %s/%s", r.Client.ProviderName(), r.Client.ModelName()), nil
+	switcher := r.currentSwitchable()
+	if switcher == nil {
+		if r.NeedsProviderSetup() {
+			return "No LLM provider is configured. Run /provider add to set one up.", nil
+		}
+		client := r.currentClient()
+		return fmt.Sprintf("Current model: %s/%s", client.ProviderName(), client.ModelName()), nil
 	}
 	if len(args) == 0 {
-		current := r.switchable.Current()
+		current := switcher.Current()
 		var b strings.Builder
 		b.WriteString("Current model: " + current.Selector() + "\nAvailable models:\n")
-		for _, opt := range r.switchable.Options() {
+		for _, opt := range switcher.Options() {
 			prefix := "  "
 			if strings.EqualFold(opt.Provider, current.Provider) && strings.EqualFold(opt.Model, current.Model) {
 				prefix = "* "
@@ -886,11 +912,11 @@ func (r *Runtime) handleModel(args []string) (string, error) {
 		b.WriteString("\nCurrent reasoning effort: " + r.ReasoningEffort() + " (adjust with /model reasoning <level>)")
 		return strings.TrimSpace(b.String()), nil
 	}
-	next, err := r.switchable.Switch(strings.Join(args, " "))
+	next, err := switcher.Switch(strings.Join(args, " "))
 	if err != nil {
 		return "", err
 	}
-	r.Client = r.switchable
+	r.adoptClient(switcher)
 	r.rebuildAgents()
 	return "Switched model: " + next.Selector() + " " + r.ReasoningEffort(), nil
 }
@@ -1086,7 +1112,7 @@ func (r *Runtime) runAgentWithCompaction(ctx context.Context, currentAgent *agen
 			}
 			out, err = currentAgent.Continue(ctx, taskContext, runID)
 		case llm.IsContextOverflowError(err):
-			if !r.Settings.Compaction.Enabled {
+			if !r.currentSettings().Compaction.Enabled {
 				return "", fmt.Errorf("model context overflowed and automatic compaction is disabled: %w", err)
 			}
 			if overflowRetries >= 1 {
@@ -1109,9 +1135,9 @@ func (r *Runtime) runAgentWithCompaction(ctx context.Context, currentAgent *agen
 func (r *Runtime) compactAfterSuccessfulTurn(ctx context.Context, runID string) {
 	response, ok := r.latestAssistantResponseAfterCompaction()
 	if ok {
-		overflow := llm.DetectContextOverflowResponse(response, r.Client.MaxContextWindow())
+		overflow := llm.DetectContextOverflowResponse(response, r.currentClient().MaxContextWindow())
 		if overflow.Overflow {
-			if !r.Settings.Compaction.Enabled {
+			if !r.currentSettings().Compaction.Enabled {
 				return
 			}
 			if _, err := r.autoCompact(ctx, runID, "successful response usage exceeded the context window"); err != nil {
@@ -1138,17 +1164,55 @@ func (r *Runtime) compactionThreshold() (needed bool, tokens int, threshold int,
 }
 
 func (r *Runtime) contextUsage() (tokens, contextWindow int) {
-	if r.Client == nil {
+	client := r.currentClient()
+	if client == nil {
 		return 0, 0
 	}
-	return session.EstimateContextTokens(r.Session.Context(r.Mode).Messages).Tokens, r.Client.MaxContextWindow()
+	return session.EstimateContextTokens(r.Session.Context(r.Mode).Messages).Tokens, client.MaxContextWindow()
+}
+
+// currentClient returns the client to use for this call, holding the swap lock
+// only long enough to read the pointer. Callers keep using the returned value
+// rather than re-reading the field, so a switch mid-call cannot make one
+// operation see two different clients.
+func (r *Runtime) currentClient() llm.ChatClient {
+	r.stateMu.RLock()
+	defer r.stateMu.RUnlock()
+	return r.Client
+}
+
+// currentSettings returns the settings snapshot to use for this call. A
+// provider edit replaces the whole struct, so a reader must take the value once
+// rather than reading a field from the field twice.
+func (r *Runtime) currentSettings() config.Settings {
+	r.stateMu.RLock()
+	defer r.stateMu.RUnlock()
+	return r.Settings
+}
+
+// currentSwitchable is the guarded read of the switchable client, which a
+// provider edit may clear or replace.
+func (r *Runtime) currentSwitchable() modelSwitcher {
+	r.stateMu.RLock()
+	defer r.stateMu.RUnlock()
+	return r.switchable
+}
+
+// adoptClient publishes a new client to the render loop. It is the only way the
+// pointer changes, so every reader either sees the old client or the new one.
+func (r *Runtime) adoptClient(client llm.ChatClient) {
+	r.stateMu.Lock()
+	r.Client = client
+	r.stateMu.Unlock()
 }
 
 func (r *Runtime) compactionThresholdFor(messages []llm.Message) (needed bool, tokens int, threshold int, err error) {
-	if !r.Settings.Compaction.Enabled || r.Client.MaxContextWindow() <= 0 {
+	client := r.currentClient()
+	compaction := r.currentSettings().Compaction
+	if !compaction.Enabled || client.MaxContextWindow() <= 0 {
 		return false, 0, 0, nil
 	}
-	threshold, err = r.Settings.Compaction.Threshold(r.Client.MaxContextWindow())
+	threshold, err = compaction.Threshold(client.MaxContextWindow())
 	if err != nil {
 		return false, 0, 0, err
 	}
@@ -1173,7 +1237,7 @@ func (r *Runtime) compactionThresholdFor(messages []llm.Message) (needed bool, t
 		return false, 0, 0, nil
 	}
 	tokens = session.EstimateContextTokens(messages).Tokens
-	return session.ShouldCompact(tokens, r.Client.MaxContextWindow(), r.Settings.Compaction), tokens, threshold, nil
+	return session.ShouldCompact(tokens, client.MaxContextWindow(), compaction), tokens, threshold, nil
 }
 
 func (r *Runtime) latestAssistantResponseAfterCompaction() (llm.ChatResponse, bool) {
@@ -1203,11 +1267,11 @@ func (r *Runtime) latestAssistantResponseAfterCompaction() (llm.ChatResponse, bo
 }
 
 func (r *Runtime) performCompaction(ctx context.Context, instructions string) (session.CompactionResult, error) {
-	preparation, ok := session.PrepareCompaction(r.Session.ActiveEntries(), r.Settings.Compaction)
+	preparation, ok := session.PrepareCompaction(r.Session.ActiveEntries(), r.currentSettings().Compaction)
 	if !ok {
 		return session.CompactionResult{}, errors.New("the current session has no history that can be compacted safely, or its latest node is already a compaction")
 	}
-	result, err := session.Compact(ctx, r.Client, *preparation, instructions)
+	result, err := session.Compact(ctx, r.currentClient(), *preparation, instructions)
 	if err != nil {
 		return session.CompactionResult{}, err
 	}
@@ -1235,11 +1299,11 @@ func (r *Runtime) compact(ctx context.Context, extra string) (string, error) {
 	if entries[len(entries)-1].Type == session.TypeCompaction {
 		return "", errors.New("the latest node is already a compaction; consecutive compactions are not allowed")
 	}
-	preparation, ok := session.PrepareCompaction(entries, r.Settings.Compaction)
+	preparation, ok := session.PrepareCompaction(entries, r.currentSettings().Compaction)
 	if !ok {
 		return "The current session has no history that can be evicted safely; compaction is unnecessary.", nil
 	}
-	result, err := session.Compact(ctx, r.Client, *preparation, extra)
+	result, err := session.Compact(ctx, r.currentClient(), *preparation, extra)
 	if err != nil {
 		return "", err
 	}
@@ -1273,12 +1337,15 @@ func (r *Runtime) rebuildAgents() {
 	if catalog := strings.TrimSpace(r.Skills.CatalogPrompt()); catalog != "" {
 		additional += "\n\n" + catalog
 	}
-	r.react = agent.New(r.Client, r.Tools, additional, r.Concurrent, r.Events)
+	// One client for all three agents: they must agree, and a switch landing
+	// mid-rebuild must not produce agents backed by different clients.
+	client := r.currentClient()
+	r.react = agent.New(client, r.Tools, additional, r.Concurrent, r.Events)
 	planRegistry := planning.NewToolRegistry(r.Tools, r.planStore, func() runtime.PlanState {
 		return r.currentPlanState()
 	})
-	r.planning = agent.New(r.Client, planRegistry, planning.Prompt(additional), r.Concurrent, r.Events)
-	r.minimal = agent.NewWithSystemPrompt(r.Client, minimal.NewToolRegistry(r.Tools), minimal.SystemPrompt, r.Concurrent, r.Events)
+	r.planning = agent.New(client, planRegistry, planning.Prompt(additional), r.Concurrent, r.Events)
+	r.minimal = agent.NewWithSystemPrompt(client, minimal.NewToolRegistry(r.Tools), minimal.SystemPrompt, r.Concurrent, r.Events)
 	beforeChat := func(messages []llm.Message) error {
 		needed, tokens, threshold, err := r.compactionThresholdFor(messages)
 		if err != nil {
@@ -1295,31 +1362,46 @@ func (r *Runtime) rebuildAgents() {
 }
 
 func (r *Runtime) ModelOptions() []llm.ModelOption {
-	if r.switchable == nil {
+	switcher := r.currentSwitchable()
+	if switcher == nil {
 		return nil
 	}
-	return r.switchable.Options()
+	return switcher.Options()
+}
+
+// NeedsProviderSetup reports that the runtime came up without a usable
+// provider, so the TUI should open the configuration wizard. It is derived from
+// the client rather than cached at construction, so it stays correct after a
+// provider is added at runtime.
+func (r *Runtime) NeedsProviderSetup() bool {
+	if r.currentSwitchable() != nil {
+		return false
+	}
+	_, unconfigured := r.currentClient().(*llm.UnconfiguredClient)
+	return unconfigured
 }
 
 func (r *Runtime) CurrentModel() llm.ModelOption {
-	if r.switchable != nil {
-		return r.switchable.Current()
+	if switcher := r.currentSwitchable(); switcher != nil {
+		return switcher.Current()
 	}
-	return llm.ModelOption{Provider: r.Client.ProviderName(), Model: r.Client.ModelName()}
+	client := r.currentClient()
+	return llm.ModelOption{Provider: client.ProviderName(), Model: client.ModelName()}
 }
 
 func (r *Runtime) ReasoningEffort() string {
-	if r.switchable != nil {
-		return r.switchable.ReasoningEffort()
+	if switcher := r.currentSwitchable(); switcher != nil {
+		return switcher.ReasoningEffort()
 	}
 	return ""
 }
 
 func (r *Runtime) SetReasoningEffort(level string) error {
-	if r.switchable == nil {
+	switcher := r.currentSwitchable()
+	if switcher == nil {
 		return errors.New("the current runtime does not support changing reasoning effort")
 	}
-	return r.switchable.SetReasoningEffort(level)
+	return switcher.SetReasoningEffort(level)
 }
 
 func (r *Runtime) MCPServerNames() []string {

@@ -2,6 +2,7 @@ package llm
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -48,5 +49,31 @@ func TestDetectContextOverflowResponse(t *testing.T) {
 				t.Fatalf("got %+v, want %+v", got, test.want)
 			}
 		})
+	}
+}
+
+// A gateway commonly echoes the offending credential back in its error body
+// ("invalid api key: sk-..."). That text reaches the wizard and the transcript,
+// so it must be redacted when the error is formatted.
+func TestAPIErrorRedactsCredentialShapedBody(t *testing.T) {
+	err := &APIError{
+		Provider:   "custom",
+		StatusCode: 401,
+		Status:     "401 Unauthorized",
+		Body:       `{"error":{"message":"invalid api key: sk-live-abcdefghijklmnop"}}`,
+	}
+	message := err.Error()
+	if strings.Contains(message, "sk-live-abcdefghijklmnop") {
+		t.Fatalf("the error message leaked the key: %s", message)
+	}
+	// The diagnostic must survive: the user still needs to know what failed.
+	for _, want := range []string{"custom", "401"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("the error message dropped %q: %s", want, message)
+		}
+	}
+	// The Body field itself is unchanged, because overflow detection reads it.
+	if !strings.Contains(err.Body, "sk-live-abcdefghijklmnop") {
+		t.Fatal("Body must keep the raw text")
 	}
 }

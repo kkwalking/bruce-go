@@ -3,9 +3,10 @@ package plugin
 import (
 	"errors"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
+
+	"bruce-go/internal/redact"
 )
 
 // APIVersion is the manifest apiVersion this build accepts.
@@ -185,38 +186,17 @@ func IsCancellation(err error) bool {
 	return category == CategoryCancellation || category == CategoryTimeout
 }
 
-var redactPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\b(sk|pk|rk)-[A-Za-z0-9_-]{8,}`),
-	regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}`),
-	regexp.MustCompile(`(?i)\b(api[_-]?key|apikey|access[_-]?token|auth[_-]?token|token|secret|password|passwd|credential)s?\b"?\s*[:=]\s*"?[^\s",;]{6,}"?`),
-	regexp.MustCompile(`(?i)\b[A-Za-z0-9_]*(API_?KEY|TOKEN|SECRET|PASSWORD)[A-Za-z0-9_]*\s*[:=]\s*"?[^\s",;]{6,}"?`),
-	regexp.MustCompile(`(?i)-----BEGIN[^-]*PRIVATE KEY-----[\s\S]*?-----END[^-]*PRIVATE KEY-----`),
-}
-
 // Redact removes credential-shaped substrings from a message.
 //
 // Plugin errors are surfaced to the user, written to logs and shown in the TUI.
 // A JavaScript exception that quotes an environment value, a URL with a token,
 // or a header dump must not become a credential leak.
+//
+// The patterns live in internal/redact because the LLM clients need the same
+// treatment for upstream error bodies and cannot import this package (plugin
+// imports llm).
 func Redact(message string) string {
-	if message == "" {
-		return message
-	}
-	out := message
-	for _, pattern := range redactPatterns {
-		out = pattern.ReplaceAllStringFunc(out, func(match string) string {
-			// Keep the key name when the match has one, so the diagnostic
-			// still says what was hidden.
-			if idx := strings.IndexAny(match, ":="); idx > 0 {
-				return match[:idx+1] + "[redacted]"
-			}
-			if fields := strings.Fields(match); len(fields) > 1 {
-				return fields[0] + " [redacted]"
-			}
-			return "[redacted]"
-		})
-	}
-	return out
+	return redact.Text(message)
 }
 
 // builtinToolNames are the tools Bruce itself registers. A plugin tool may not
