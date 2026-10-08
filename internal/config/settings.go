@@ -69,11 +69,89 @@ type LLMSettings struct {
 }
 
 type ProviderSetting struct {
-	APIKey            string                     `json:"apiKey"`
-	BaseURL           string                     `json:"baseUrl"`
-	Models            []string                   `json:"models"`
+	APIKey  string   `json:"apiKey"`
+	BaseURL string   `json:"baseUrl"`
+	Models  []string `json:"models"`
+	// Protocol selects the wire format used to talk to this provider. It is
+	// optional: an empty value is inferred from the provider name by
+	// ResolveProtocol. It is never left unset internally, because it decides
+	// which endpoint receives the API key.
+	Protocol          string                     `json:"protocol,omitempty"`
 	ModelCapabilities map[string]ModelCapability `json:"modelCapabilities,omitempty"`
 }
+
+// Wire protocols a provider can speak. These are the values accepted by the
+// "protocol" field of a provider entry in setting.json.
+const (
+	// ProtocolOpenAIChat is the OpenAI Chat Completions shape: POST
+	// {base}/chat/completions with a "messages" array. This is what the
+	// built-in providers and every generic OpenAI-compatible gateway speak.
+	ProtocolOpenAIChat = "openai_chat"
+	// ProtocolOpenAIResponses is the OpenAI Responses shape: POST
+	// {base}/responses with "input" items and "instructions".
+	ProtocolOpenAIResponses = "openai_responses"
+	// ProtocolAnthropic is the Anthropic Messages shape: POST {base}/v1/messages
+	// with a top-level "system" field and content blocks.
+	ProtocolAnthropic = "anthropic"
+)
+
+// protocolAliases maps the spellings a settings file may use onto the canonical
+// protocol constants. Aliases exist because the field is hand-written and the
+// obvious spellings differ from the canonical ones.
+var protocolAliases = map[string]string{
+	"openai":             ProtocolOpenAIChat,
+	"openai_chat":        ProtocolOpenAIChat,
+	"openai_compatible":  ProtocolOpenAIChat,
+	"openai_compatiable": ProtocolOpenAIChat,
+	"chat_completions":   ProtocolOpenAIChat,
+	"responses":          ProtocolOpenAIResponses,
+	"openai_responses":   ProtocolOpenAIResponses,
+	"anthropic":          ProtocolAnthropic,
+	"anthropic_messages": ProtocolAnthropic,
+	"claude":             ProtocolAnthropic,
+}
+
+// Protocols returns the canonical protocol values, in the order they should be
+// offered to a user choosing one.
+func Protocols() []string {
+	return []string{ProtocolOpenAIChat, ProtocolOpenAIResponses, ProtocolAnthropic}
+}
+
+// NormalizeProtocol resolves a protocol value or alias to its canonical form.
+// It reports whether the value was recognized; an empty value is not, so
+// callers can distinguish "not set" from "invalid".
+func NormalizeProtocol(value string) (string, bool) {
+	canonical, ok := protocolAliases[strings.ToLower(strings.TrimSpace(value))]
+	return canonical, ok
+}
+
+// ResolveProtocol returns the wire protocol for a provider, inferring one from
+// the provider name when the entry does not state it.
+//
+// Inference exists so an existing setting.json keeps working after the field is
+// introduced: built-in providers and generic gateways speak Chat Completions,
+// while a provider named after Anthropic or Claude is far more likely to be
+// spoken to in the Messages format. The inference is deliberately conservative
+// — a name that mentions neither keeps the historical Chat Completions
+// behaviour rather than guessing.
+func ResolveProtocol(providerName string, setting ProviderSetting) string {
+	if canonical, ok := NormalizeProtocol(setting.Protocol); ok {
+		return canonical
+	}
+	name := strings.ToLower(strings.TrimSpace(providerName))
+	if strings.Contains(name, "anthropic") || strings.Contains(name, "claude") {
+		return ProtocolAnthropic
+	}
+	if strings.Contains(name, "responses") {
+		return ProtocolOpenAIResponses
+	}
+	return ProtocolOpenAIChat
+}
+
+// ProviderNamePattern is the accepted shape of a provider name. The name is
+// used as a /model selector component and as a settings-file object key, so it
+// is restricted to the characters that survive both.
+var ProviderNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
 
 type ModelCapability struct {
 	ContextWindow   int `json:"contextWindow,omitempty"`
@@ -330,6 +408,23 @@ func (l Loader) Save(settings Settings) error {
 }
 func validateLLM(settings LLMSettings) error {
 	for providerName, provider := range settings.Providers {
+		if !ProviderNamePattern.MatchString(providerName) {
+			return fmt.Errorf(
+				"invalid provider name %q in llm.providers: names must match %s",
+				providerName, ProviderNamePattern.String(),
+			)
+		}
+		// The protocol decides which endpoint receives the API key, so a value
+		// that is not recognized is refused rather than silently replaced by
+		// the inferred default.
+		if strings.TrimSpace(provider.Protocol) != "" {
+			if _, ok := NormalizeProtocol(provider.Protocol); !ok {
+				return fmt.Errorf(
+					"llm.providers.%s.protocol %q is not a known protocol (allowed values: %s)",
+					providerName, provider.Protocol, strings.Join(Protocols(), ", "),
+				)
+			}
+		}
 		declared := make(map[string]bool, len(provider.Models))
 		for _, model := range provider.Models {
 			model = strings.TrimSpace(model)
@@ -359,6 +454,51 @@ func validateLLM(settings LLMSettings) error {
 	return nil
 }
 
+// normalizeProviders lower-cases provider names, canonicalizes protocol values
+// and trims the declared model lists. It is applied on both load and save, so a
+// hand-written settings file and one written by Bruce converge on the same
+// shape.
+//
+// An entry whose name is empty is dropped: the JSON object key is legal but
+// nothing can address it, and validateLLM would reject it as an invalid name.
+func normalizeProviders(settings *Settings) {
+	if settings.LLM.Providers == nil {
+		settings.LLM.Providers = map[string]ProviderSetting{}
+		return
+	}
+	normalized := make(map[string]ProviderSetting, len(settings.LLM.Providers))
+	for name, provider := range settings.LLM.Providers {
+		trimmed := strings.ToLower(strings.TrimSpace(name))
+		if trimmed == "" {
+			continue
+		}
+		if canonical, ok := NormalizeProtocol(provider.Protocol); ok {
+			provider.Protocol = canonical
+		} else {
+			// Leave an unrecognized value untouched so validateLLM can report
+			// it instead of the loader silently accepting a typo.
+			provider.Protocol = strings.TrimSpace(provider.Protocol)
+		}
+		provider.Models = normalizeModelList(provider.Models)
+		normalized[trimmed] = provider
+	}
+	settings.LLM.Providers = normalized
+}
+
+func normalizeModelList(models []string) []string {
+	seen := make(map[string]bool, len(models))
+	out := make([]string, 0, len(models))
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		if model == "" || seen[model] {
+			continue
+		}
+		seen[model] = true
+		out = append(out, model)
+	}
+	return out
+}
+
 func ResolveUserPath(value string) string {
 	if value == "" {
 		value = "."
@@ -378,9 +518,7 @@ func ResolveUserPath(value string) string {
 }
 
 func normalize(settings *Settings) {
-	if settings.LLM.Providers == nil {
-		settings.LLM.Providers = map[string]ProviderSetting{}
-	}
+	normalizeProviders(settings)
 	if settings.WebSearch.Provider == "" {
 		settings.WebSearch.Provider = "zhipu"
 	}
