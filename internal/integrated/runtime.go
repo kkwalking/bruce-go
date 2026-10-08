@@ -162,11 +162,22 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		}
 	} else {
 		s, err := llm.NewSwitchable(settings, loader)
-		if err != nil {
+		switch {
+		case err == nil:
+			client = s
+			switcher = s
+		case errors.Is(err, llm.ErrNoProvider):
+			// No usable provider is not a startup failure: it is the state a
+			// first-run user is in, and the TUI opens the configuration wizard
+			// for it. A stand-in client keeps every dereference downstream
+			// valid, and the switchable client stays nil so the existing nil
+			// branches keep reporting "nothing to switch to".
+			client = llm.NewUnconfiguredClient()
+		default:
+			// Anything else (an invalid compaction window, say) is a real
+			// misconfiguration and still refuses to start.
 			return nil, err
 		}
-		client = s
-		switcher = s
 	}
 	if err := validateCompactionWindow(settings.Compaction, client); err != nil {
 		return nil, err
@@ -870,6 +881,9 @@ func (r *Runtime) handleModel(args []string) (string, error) {
 		return r.handleModelReasoning(args[1:])
 	}
 	if r.switchable == nil {
+		if r.NeedsProviderSetup() {
+			return "No LLM provider is configured. Run /provider add to set one up.", nil
+		}
 		return fmt.Sprintf("Current model: %s/%s", r.Client.ProviderName(), r.Client.ModelName()), nil
 	}
 	if len(args) == 0 {
@@ -1299,6 +1313,18 @@ func (r *Runtime) ModelOptions() []llm.ModelOption {
 		return nil
 	}
 	return r.switchable.Options()
+}
+
+// NeedsProviderSetup reports that the runtime came up without a usable
+// provider, so the TUI should open the configuration wizard. It is derived from
+// the client rather than cached at construction, so it stays correct after a
+// provider is added at runtime.
+func (r *Runtime) NeedsProviderSetup() bool {
+	if r.switchable != nil {
+		return false
+	}
+	_, unconfigured := r.Client.(*llm.UnconfiguredClient)
+	return unconfigured
 }
 
 func (r *Runtime) CurrentModel() llm.ModelOption {

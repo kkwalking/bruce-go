@@ -36,9 +36,14 @@ type SwitchableClient struct {
 	reasoningEffort string
 }
 
+// ErrNoProvider means there is nothing to talk to: no provider entry at all, or
+// none of them usable. It is distinct from a misconfiguration that must be
+// fixed before Bruce can run, such as an invalid compaction window.
+var ErrNoProvider = errors.New("error: llm.providers is not configured")
+
 func NewSwitchable(settings config.Settings, loader config.Loader) (*SwitchableClient, error) {
 	if len(settings.LLM.Providers) == 0 {
-		return nil, errors.New("error: llm.providers is not configured")
+		return nil, ErrNoProvider
 	}
 	options := []ModelOption{}
 	suppliers := map[string]func() ChatClient{}
@@ -69,7 +74,7 @@ func NewSwitchable(settings config.Settings, loader config.Loader) (*SwitchableC
 		}
 	}
 	if len(options) == 0 {
-		return nil, errors.New("error: setting.json contains no usable LLM provider")
+		return nil, fmt.Errorf("%w: no provider has both an API key and a model list", ErrNoProvider)
 	}
 	initial := initialModel(settings.LLM, options, defaults)
 	c := &SwitchableClient{
