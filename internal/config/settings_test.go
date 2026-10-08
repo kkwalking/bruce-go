@@ -672,3 +672,51 @@ func providerNames(settings Settings) []string {
 	}
 	return names
 }
+
+// Two entry names that resolve to one provider cannot both be honoured: only
+// one endpoint and one credential can win, so the pair has to be refused rather
+// than resolved by map iteration order.
+func TestLoaderRejectsProviderNamesThatResolveToTheSameProvider(t *testing.T) {
+	clearBuiltInProviderEnv(t)
+	for _, providers := range []string{
+		`{"kimi":{"apiKey":"a","models":["m"]},"moonshot":{"apiKey":"b","models":["m"]}}`,
+		`{"glm":{"apiKey":"a"},"zai":{"apiKey":"b"}}`,
+		`{"openai":{"apiKey":"a","baseUrl":"https://a.example/v1","models":["m"]},"openai_compatible":{"apiKey":"b","baseUrl":"https://b.example/v1","models":["m"]}}`,
+	} {
+		path := filepath.Join(t.TempDir(), "setting.json")
+		data := `{"llm":{"providers":` + providers + `}}`
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := NewLoader(path).Load()
+		if err == nil {
+			t.Fatalf("expected a collision error for %s", providers)
+		}
+		if !strings.Contains(err.Error(), "same provider") {
+			t.Fatalf("error %q does not explain the collision", err)
+		}
+	}
+}
+
+// An entry written under an alias already configures that provider, so the
+// environment must not add a second entry under the canonical name — that would
+// make a correct configuration fail validation.
+func TestLoaderEnvironmentDoesNotCollideWithAliasEntry(t *testing.T) {
+	clearBuiltInProviderEnv(t)
+	t.Setenv(GLMAPIKeyEnv, "env-key")
+	path := filepath.Join(t.TempDir(), "setting.json")
+	data := `{"llm":{"providers":{"zai":{"apiKey":"explicit-key","models":["glm-5.1"]}}}}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := NewLoader(path).Load()
+	if err != nil {
+		t.Fatalf("an alias entry plus the environment should load: %v", err)
+	}
+	if len(settings.LLM.Providers) != 1 {
+		t.Fatalf("providers = %#v, want only the explicit entry", providerNames(settings))
+	}
+	if got := settings.LLM.Providers["zai"].APIKey; got != "explicit-key" {
+		t.Fatalf("api key = %q, the explicit entry must win", got)
+	}
+}

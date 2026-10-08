@@ -45,6 +45,12 @@ func NewSwitchable(settings config.Settings, loader config.Loader) (*SwitchableC
 	if len(settings.LLM.Providers) == 0 {
 		return nil, ErrNoProvider
 	}
+	// Checked here as well as in validateLLM: the provider editor builds a
+	// candidate client from edited settings before it saves them, so this is
+	// the first place a new collision can be seen.
+	if err := config.CheckProviderNameCollisions(settings.LLM.Providers); err != nil {
+		return nil, err
+	}
 	catalog := BuildCatalog(settings)
 	if len(catalog.Options) == 0 {
 		return nil, fmt.Errorf("%w: no provider has both an API key and a model list", ErrNoProvider)
@@ -60,6 +66,14 @@ func NewSwitchable(settings config.Settings, loader config.Loader) (*SwitchableC
 		}
 	}
 	initial := catalog.Initial(settings.LLM)
+	initialSupplier := suppliers[key(initial)]
+	if initialSupplier == nil {
+		// The option list and the supplier table are derived from the same
+		// settings, so a miss means the two derivations disagreed. Reporting it
+		// beats calling a nil function: the cause is a configuration shape that
+		// slipped past validation, and the user can act on the message.
+		return nil, fmt.Errorf("no client can be built for the initial model %s; check the provider entries for that name", initial.Selector())
+	}
 	c := &SwitchableClient{
 		settings:      &settings,
 		loader:        loader,
@@ -68,7 +82,7 @@ func NewSwitchable(settings config.Settings, loader config.Loader) (*SwitchableC
 		defaultModels: catalog.Defaults,
 		current:       initial,
 	}
-	c.client = c.suppliers[key(initial)]()
+	c.client = initialSupplier()
 	if err := validateCompactionWindow(settings.Compaction, initial, c.client); err != nil {
 		return nil, err
 	}
@@ -81,17 +95,11 @@ func NewSwitchable(settings config.Settings, loader config.Loader) (*SwitchableC
 	return c, nil
 }
 
+// NormalizeProvider resolves a provider name or alias to its canonical name.
+// The table lives in config so validation can detect two entries that name the
+// same provider before a client is built from either.
 func NormalizeProvider(provider string) string {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "zai", "zhipu", "bigmodel", "zhipuai":
-		return "glm"
-	case "kimi", "moonshot", "moonshotai":
-		return "kimi"
-	case "openai-compatible", "openai_compatible", "openai", "compatible", "openai_compatiable":
-		return "openai_compatiable"
-	default:
-		return strings.ToLower(strings.TrimSpace(provider))
-	}
+	return config.NormalizeProvider(provider)
 }
 
 // NewProviderClient builds the client for one provider/model pair.

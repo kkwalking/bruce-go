@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -152,6 +154,25 @@ func ResolveProtocol(providerName string, setting ProviderSetting) string {
 // used as a /model selector component and as a settings-file object key, so it
 // is restricted to the characters that survive both.
 var ProviderNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
+
+// NormalizeProvider resolves a provider name or alias to its canonical name.
+//
+// The table lives here rather than in llm so that validation can tell that two
+// entries name the same provider before anything builds a client from them: an
+// entry's credential and its endpoint must come from the same entry, so a pair
+// like "kimi" and "moonshot" has to be refused, not resolved by map order.
+func NormalizeProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "zai", "zhipu", "bigmodel", "zhipuai":
+		return "glm"
+	case "kimi", "moonshot", "moonshotai":
+		return "kimi"
+	case "openai-compatible", "openai_compatible", "openai", "compatible", "openai_compatiable":
+		return "openai_compatiable"
+	default:
+		return strings.ToLower(strings.TrimSpace(provider))
+	}
+}
 
 type ModelCapability struct {
 	ContextWindow   int `json:"contextWindow,omitempty"`
@@ -406,7 +427,50 @@ func (l Loader) Save(settings Settings) error {
 	}
 	return os.WriteFile(l.Path, append(data, '\n'), 0o644)
 }
+
+// CheckProviderNameCollisions refuses entries whose names resolve to the same
+// provider. Only one endpoint and one credential can act for a canonical name,
+// so a pair like "kimi" and "moonshot" would have its winner decided by map
+// iteration order — and the loser's API key would be sent to the winner's
+// endpoint.
+//
+// It is exported because the runtime builds a client from edited settings
+// before saving them, so validation at load time alone would be too late.
+func CheckProviderNameCollisions(providers map[string]ProviderSetting) error {
+	// Grouped and reported through sorted keys so the same file always names
+	// the same pair, regardless of map order.
+	byCanonical := map[string][]string{}
+	for providerName := range providers {
+		canonical := NormalizeProvider(providerName)
+		byCanonical[canonical] = append(byCanonical[canonical], providerName)
+	}
+	canonicals := make([]string, 0, len(byCanonical))
+	for canonical := range byCanonical {
+		canonicals = append(canonicals, canonical)
+	}
+	sort.Strings(canonicals)
+	for _, canonical := range canonicals {
+		names := byCanonical[canonical]
+		if len(names) < 2 {
+			continue
+		}
+		sort.Strings(names)
+		quoted := make([]string, len(names))
+		for i, name := range names {
+			quoted[i] = strconv.Quote(name)
+		}
+		return fmt.Errorf(
+			"llm.providers defines %s, which are all the same provider (%s); merge them into one entry",
+			strings.Join(quoted, " and "), canonical,
+		)
+	}
+	return nil
+}
+
 func validateLLM(settings LLMSettings) error {
+	if err := CheckProviderNameCollisions(settings.Providers); err != nil {
+		return err
+	}
 	for providerName, provider := range settings.Providers {
 		if !ProviderNamePattern.MatchString(providerName) {
 			return fmt.Errorf(
@@ -565,14 +629,22 @@ func normalize(settings *Settings) {
 // configured default.
 func applyEnvironmentDefaults(settings *Settings) {
 	hasExplicitDefault := strings.TrimSpace(settings.LLM.DefaultProvider) != ""
+	// Claimed by canonical name, not entry name: an entry written as "zai"
+	// already configures glm, so GLM_API_KEY must not add a second entry that
+	// validateLLM would then reject as a collision.
+	claimed := make(map[string]bool, len(settings.LLM.Providers))
+	for name := range settings.LLM.Providers {
+		claimed[NormalizeProvider(name)] = true
+	}
 	for _, provider := range builtInProviders {
 		apiKey := strings.TrimSpace(os.Getenv(provider.Env))
 		if apiKey == "" {
 			continue
 		}
-		if _, exists := settings.LLM.Providers[provider.Name]; exists {
+		if claimed[provider.Name] {
 			continue
 		}
+		claimed[provider.Name] = true
 		settings.LLM.Providers[provider.Name] = ProviderSetting{
 			APIKey: apiKey,
 			Models: []string{provider.DefaultModel},

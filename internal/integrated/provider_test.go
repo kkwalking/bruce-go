@@ -443,3 +443,31 @@ func TestModelSwitchIsSafeAgainstConcurrentStatusReads(t *testing.T) {
 	}
 	<-done
 }
+
+// Adding an entry under a name that aliases an existing provider cannot be
+// honoured: one endpoint and one credential would have to win, chosen by map
+// order. The editor must refuse it and leave the file untouched.
+func TestSaveProviderRejectsAliasOfExistingProvider(t *testing.T) {
+	rt, settingsPath := providerTestRuntime(t,
+		`{"llm":{"providers":{"kimi":{"apiKey":"original","baseUrl":"https://kimi.example/v1","models":["m"]}}}}`)
+	before, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = rt.SaveProvider("moonshot", config.ProviderSetting{
+		APIKey: "other", BaseURL: "https://moonshot.example/v1", Models: []string{"m"},
+	}, true)
+	if err == nil {
+		t.Fatal("adding an alias of an existing provider should be refused")
+	}
+	if !strings.Contains(err.Error(), "same provider") {
+		t.Fatalf("error = %q, want an explanation of the collision", err)
+	}
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("a refused save must not touch the file:\nbefore: %s\nafter:  %s", before, after)
+	}
+}

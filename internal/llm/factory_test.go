@@ -3,6 +3,7 @@ package llm
 import (
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"bruce-go/internal/config"
@@ -405,5 +406,32 @@ func TestSwitchableClientIncludesEnvironmentProviders(t *testing.T) {
 	}
 	if got := client.ProviderName(); got != "kimi" {
 		t.Fatalf("current provider = %q, want kimi", got)
+	}
+}
+
+// Two entries whose names normalize to the same provider cannot both be
+// honoured: NormalizeProvider collapses "kimi" and "moonshot" onto one
+// provider, so at most one endpoint and one credential can win, and which one
+// would depend on map iteration order. Before this was rejected, the model list
+// (built by BuildCatalog) and the supplier table (built by a second loop) could
+// disagree and NewSwitchable called a nil supplier.
+func TestNewSwitchableRejectsEntriesThatNameTheSameProvider(t *testing.T) {
+	settings := config.DefaultSettings()
+	settings.LLM.DefaultProvider = "kimi"
+	settings.LLM.DefaultModel = "shared"
+	settings.LLM.Providers["kimi"] = config.ProviderSetting{
+		APIKey: "KEY-ALICE", BaseURL: "https://alice.example/v1", Models: []string{"shared"},
+	}
+	settings.LLM.Providers["moonshot"] = config.ProviderSetting{
+		APIKey: "KEY-BOB", BaseURL: "https://bob.example/v1", Models: []string{"shared"},
+	}
+	client, err := NewSwitchable(settings, config.NewLoader(filepath.Join(t.TempDir(), "setting.json")))
+	if err == nil {
+		t.Fatalf("expected the duplicate provider names to be refused, got client with %s", client.Current().Selector())
+	}
+	for _, want := range []string{"kimi", "moonshot"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not name %q", err, want)
+		}
 	}
 }
