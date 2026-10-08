@@ -141,6 +141,10 @@ type Model struct {
 	modelSelectorOpen      bool
 	pendingReasoningEffort string // popup 内 ←/→ 调整的待定强度，回车确认才落盘
 	approval               *approvalDialog
+	// wizard is the provider configuration modal. Like the approval dialog it
+	// owns the keyboard while open; unlike it, it also owns an asynchronous
+	// probe, which it cancels on close.
+	wizard *providerWizard
 
 	history      []string
 	historyIndex int
@@ -175,6 +179,11 @@ func NewModel(ctx context.Context, rt *integrated.Runtime) *Model {
 	}
 	m.loadHistory()
 	m.historyIndex = len(m.history)
+	// First run: with no usable provider there is nothing to do but configure
+	// one, so the wizard opens by itself rather than waiting to be discovered.
+	if rt != nil && rt.NeedsProviderSetup() {
+		m.openProviderWizard()
+	}
 	return m
 }
 
@@ -201,6 +210,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.scrollOffset = m.clampScrollOffset(m.scrollOffset)
+	case providerProbeMsg, wizardSpinnerMsg:
+		if handled, cmd := m.handleProviderWizardMsg(msg); handled {
+			return m, cmd
+		}
+	case providerSavedMsg:
+		m.appendSystemMessage(providerSavedText(msg))
+	case providerSaveFailedMsg:
+		m.appendSystemMessage("Could not save provider " + msg.name + ": " + msg.err.Error())
 	case runtimeStartedMsg:
 		m.busy = false
 		m.statusPhase = "idle"
@@ -219,6 +236,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		m.handleMouse(msg)
 	case tea.KeyMsg:
+		// The wizard is checked before the approval dialog: it is the modal the
+		// user opened most recently, so it sits on top.
+		if m.wizard != nil {
+			return m, m.handleProviderWizardKey(msg)
+		}
 		if m.approval != nil {
 			return m, m.handleApprovalKey(msg)
 		}
@@ -243,6 +265,8 @@ func (m *Model) View() string {
 	m.drawInput(canvas, columns, layout)
 	m.drawStatus(canvas, columns, layout.statusRow)
 	m.drawApproval(canvas, columns, rows)
+	// Drawn last: the wizard covers both the approval dialog and the main view.
+	m.drawProviderWizard(canvas, columns, rows)
 	return strings.Join(canvas, "\n")
 }
 
@@ -361,6 +385,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 }
 
 func (m *Model) handleMouse(msg tea.MouseMsg) {
+	// The wizard is a modal: clicks belong to it, and hit-testing the text
+	// underneath would toggle reasoning blocks the user cannot see.
+	if m.wizard != nil {
+		return
+	}
 	switch msg.Button {
 	case tea.MouseButtonWheelUp:
 		m.scrollBy(scrollLines)
@@ -547,6 +576,9 @@ func (m *Model) submitInput() tea.Cmd {
 	if submitted == "" {
 		return nil
 	}
+	if handled := m.handleProviderCommand(submitted); handled {
+		return nil
+	}
 	m.addHistory(submitted)
 	m.scrollOffset = 0
 	m.appendUserMessage(submitted)
@@ -555,6 +587,40 @@ func (m *Model) submitInput() tea.Cmd {
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.cancel = cancel
 	return runInputCmd(ctx, m.runtime, submitted)
+}
+
+// handleProviderCommand intercepts the provider subcommands that need the
+// wizard. They are handled here rather than in the runtime because the runtime
+// has no way to ask for input, and a partial save from there would leave a
+// half-configured provider on disk.
+func (m *Model) handleProviderCommand(submitted string) bool {
+	command, ok := cli.Parse(submitted)
+	if !ok || command.Name != "provider" || len(command.Args) == 0 {
+		return false
+	}
+	switch strings.ToLower(command.Args[0]) {
+	case "add":
+		m.appendUserMessage(submitted)
+		m.appendSystemMessage("Opening the provider configuration wizard.")
+		m.openProviderWizard()
+		return true
+	case "edit":
+		if len(command.Args) < 2 {
+			m.appendUserMessage(submitted)
+			m.appendSystemMessage("Usage: /provider edit <name>")
+			return true
+		}
+		name := strings.ToLower(command.Args[1])
+		if err := m.openProviderEditor(name); err != nil {
+			m.appendUserMessage(submitted)
+			m.appendSystemMessage(err.Error())
+			return true
+		}
+		m.appendUserMessage(submitted)
+		m.appendSystemMessage("Editing provider: " + name)
+		return true
+	}
+	return false
 }
 
 func runInputCmd(ctx context.Context, rt *integrated.Runtime, submitted string) tea.Cmd {
