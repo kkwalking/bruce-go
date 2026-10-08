@@ -36,7 +36,7 @@ func NewOpenAIResponsesClient(provider, apiKey, model, baseURL string) *OpenAIRe
 		APIKey:     apiKey,
 		Model:      model,
 		APIURL:     responsesURL(baseURL),
-		HTTPClient: &http.Client{Timeout: 120 * time.Second},
+		HTTPClient: newHTTPClient(120 * time.Second),
 	}
 }
 
@@ -507,7 +507,7 @@ func (c *OpenAIResponsesClient) httpClient() *http.Client {
 	if c.HTTPClient != nil {
 		return c.HTTPClient
 	}
-	return &http.Client{Timeout: 120 * time.Second}
+	return newHTTPClient(120 * time.Second)
 }
 
 // responsesURL joins a base URL with the Responses API path. A base that already

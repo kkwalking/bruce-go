@@ -425,7 +425,17 @@ func (l Loader) Save(settings Settings) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(l.Path, append(data, '\n'), 0o644)
+	if err := os.WriteFile(l.Path, append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	// The mode argument to WriteFile only applies when the file is created, so
+	// an existing file keeps whatever it had. The file holds API keys in
+	// plaintext, and a file written before this rule (or by hand) may be
+	// readable by other accounts; tighten it on every save.
+	if err := os.Chmod(l.Path, 0o600); err != nil {
+		return err
+	}
+	return nil
 }
 
 // CheckProviderNameCollisions refuses entries whose names resolve to the same

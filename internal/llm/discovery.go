@@ -43,7 +43,7 @@ func DiscoverModels(ctx context.Context, protocol, baseURL, apiKey string) ([]Di
 	for name, value := range headers {
 		request.Header.Set(name, value)
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := newHTTPClient(30 * time.Second)
 	response, err := client.Do(request)
 	if err != nil {
 		return nil, err

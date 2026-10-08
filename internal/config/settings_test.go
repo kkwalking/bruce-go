@@ -720,3 +720,42 @@ func TestLoaderEnvironmentDoesNotCollideWithAliasEntry(t *testing.T) {
 		t.Fatalf("api key = %q, the explicit entry must win", got)
 	}
 }
+
+// setting.json holds provider API keys in plaintext, so it must not be
+// world-readable. It is created 0600 and an existing file is tightened to 0600
+// on the next save, since a file written before this rule could be 0644.
+func TestLoaderSavesSettingsWithOwnerOnlyPermissions(t *testing.T) {
+	clearBuiltInProviderEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "setting.json")
+
+	settings, err := NewLoader(path).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := NewLoader(path).Save(settings); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("new settings file mode = %o, want 600", got)
+	}
+
+	// An existing file with looser permissions is tightened, not left alone.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewLoader(path).Save(settings); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("settings file mode after save = %o, want 600", got)
+	}
+}

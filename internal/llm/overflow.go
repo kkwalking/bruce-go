@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"bruce-go/internal/redact"
 )
 
 type APIError struct {
@@ -15,7 +17,11 @@ type APIError struct {
 }
 
 func (e *APIError) Error() string {
-	return fmt.Sprintf("%s API request failed: HTTP %s\n%s", e.Provider, e.Status, e.Body)
+	// The body is upstream text and is rendered in the TUI and written to the
+	// session transcript. A gateway rejecting a key often quotes it back, so
+	// the message is redacted while Body keeps the raw value that overflow
+	// detection and tests read.
+	return fmt.Sprintf("%s API request failed: HTTP %s\n%s", e.Provider, e.Status, redact.Text(e.Body))
 }
 
 type ContextOverflowError struct {

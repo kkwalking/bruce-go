@@ -658,3 +658,39 @@ func readFileOrEmpty(path string) string {
 	}
 	return string(data)
 }
+
+// A key sent over plain http to a remote host is readable by anything on the
+// path, so the wizard refuses that combination while still allowing it for
+// loopback, where the traffic never leaves the machine.
+func TestProviderWizardRefusesPlaintextHTTPForRemoteHosts(t *testing.T) {
+	cases := []struct {
+		baseURL string
+		allowed bool
+	}{
+		{"http://127.0.0.1:3425/v1", true},
+		{"http://localhost:9000/v1", true},
+		{"http://[::1]:9000/v1", true},
+		{"https://api.example.com/v1", true},
+		{"http://api.example.com/v1", false},
+		{"http://10.0.0.5/v1", false},
+		{"http://192.168.1.10:8080/v1", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.baseURL, func(t *testing.T) {
+			m, _ := wizardRuntime(t, `{"llm":{"providers":{}}}`)
+			wizard := m.wizard
+			typeText(m, "mygateway")
+			m.handleProviderWizardKey(keyMsg("enter")) // -> protocol
+			m.handleProviderWizardKey(keyMsg("enter")) // -> base url
+			typeText(m, tc.baseURL)
+			m.handleProviderWizardKey(keyMsg("enter"))
+			advanced := wizard.step == wizardAPIKey
+			if advanced != tc.allowed {
+				t.Fatalf("advanced=%v want %v (err=%q)", advanced, tc.allowed, wizard.err)
+			}
+			if !tc.allowed && !strings.Contains(wizard.err, "https") {
+				t.Fatalf("the refusal should explain the https requirement: %q", wizard.err)
+			}
+		})
+	}
+}

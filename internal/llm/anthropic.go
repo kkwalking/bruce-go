@@ -45,7 +45,7 @@ func NewAnthropicClient(provider, apiKey, model, baseURL string) *AnthropicClien
 		APIKey:     apiKey,
 		Model:      model,
 		APIURL:     anthropicMessagesURL(baseURL),
-		HTTPClient: &http.Client{Timeout: 120 * time.Second},
+		HTTPClient: newHTTPClient(120 * time.Second),
 	}
 }
 
@@ -559,7 +559,7 @@ func (c *AnthropicClient) httpClient() *http.Client {
 	if c.HTTPClient != nil {
 		return c.HTTPClient
 	}
-	return &http.Client{Timeout: 120 * time.Second}
+	return newHTTPClient(120 * time.Second)
 }
 
 // anthropicMessagesURL joins a base URL with the Messages API path. A base that

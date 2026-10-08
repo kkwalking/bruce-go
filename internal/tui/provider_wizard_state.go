@@ -2,11 +2,28 @@ package tui
 
 import (
 	"context"
+	"net"
+	"net/url"
 	"strings"
 
 	"bruce-go/internal/config"
 	"bruce-go/internal/llm"
 )
+
+// isLoopbackURL reports whether a base URL names the local machine, where
+// plain http is acceptable because the traffic never reaches the network.
+func isLoopbackURL(value string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return false
+	}
+	name := strings.ToLower(parsed.Hostname())
+	if name == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(name)
+	return ip != nil && ip.IsLoopback()
+}
 
 // wizardStep is one screen of the provider configuration wizard.
 type wizardStep int
@@ -281,6 +298,13 @@ func (w *providerWizard) validationError() string {
 		}
 		if value != "" && !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") {
 			return "the base URL must start with http:// or https://"
+		}
+		// The API key travels to this endpoint on every request. Over plain
+		// http to a remote host it is readable by anything on the path, so
+		// that combination is refused; loopback is exempt because the traffic
+		// never leaves the machine.
+		if strings.HasPrefix(value, "http://") && !isLoopbackURL(value) {
+			return "plain http would send the API key in the clear; use https:// for a remote host (http:// is allowed for localhost)"
 		}
 	case wizardAPIKey:
 		if strings.TrimSpace(w.apiKey.value()) == "" {
