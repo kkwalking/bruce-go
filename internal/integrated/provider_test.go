@@ -407,3 +407,39 @@ func TestProviderSummaryDescribesUnconfiguredModels(t *testing.T) {
 		t.Fatalf("providers = %#v, want glm with its built-in models", list)
 	}
 }
+
+// Switching a model while the render loop reads the client used to be a data
+// race: handleModel wrote r.Client on a command goroutine while Status read it
+// on the event loop. The race detector is what catches this; the assertions
+// only keep the two sides doing real work until it can.
+func TestModelSwitchIsSafeAgainstConcurrentStatusReads(t *testing.T) {
+	providers := `{"llm":{"providers":{
+	  "alpha":{"apiKey":"k","baseUrl":"http://127.0.0.1:1/v1","models":["a1","a2"]}}}}`
+	rt, _ := providerTestRuntime(t, providers)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			model := "a1"
+			if i%2 == 0 {
+				model = "a2"
+			}
+			if _, err := rt.SwitchModel("alpha/" + model); err != nil {
+				t.Errorf("switch: %v", err)
+				return
+			}
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		status := rt.Status()
+		if status.Model == "" {
+			t.Error("status reported no model")
+			return
+		}
+		_ = rt.ModelOptions()
+		_ = rt.CurrentModel()
+		_ = rt.NeedsProviderSetup()
+	}
+	<-done
+}

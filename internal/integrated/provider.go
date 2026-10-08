@@ -160,7 +160,7 @@ func (r *Runtime) replaceProviders(fresh config.Settings, activate bool, activeN
 		return err
 	}
 
-	previous := r.Settings
+	previous := r.currentSettings()
 	if err := r.Loader.Save(fresh); err != nil {
 		// Nothing was swapped, so the process still runs the old client and
 		// the file was not successfully written.
@@ -176,6 +176,9 @@ func (r *Runtime) replaceProviders(fresh config.Settings, activate bool, activeN
 		return fmt.Errorf("the new provider configuration could not be read back: %w", err)
 	}
 
+	// The whole swap goes in under one write lock: readers on the render loop
+	// must never see a new client with the old settings, or vice versa.
+	r.stateMu.Lock()
 	r.Settings = loaded
 	if candidate == nil {
 		// Every provider is gone; fall back to the stand-in client and leave
@@ -186,6 +189,7 @@ func (r *Runtime) replaceProviders(fresh config.Settings, activate bool, activeN
 		r.switchable = candidate
 		r.Client = candidate
 	}
+	r.stateMu.Unlock()
 	r.rebuildAgents()
 	return nil
 }
@@ -199,7 +203,7 @@ func (r *Runtime) SwitchModel(selector string) (llm.ModelOption, error) {
 	if _, err := r.switchable.Switch(selector); err != nil {
 		return llm.ModelOption{}, err
 	}
-	r.Client = r.switchable
+	r.adoptClient(r.switchable)
 	r.rebuildAgents()
 	return r.switchable.Current(), nil
 }
