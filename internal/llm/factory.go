@@ -48,7 +48,10 @@ func NewSwitchable(settings config.Settings, loader config.Loader) (*SwitchableC
 		if strings.TrimSpace(providerSettings.APIKey) == "" {
 			continue
 		}
-		if provider == "openai_compatiable" && strings.TrimSpace(providerSettings.BaseURL) == "" {
+		// A provider with no compiled-in endpoint needs an explicit one; a
+		// built-in provider may still override its endpoint via baseUrl.
+		explicitProtocol := strings.TrimSpace(providerSettings.Protocol) != ""
+		if (explicitProtocol || !providerHasEndpoint(provider)) && strings.TrimSpace(providerSettings.BaseURL) == "" {
 			continue
 		}
 		models := supportedModels(provider, providerSettings)
@@ -103,22 +106,52 @@ func NormalizeProvider(provider string) string {
 	}
 }
 
+// NewProviderClient builds the client for one provider/model pair.
+//
+// The protocol decides the wire format, and it is resolved per provider rather
+// than per name: the built-in names keep their compiled-in endpoints and
+// behaviour, an explicit "protocol" wins everywhere, and a name that says
+// anthropic or claude is spoken to in the Messages format.
 func NewProviderClient(provider, model string, settings config.ProviderSetting) ChatClient {
-	var client *OpenAICompatibleClient
-	switch provider {
-	case "glm":
-		client = NewGLMClient(settings.APIKey, model)
-	case "deepseek":
-		client = NewDeepSeekClient(settings.APIKey, model)
-	case "kimi":
-		client = NewKimiClient(settings.APIKey, model)
-	case "openai_compatiable":
-		client = NewOpenAICompatibleClient(provider, settings.APIKey, model, settings.BaseURL)
-	default:
-		client = NewOpenAICompatibleClient(provider, settings.APIKey, model, settings.BaseURL)
+	protocol := config.ResolveProtocol(provider, settings)
+	// A built-in provider with a compiled-in endpoint keeps its own client, so
+	// its request quirks (HTTP/2, endpoint selection, per-model fields) stay
+	// intact. An explicit protocol or an explicit baseUrl overrides that: the
+	// user asked for a different endpoint, and the quirks travel with the
+	// provider name rather than with the constructor.
+	explicit := strings.TrimSpace(settings.Protocol) != "" || strings.TrimSpace(settings.BaseURL) != ""
+	if !explicit {
+		switch provider {
+		case "glm":
+			return withCapability(NewGLMClient(settings.APIKey, model), settings, model)
+		case "deepseek":
+			return withCapability(NewDeepSeekClient(settings.APIKey, model), settings, model)
+		case "kimi":
+			return withCapability(NewKimiClient(settings.APIKey, model), settings, model)
+		}
 	}
+	switch protocol {
+	case config.ProtocolAnthropic:
+		return withCapability(NewAnthropicClient(provider, settings.APIKey, model, settings.BaseURL), settings, model)
+	case config.ProtocolOpenAIResponses:
+		return withCapability(NewOpenAIResponsesClient(provider, settings.APIKey, model, settings.BaseURL), settings, model)
+	default:
+		return withCapability(NewOpenAICompatibleClient(provider, settings.APIKey, model, settings.BaseURL), settings, model)
+	}
+}
+
+// withCapability applies the declared context window and output limit to a
+// client that supports them.
+func withCapability(client ChatClient, settings config.ProviderSetting, model string) ChatClient {
 	capability := settings.ModelCapabilities[model]
-	client.SetModelCapability(capability.ContextWindow, capability.MaxOutputTokens)
+	if capability.ContextWindow == 0 && capability.MaxOutputTokens == 0 {
+		return client
+	}
+	if configurable, ok := client.(interface {
+		SetModelCapability(contextWindow, maxOutputTokens int)
+	}); ok {
+		configurable.SetModelCapability(capability.ContextWindow, capability.MaxOutputTokens)
+	}
 	return client
 }
 
@@ -297,7 +330,15 @@ func (c *SwitchableClient) find(provider, model string) (ModelOption, error) {
 	return ModelOption{}, errors.New("unknown model: " + provider + "/" + model)
 }
 
+// supportedModels returns the models to offer for a provider.
+//
+// An explicitly declared list always wins, for built-in providers too: it is the
+// user's statement of what their key can reach, and the compiled-in table is
+// only a fallback for entries that do not say.
 func supportedModels(provider string, settings config.ProviderSetting) []string {
+	if len(settings.Models) > 0 {
+		return settings.Models
+	}
 	switch provider {
 	case "glm":
 		return GLMModels
@@ -305,10 +346,21 @@ func supportedModels(provider string, settings config.ProviderSetting) []string 
 		return DeepSeekModels
 	case "kimi":
 		return KimiModels
-	case "openai_compatiable":
-		return settings.Models
 	default:
 		return nil
+	}
+}
+
+// providerHasEndpoint reports whether a provider can be reached without an
+// explicit baseUrl. The built-in providers carry compiled-in endpoints; every
+// other provider must name one, because guessing an endpoint would send the API
+// key to a host the user never chose.
+func providerHasEndpoint(provider string) bool {
+	switch provider {
+	case "glm", "deepseek", "kimi":
+		return true
+	default:
+		return false
 	}
 }
 
