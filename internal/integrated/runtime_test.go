@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"bruce-go/internal/agent"
+	"bruce-go/internal/approval"
 	"bruce-go/internal/config"
 	"bruce-go/internal/event"
 	"bruce-go/internal/llm"
@@ -1159,4 +1160,35 @@ func cleanupRuntime(t *testing.T, runtime *Runtime) {
 			t.Errorf("close runtime: %v", err)
 		}
 	})
+}
+
+// TestSetHITLReachesMinimalAgent is the regression for HITL silently doing
+// nothing in a session that starts directly in minimal mode.
+//
+// integrated.New builds the minimal agent before the TUI installs its handler.
+// Subset copies the handler by value, so replacing it on r.Tools alone left
+// the minimal registry holding the original, disabled AutoHandler. SetHITL
+// rebuilds the agents, so every subset now sees the installed handler.
+func TestSetHITLReachesMinimalAgent(t *testing.T) {
+	workspace := t.TempDir()
+	client := &agent.FakeClient{Responses: []llm.ChatResponse{{Content: "done"}}}
+	rt, err := New(context.Background(), Options{Workspace: workspace, HomeDir: t.TempDir(), Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupRuntime(t, rt)
+
+	handler := &recordingApproval{result: approval.Reject("denied by the minimal-mode test")}
+	rt.SetHITL(handler)
+
+	out := rt.minimal.Tools.Execute(context.Background(), "write_file", map[string]any{"path": "a.txt", "content": "x"})
+	if !strings.Contains(out, "[HITL] Operation was rejected") {
+		t.Fatalf("minimal agent bypassed HITL: %q", out)
+	}
+	if handler.requests != 1 {
+		t.Fatalf("HITL requests = %d, want 1", handler.requests)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "a.txt")); !os.IsNotExist(err) {
+		t.Fatalf("rejected write still created the file, err=%v", err)
+	}
 }

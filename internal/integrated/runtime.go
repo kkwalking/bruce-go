@@ -1332,6 +1332,20 @@ func (r *Runtime) refreshMCPTools() {
 	sort.Strings(r.mcpToolNames)
 }
 
+// SetHITL installs the approval handler for the whole runtime.
+//
+// The agents do not all execute through r.Tools: the minimal agent runs on a
+// Subset, and Subset copies the handler by value. Assigning r.Tools.WithHITL
+// alone therefore leaves that copy pointing at the old handler, which showed
+// up as HITL silently doing nothing when a session was resumed directly into
+// minimal mode. Rebuilding the agents after the swap makes every subset see
+// the new handler.
+func (r *Runtime) SetHITL(handler approval.Handler) {
+	r.HITL = handler
+	r.Tools.WithHITL(handler)
+	r.rebuildAgents()
+}
+
 func (r *Runtime) rebuildAgents() {
 	additional := "Current working directory: " + r.Workspace
 	if catalog := strings.TrimSpace(r.Skills.CatalogPrompt()); catalog != "" {

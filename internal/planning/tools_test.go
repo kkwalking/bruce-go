@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"bruce-go/internal/approval"
 	"bruce-go/internal/runtime"
 	"bruce-go/internal/tool"
 )
@@ -85,5 +86,59 @@ func TestCheckReadOnlyCommand(t *testing.T) {
 		if got := CheckReadOnlyCommand(command); got.Allowed {
 			t.Fatalf("command should be rejected %q", command)
 		}
+	}
+}
+
+// countingApproval is a HITL handler that refuses every request and records
+// how often it was consulted.
+type countingApproval struct {
+	requests int
+}
+
+func (*countingApproval) Enabled() bool     { return true }
+func (*countingApproval) SetEnabled(bool)   {}
+func (*countingApproval) ClearApprovedAll() {}
+func (h *countingApproval) Request(context.Context, approval.Request) (approval.Result, error) {
+	h.requests++
+	return approval.Reject("denied by the plan-mode test"), nil
+}
+
+// TestPlanRegistryInheritsHITLForCopiedTools is the regression for a HITL
+// bypass: NewToolRegistry used to build an EmptyRegistry and copy the web
+// tools into it, which dropped the parent's approval handler. web_search and
+// web_fetch declare a network capability, so NeedsApproval is true outside
+// plan mode, but inside plan mode they ran without ever asking.
+func TestPlanRegistryInheritsHITLForCopiedTools(t *testing.T) {
+	workspace := t.TempDir()
+	base := tool.EmptyRegistry(workspace)
+	executed := 0
+	base.Register(tool.Tool{
+		Name:       "web_fetch",
+		Parameters: rawSchema(param{"url", "string", "URL", true}),
+		Policy: tool.Policy{
+			Source:     tool.SourceWeb,
+			Capability: tool.Capability{Network: true},
+			Risk:       tool.RiskLow, ApprovalReason: "Performs a network request",
+		},
+		Exec: func(context.Context, tool.Args) (string, error) {
+			executed++
+			return "fetched", nil
+		},
+	})
+	handler := &countingApproval{}
+	base.WithHITL(handler)
+
+	registry := NewToolRegistry(base, NewStore(t.TempDir(), nil), func() runtime.PlanState {
+		return runtime.PlanState{}
+	})
+	out := registry.Execute(context.Background(), "web_fetch", tool.Args{"url": "https://example.com"})
+	if !strings.Contains(out, "[HITL] Operation was rejected") {
+		t.Fatalf("plan-mode web_fetch did not go through HITL: %q", out)
+	}
+	if handler.requests != 1 {
+		t.Fatalf("HITL requests = %d, want 1", handler.requests)
+	}
+	if executed != 0 {
+		t.Fatalf("web_fetch ran despite rejection, calls = %d", executed)
 	}
 }

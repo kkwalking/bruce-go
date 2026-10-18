@@ -14,13 +14,16 @@ import (
 
 type ActivePlanFunc func() runtime.PlanState
 
+// NewToolRegistry builds the plan-mode tool set.
+//
+// It must be a Subset, not a fresh EmptyRegistry with copied tools: the plan
+// tools are executed through this registry, and only Subset carries over the
+// parent's HITL handler, sandbox manager and interceptor. Copying tools into
+// an empty registry left web_search and web_fetch running with no approval at
+// all, even though their policies declare a network capability that
+// NeedsApproval turns into a prompt outside plan mode.
 func NewToolRegistry(base *tool.Registry, store *Store, active ActivePlanFunc) *tool.Registry {
-	registry := tool.EmptyRegistry(base.WorkspaceRoot())
-	for _, name := range []string{"read_file", "web_search", "web_fetch"} {
-		if copied, ok := base.Lookup(name); ok {
-			registry.Register(copied)
-		}
-	}
+	registry := base.Subset("read_file", "web_search", "web_fetch")
 	registry.Register(tool.Tool{
 		Name:          "execute_command",
 		Description:   "Run a read-only shell command for exploration in plan mode. Only a conservative allowlist is permitted, including ls, pwd, find, rg, grep, sed -n, head, tail, cat, and git status/log/show/diff",
