@@ -611,7 +611,7 @@ func TestMessageWindowUsesScrollOffsetAndClamps(t *testing.T) {
 func TestApprovalDialogCompletesFromKeyInput(t *testing.T) {
 	model := NewModel(context.Background(), testRuntime(t))
 	reply := make(chan approval.Result, 1)
-	model.Update(approvalRequestMsg{Request: approval.NewRequest("write_file", `{"path":"a.txt"}`, ""), Reply: reply})
+	model.Update(approvalRequestMsg{Request: approval.NewRequest("write_file", `{"path":"a.txt"}`, "medium risk", "Writes or overwrites file content"), Reply: reply})
 	if model.approval == nil {
 		t.Fatal("approval dialog not opened")
 	}
@@ -625,7 +625,7 @@ func TestApprovalDialogCompletesFromKeyInput(t *testing.T) {
 func TestApprovalCancellationClearsMatchingDialogOnly(t *testing.T) {
 	model := NewModel(context.Background(), testRuntime(t))
 	firstReply := make(chan approval.Result, 1)
-	model.Update(approvalRequestMsg{ID: 1, Request: approval.NewRequest("write_file", `{"path":"a.txt"}`, ""), Reply: firstReply})
+	model.Update(approvalRequestMsg{ID: 1, Request: approval.NewRequest("write_file", `{"path":"a.txt"}`, "medium risk", "Writes or overwrites file content"), Reply: firstReply})
 	model.Update(approvalCanceledMsg{ID: 2})
 	if model.approval == nil || model.approval.id != 1 {
 		t.Fatalf("unrelated cancellation cleared approval: %+v", model.approval)
@@ -699,7 +699,7 @@ func TestTUIApprovalHandlerSerializesRequestsAndApproveAll(t *testing.T) {
 	for _, name := range []string{"write_file", "execute_command"} {
 		name := name
 		go func() {
-			result, err := handler.Request(context.Background(), approval.NewRequest(name, `{}`, ""))
+			result, err := handler.Request(context.Background(), approval.NewRequest(name, `{}`, "medium risk", "test request"))
 			results <- approvalRequestResult{result: result, err: err}
 		}()
 	}
@@ -741,7 +741,7 @@ func TestTUIApprovalHandlerCancellationReleasesGate(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := handler.Request(ctx, approval.NewRequest("write_file", `{}`, ""))
+		_, err := handler.Request(ctx, approval.NewRequest("write_file", `{}`, "medium risk", "Writes or overwrites file content"))
 		done <- err
 	}()
 	select {
@@ -771,7 +771,7 @@ func TestTUIApprovalHandlerCancellationReleasesGate(t *testing.T) {
 	}
 	secondDone := make(chan approvalRequestResult, 1)
 	go func() {
-		result, err := handler.Request(context.Background(), approval.NewRequest("write_file", `{}`, ""))
+		result, err := handler.Request(context.Background(), approval.NewRequest("write_file", `{}`, "medium risk", "Writes or overwrites file content"))
 		secondDone <- approvalRequestResult{result: result, err: err}
 	}()
 	var secondRequest approvalRequestMsg
@@ -1355,5 +1355,24 @@ func TestCompletesModelReasoningSubcommand(t *testing.T) {
 	values3 := completionValues(completeModel("/model reasoning hi", rt))
 	if !contains(values3, "high") || contains(values3, "low") {
 		t.Fatalf("expected only high, got: %v", values3)
+	}
+}
+
+// TestApprovalLinesShowPolicyRisk guards the prompt content: the level and
+// risk text came from the tool's declared policy, and a policy without a Risk
+// used to render an empty "Level:" line.
+func TestApprovalLinesShowPolicyRisk(t *testing.T) {
+	model := NewModel(context.Background(), testRuntime(t))
+	model.approval = &approvalDialog{request: approval.NewRequest(
+		"plugin_tool", `{"path":"a.txt"}`, "unknown risk", "Writes a file through a plugin",
+	)}
+	lines := strings.Join(model.approvalLines(200), "\n")
+	for _, want := range []string{"Level: unknown risk", "Risk: Writes a file through a plugin"} {
+		if !strings.Contains(lines, want) {
+			t.Fatalf("approval prompt missing %q:\n%s", want, lines)
+		}
+	}
+	if strings.Contains(lines, "Suggestion:") {
+		t.Fatalf("approval prompt still renders the removed Suggestion field:\n%s", lines)
 	}
 }
