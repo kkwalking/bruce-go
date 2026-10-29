@@ -142,3 +142,40 @@ func TestPlanRegistryInheritsHITLForCopiedTools(t *testing.T) {
 		t.Fatalf("web_fetch ran despite rejection, calls = %d", executed)
 	}
 }
+
+type countingInterceptor struct {
+	before int
+	after  int
+}
+
+func (i *countingInterceptor) BeforeTool(_ context.Context, _ string, args tool.Args) (tool.Args, error) {
+	i.before++
+	return args, nil
+}
+
+func (i *countingInterceptor) AfterTool(_ context.Context, _ string, _ tool.Args, outcome tool.ExecutionOutcome) (tool.ExecutionOutcome, error) {
+	i.after++
+	return outcome, nil
+}
+
+// TestPlanExecuteCommandInvokesInterceptorOnce guards against a regression
+// introduced when plan mode switched to base.Subset: Subset copies the
+// interceptor, and plan execute_command delegates back to base, so the same
+// model tool call would run tool.before/tool.after twice.
+func TestPlanExecuteCommandInvokesInterceptorOnce(t *testing.T) {
+	workspace := t.TempDir()
+	base := tool.NewRegistry(workspace)
+	interceptor := &countingInterceptor{}
+	base.WithInterceptor(interceptor)
+	registry := NewToolRegistry(base, NewStore(t.TempDir(), nil), func() runtime.PlanState {
+		return runtime.PlanState{}
+	})
+
+	out := registry.Execute(context.Background(), "execute_command", tool.Args{"command": "pwd"})
+	if !strings.Contains(out, workspace) {
+		t.Fatalf("pwd output = %q, want workspace %q", out, workspace)
+	}
+	if interceptor.before != 1 || interceptor.after != 1 {
+		t.Fatalf("interceptor calls before=%d after=%d, want 1/1", interceptor.before, interceptor.after)
+	}
+}

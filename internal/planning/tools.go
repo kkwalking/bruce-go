@@ -24,6 +24,12 @@ type ActivePlanFunc func() runtime.PlanState
 // NeedsApproval turns into a prompt outside plan mode.
 func NewToolRegistry(base *tool.Registry, store *Store, active ActivePlanFunc) *tool.Registry {
 	registry := base.Subset("read_file", "web_search", "web_fetch")
+	// Subset also copies the interceptor. execute_command below delegates back
+	// to base, which runs the interceptor itself; keeping the copy here would
+	// invoke tool.before/tool.after twice for one model tool call. The other
+	// plan tools never ran hooks before, so dropping the copy restores that
+	// behavior as well.
+	registry.WithInterceptor(nil)
 	registry.Register(tool.Tool{
 		Name:          "execute_command",
 		Description:   "Run a read-only shell command for exploration in plan mode. Only a conservative allowlist is permitted, including ls, pwd, find, rg, grep, sed -n, head, tail, cat, and git status/log/show/diff",
