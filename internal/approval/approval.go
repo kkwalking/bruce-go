@@ -2,11 +2,8 @@ package approval
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"sync"
-
-	"github.com/mattn/go-runewidth"
 )
 
 type Decision string
@@ -86,137 +83,25 @@ func (h *AutoHandler) Request(ctx context.Context, _ Request) (Result, error) {
 	return h.result, nil
 }
 
+// Request describes one invocation waiting for human approval.
+//
+// Every field is supplied by the caller that holds the tool's declared
+// policy. Nothing here is derived from the tool name: since plugins exist, a
+// tool chooses its own name, so the name cannot be trusted to describe risk.
 type Request struct {
 	ToolName        string
 	Arguments       string
 	DangerLevel     string
 	RiskDescription string
-	Suggestion      string
 }
 
-// NewRequest builds an approval request from a tool name alone.
-//
-// Callers that hold the tool's declared Policy must set DangerLevel and
-// RiskDescription from it instead: since the plugin system exists, the tool
-// name is no longer a trustworthy source of risk information. This
-// constructor remains for callers that only have a name, and keeps its
-// historical behavior so nothing regresses.
-func NewRequest(toolName, args, suggestion string) Request {
+// NewRequest builds the request for a tool invocation, using the danger level
+// and reason the caller derived from the tool's declared policy.
+func NewRequest(toolName, args, dangerLevel, riskDescription string) Request {
 	return Request{
 		ToolName:        toolName,
 		Arguments:       args,
-		DangerLevel:     DangerLevel(toolName),
-		RiskDescription: RiskDescription(toolName),
-		Suggestion:      suggestion,
+		DangerLevel:     dangerLevel,
+		RiskDescription: riskDescription,
 	}
-}
-
-func RequiresApproval(toolName string) bool {
-	switch toolName {
-	case "edit_file", "write_file", "execute_command", "create_project":
-		return true
-	default:
-		return strings.HasPrefix(toolName, "mcp_") || strings.HasPrefix(toolName, "mcp__")
-	}
-}
-
-func DangerLevel(toolName string) string {
-	if strings.HasPrefix(toolName, "mcp_") || strings.HasPrefix(toolName, "mcp__") {
-		return "medium risk"
-	}
-	switch toolName {
-	case "execute_command":
-		return "high risk"
-	case "edit_file", "write_file", "create_project":
-		return "medium risk"
-	default:
-		return "safe"
-	}
-}
-
-func RiskDescription(toolName string) string {
-	if strings.HasPrefix(toolName, "mcp_") || strings.HasPrefix(toolName, "mcp__") {
-		return "Calls a third-party MCP tool that may access local or remote resources"
-	}
-	switch toolName {
-	case "execute_command":
-		return "Executes a shell command that may modify files, install software, or affect system state"
-	case "edit_file":
-		return "Modifies matching text in a file"
-	case "write_file":
-		return "Writes or overwrites file content"
-	case "create_project":
-		return "Creates new directories and files on disk"
-	default:
-		return "Safe read-only operation"
-	}
-}
-
-func (r Request) DisplayText() string {
-	args := formatArgs(r.Arguments)
-	lines := []string{
-		"Approval required",
-		"Tool: " + r.ToolName,
-		"Level: " + r.DangerLevel,
-		"Risk: " + r.RiskDescription,
-		"Arguments:",
-	}
-	lines = append(lines, args...)
-	width := 58
-	var out strings.Builder
-	out.WriteString("+" + strings.Repeat("-", width) + "+\n")
-	for _, line := range lines {
-		for _, wrapped := range wrap(line, width) {
-			out.WriteString("|" + padRight(wrapped, width) + "|\n")
-		}
-	}
-	out.WriteString("+" + strings.Repeat("-", width) + "+")
-	return out.String()
-}
-
-func formatArgs(raw string) []string {
-	if strings.TrimSpace(raw) == "" {
-		return []string{"  (empty)"}
-	}
-	var data map[string]any
-	if json.Unmarshal([]byte(raw), &data) == nil {
-		lines := make([]string, 0, len(data))
-		for k, v := range data {
-			b, _ := json.Marshal(v)
-			lines = append(lines, "  "+k+": "+string(b))
-		}
-		return lines
-	}
-	return []string{"  " + raw}
-}
-
-func wrap(text string, width int) []string {
-	if runewidth.StringWidth(text) <= width {
-		return []string{text}
-	}
-	var lines []string
-	var cur strings.Builder
-	curWidth := 0
-	for _, r := range text {
-		w := runewidth.RuneWidth(r)
-		if curWidth+w > width && cur.Len() > 0 {
-			lines = append(lines, cur.String())
-			cur.Reset()
-			curWidth = 0
-		}
-		cur.WriteRune(r)
-		curWidth += w
-	}
-	if cur.Len() > 0 {
-		lines = append(lines, cur.String())
-	}
-	return lines
-}
-
-func padRight(text string, width int) string {
-	pad := width - runewidth.StringWidth(text)
-	if pad <= 0 {
-		return text
-	}
-	return text + strings.Repeat(" ", pad)
 }

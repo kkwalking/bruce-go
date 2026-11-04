@@ -115,13 +115,6 @@ type Policy struct {
 	Timeout time.Duration
 }
 
-// EffectiveNetwork reports whether the tool needs network access, accepting
-// either spelling so that MCP registration and capability metadata cannot
-// disagree.
-func (p Policy) EffectiveNetwork() bool {
-	return p.RequiresNetwork || p.Capability.Network
-}
-
 // NeedsApproval decides whether an invocation requires human approval.
 //
 // The declared flag wins when set. When it is not set, a tool that declares a
@@ -135,6 +128,10 @@ func (p Policy) NeedsApproval() bool {
 }
 
 // DangerText renders the approval prompt's danger level.
+//
+// An unset Risk still has to render something: this text appears in the
+// approval dialog, and an empty level reads as "nothing to see here" for a
+// tool that is asking for approval precisely because it does something.
 func (p Policy) DangerText() string {
 	switch p.Risk {
 	case RiskHigh:
@@ -146,7 +143,7 @@ func (p Policy) DangerText() string {
 	case RiskSafe:
 		return "safe"
 	default:
-		return ""
+		return "unknown risk"
 	}
 }
 
@@ -554,9 +551,7 @@ func (r *Registry) prepare(ctx context.Context, name string, args Args, modeOver
 		if err != nil {
 			return preparedExecution{}, ExecutionOutcome{Output: "Tool argument parsing failed: " + err.Error(), Status: ToolCallFailed}, false
 		}
-		request := approval.NewRequest(name, raw, "")
-		request.DangerLevel = t.Policy.DangerText()
-		request.RiskDescription = t.Policy.ApprovalReason
+		request := approval.NewRequest(name, raw, t.Policy.DangerText(), t.Policy.ApprovalReason)
 		result, err := hitl.Request(ctx, request)
 		if err != nil {
 			return preparedExecution{}, contextOrFailureOutcome(name, "", err), false

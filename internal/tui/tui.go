@@ -100,7 +100,11 @@ type runtimeEventMsg struct {
 type approvalMode int
 
 const (
-	approvalChoose approvalMode = iota
+	// approvalChoose is the zero value: the dialog is showing the action
+	// choices. It stays as a blank identifier because the value is only ever
+	// used implicitly as the default, and removing it would renumber the
+	// remaining modes.
+	_ approvalMode = iota
 	approvalRejectReason
 	approvalModifyArgs
 )
@@ -273,8 +277,7 @@ func (m *Model) View() string {
 func Run(ctx context.Context, rt *integrated.Runtime) error {
 	handler := newTUIApprovalHandler()
 	if rt != nil {
-		rt.HITL = handler
-		rt.Tools.WithHITL(handler)
+		rt.SetHITL(handler)
 	}
 	model := NewModel(ctx, rt)
 	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
@@ -1377,9 +1380,6 @@ func (m *Model) approvalLines(width int) []string {
 		"Tool: " + request.ToolName,
 		"Level: " + request.DangerLevel,
 		"Risk: " + request.RiskDescription,
-	}
-	if strings.TrimSpace(request.Suggestion) != "" {
-		lines = append(lines, "Suggestion: "+strings.TrimSpace(request.Suggestion))
 	}
 	lines = append(lines, "Arguments: "+request.Arguments, "")
 	switch dialog.mode {
